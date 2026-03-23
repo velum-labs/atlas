@@ -1,0 +1,62 @@
+[project]
+name = "alma-atlas-workspace"
+version = "0.1.0"
+description = "Alma Atlas — open-source data stack discovery CLI + MCP server (workspace root)"
+readme = "README.md"
+requires-python = ">=3.12"
+
+[tool.uv.workspace]
+members = [
+    "packages/alma-ports",
+    "packages/alma-sqlkit",
+    "packages/alma-algebrakit",
+    "packages/alma-atlas-store",
+    "packages/alma-connectors",
+    "packages/alma-analysis",
+    "packages/alma-atlas",
+]
+
+[tool.uv.sources]
+alma-ports = { workspace = true }
+alma-sqlkit = { workspace = true }
+alma-algebrakit = { workspace = true }
+alma-atlas-store = { workspace = true }
+alma-connectors = { workspace = true }
+alma-analysis = { workspace = true }
+alma-atlas = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.9",
+    "ty>=0.0.1a6",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]  # line length handled by formatter
+
+[tool.ruff.lint.isort]
+known-first-party = [
+    "alma_ports",
+    "alma_sqlkit",
+    "alma_algebrakit",
+    "alma_atlas_store",
+    "alma_connectors",
+    "alma_analysis",
+    "alma_atlas",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["packages"]
+python_files = ["test_*.py", "*_test.py"]
