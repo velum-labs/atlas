@@ -2,16 +2,19 @@
 
 Orchestrates one full scan cycle for a registered source:
     1. Instantiate the appropriate SourceAdapter for the source kind.
-    2. Call ``list_assets`` to discover all tables / views / models.
-    3. Upsert each asset into the Atlas store.
-    4. Call ``get_traffic`` to collect recent query observations.
-    5. Hand observations to the stitch pipeline for edge derivation.
+    2. Build a PersistedSourceAdapter record from the source config.
+    3. Call ``introspect_schema`` to discover all tables / views / models.
+    4. Upsert each asset into the Atlas store.
+    5. Call ``observe_traffic`` to collect recent query observations.
+    6. Hand observations to the stitch pipeline for edge derivation.
 
 Returns a ``ScanResult`` summarising what was written.
 """
 
 from __future__ import annotations
 
+import asyncio
+import uuid
 from dataclasses import dataclass, field
 
 from alma_atlas.config import AtlasConfig, SourceConfig
@@ -42,67 +45,121 @@ def run_scan(source: SourceConfig, cfg: AtlasConfig) -> ScanResult:
     from alma_atlas_store.asset_repository import Asset, AssetRepository
     from alma_atlas_store.db import Database
 
-    adapter = _build_adapter(source)
+    try:
+        adapter, persisted = _build_adapter(source)
+    except (ValueError, ImportError) as exc:
+        return ScanResult(source_id=source.id, error=str(exc))
+
+    try:
+        snapshot = asyncio.run(adapter.introspect_schema(persisted))
+    except Exception as exc:
+        return ScanResult(source_id=source.id, error=f"Schema introspection failed: {exc}")
 
     with Database(cfg.db_path) as db:  # type: ignore[arg-type]
         repo = AssetRepository(db)
 
-        raw_assets = adapter.list_assets()
-        for raw in raw_assets:
+        for obj in snapshot.objects:
+            asset_id = f"{source.id}::{obj.schema_name}.{obj.object_name}"
             repo.upsert(
                 Asset(
-                    id=raw["id"],
+                    id=asset_id,
                     source=source.id,
-                    kind=raw.get("kind", "unknown"),
-                    name=raw.get("name", raw["id"]),
-                    description=raw.get("description"),
-                    tags=raw.get("tags", []),
-                    metadata={k: v for k, v in raw.items() if k not in {"id", "kind", "name", "description", "tags"}},
+                    kind=obj.object_kind.value,
+                    name=f"{obj.schema_name}.{obj.object_name}",
                 )
             )
 
-        traffic = adapter.get_traffic()
-        edge_count = stitch(traffic, db)
+        try:
+            traffic = asyncio.run(adapter.observe_traffic(persisted))
+        except Exception as exc:
+            return ScanResult(
+                source_id=source.id,
+                asset_count=len(snapshot.objects),
+                warnings=[f"Traffic observation failed: {exc}"],
+            )
+
+        edge_count = stitch(traffic, db, source_id=source.id, source_kind=source.kind)
 
     return ScanResult(
         source_id=source.id,
-        asset_count=len(raw_assets),
+        asset_count=len(snapshot.objects),
         edge_count=edge_count,
     )
 
 
-def _build_adapter(source: SourceConfig) -> object:
-    """Instantiate the correct SourceAdapter for a given source config.
+def _build_adapter(source: SourceConfig):  # type: ignore[return]
+    """Instantiate the correct SourceAdapter and a synthetic PersistedSourceAdapter.
+
+    Builds a minimal PersistedSourceAdapter from the source config so that the
+    CLI can drive the connector adapters without a full service layer.
 
     Args:
         source: Registered source configuration.
 
     Returns:
-        A SourceAdapter instance.
+        Tuple of (adapter_instance, persisted_adapter).
 
     Raises:
         ValueError: If the source kind is not recognised.
     """
+    import os
+
+    from alma_connectors.source_adapter import (
+        ExternalSecretRef,
+        PersistedSourceAdapter,
+        SourceAdapterStatus,
+    )
+
+    adapter_id = str(uuid.uuid5(uuid.NAMESPACE_URL, source.id))
+
+    def _resolve_env(secret: object) -> str:
+        ref = getattr(secret, "reference", None)
+        return os.environ.get(ref, "") if ref else ""
+
     kind = source.kind
 
     if kind == "bigquery":
-        from alma_connectors.bigquery import BigQueryAdapter
+        from alma_connectors.adapters.bigquery import BigQueryAdapter
+        from alma_connectors.source_adapter import BigQueryAdapterConfig, SourceAdapterKind
 
-        return BigQueryAdapter(**source.params)
+        config = BigQueryAdapterConfig(
+            service_account_secret=ExternalSecretRef(
+                provider="env",
+                reference=source.params.get("service_account_env", "BQ_SERVICE_ACCOUNT_JSON"),
+            ),
+            project_id=source.params["project_id"],
+            location=source.params.get("location", "us"),
+        )
+        persisted = PersistedSourceAdapter(
+            id=adapter_id,
+            key=source.id,
+            display_name=source.id,
+            kind=SourceAdapterKind.BIGQUERY,
+            target_id=source.id,
+            status=SourceAdapterStatus.READY,
+            config=config,
+        )
+        return BigQueryAdapter(resolve_secret=_resolve_env), persisted
 
     if kind == "postgres":
-        from alma_connectors.postgres import PostgresAdapter
+        from alma_connectors.adapters.postgres import PostgresAdapter
+        from alma_connectors.source_adapter import PostgresAdapterConfig, SourceAdapterKind
 
-        return PostgresAdapter(**source.params)
+        config = PostgresAdapterConfig(
+            database_secret=ExternalSecretRef(
+                provider="env",
+                reference=source.params.get("dsn_env", "PG_DATABASE_URL"),
+            ),
+        )
+        persisted = PersistedSourceAdapter(
+            id=adapter_id,
+            key=source.id,
+            display_name=source.id,
+            kind=SourceAdapterKind.POSTGRES,
+            target_id=source.id,
+            status=SourceAdapterStatus.READY,
+            config=config,
+        )
+        return PostgresAdapter(resolve_secret=_resolve_env), persisted
 
-    if kind == "snowflake":
-        from alma_connectors.snowflake import SnowflakeAdapter
-
-        return SnowflakeAdapter(**source.params)
-
-    if kind == "dbt":
-        from alma_connectors.dbt import DbtAdapter
-
-        return DbtAdapter(**source.params)
-
-    raise ValueError(f"Unknown source kind: {kind!r}. Supported: bigquery, postgres, snowflake, dbt")
+    raise ValueError(f"Unknown source kind: {kind!r}. Supported: bigquery, postgres")

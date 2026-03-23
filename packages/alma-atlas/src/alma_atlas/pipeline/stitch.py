@@ -3,7 +3,7 @@
 For each query observation in a TrafficObservationResult:
     1. Parse the SQL to extract referenced tables (via alma-sqlkit).
     2. Fingerprint the query (via alma-algebrakit).
-    3. For each referenced table, create an upstream → consumer edge.
+    3. For each referenced table, create an upstream -> consumer edge.
     4. Upsert query fingerprints and edges into the Atlas store.
 
 Returns the number of new or updated edges written.
@@ -14,15 +14,23 @@ from __future__ import annotations
 from alma_atlas_store.db import Database
 from alma_atlas_store.edge_repository import Edge, EdgeRepository
 from alma_atlas_store.query_repository import QueryObservation, QueryRepository
-from alma_connectors.domain import TrafficObservationResult
+from alma_connectors.source_adapter import TrafficObservationResult
 
 
-def stitch(traffic: TrafficObservationResult, db: Database) -> int:
+def stitch(
+    traffic: TrafficObservationResult,
+    db: Database,
+    *,
+    source_id: str = "",
+    source_kind: str = "",
+) -> int:
     """Derive and persist lineage edges from a set of query observations.
 
     Args:
-        traffic: Query observations returned by a source adapter.
-        db:      Open Atlas database connection.
+        traffic:     Query observations returned by a source adapter.
+        db:          Open Atlas database connection.
+        source_id:   Identifier for the source (used as consumer fallback).
+        source_kind: Dialect hint for SQL parsing (e.g. "bigquery", "postgres").
 
     Returns:
         Total number of edges written (new + updated).
@@ -34,24 +42,19 @@ def stitch(traffic: TrafficObservationResult, db: Database) -> int:
     edge_repo = EdgeRepository(db)
     query_repo = QueryRepository(db)
 
-    dialect_map: dict[str, Dialect] = {
-        "bigquery": Dialect.BIGQUERY,
-        "snowflake": Dialect.SNOWFLAKE,
-        "postgres": Dialect.POSTGRES,
-    }
-    dialect = dialect_map.get(traffic.source_type, Dialect.ANSI)
+    dialect = Dialect.from_name(source_kind) if source_kind else Dialect.postgres()
 
     edges_written = 0
 
-    for query in traffic.queries:
-        if not query.sql.strip():
+    for event in traffic.events:
+        if not event.sql.strip():
             continue
 
-        consumer_id = f"{traffic.source_id}::query::{query.user or 'unknown'}"
+        consumer_id = f"{source_id}::query::{event.database_user or 'unknown'}"
 
         try:
             derived: list[AnalysisEdge] = extract_edges(
-                sql=query.sql,
+                sql=event.sql,
                 consumer_id=consumer_id,
                 dialect=dialect,
             )
@@ -73,9 +76,9 @@ def stitch(traffic: TrafficObservationResult, db: Database) -> int:
             query_repo.upsert(
                 QueryObservation(
                     fingerprint=derived[0].query_fingerprint or "",
-                    sql_text=query.sql,
+                    sql_text=event.sql,
                     tables=tables,
-                    source=traffic.source_id,
+                    source=source_id,
                 )
             )
 

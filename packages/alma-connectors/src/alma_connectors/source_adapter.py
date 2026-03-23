@@ -73,6 +73,7 @@ class SourceAdapterKind(StrEnum):
 
     POSTGRES = "postgres"
     BIGQUERY = "bigquery"
+    DBT = "dbt"
 
 
 class SourceAdapterStatus(StrEnum):

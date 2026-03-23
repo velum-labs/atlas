@@ -1,6 +1,7 @@
 """Shared source adapter helpers for Alma Atlas."""
 
 from alma_connectors.adapters.bigquery import BigQueryAdapter
+from alma_connectors.adapters.dbt import DbtAdapter
 from alma_connectors.adapters.postgres import PostgresAdapter
 from alma_connectors.credentials import decrypt_credential, encrypt_credential
 from alma_connectors.edge_model import (
@@ -84,6 +85,7 @@ from alma_connectors.source_adapter_service import SourceAdapterService
 __all__ = [
     "BigQueryAdapter",
     "BigQueryAdapterConfig",
+    "DbtAdapter",
     "PostgresAdapter",
     "ConnectionTestResult",
     "ColumnParity",

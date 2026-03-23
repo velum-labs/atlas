@@ -1,7 +1,8 @@
 """Pytest configuration and fixtures for algebrakit tests."""
 
 import pytest
-from algebrakit import (
+
+from alma_algebrakit import (
     AtomicPredicate,
     ColumnRef,
     ComparisonOp,
@@ -9,7 +10,6 @@ from algebrakit import (
     JoinType,
     Relation,
 )
-
 from alma_algebrakit.schema import (
     Catalog,
     ColumnSchema,

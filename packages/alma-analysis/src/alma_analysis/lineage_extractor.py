@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 # module degrades gracefully in environments where the package is absent.
 
 try:
-    from algebrakit.models.algebra import (  # type: ignore[import-untyped]
+    from alma_algebrakit.models.algebra import (  # type: ignore[import-untyped]
         Aggregation,
         BinarySetOperationMixin,
         ColumnRef,

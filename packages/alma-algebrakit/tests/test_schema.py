@@ -1,6 +1,6 @@
 """Tests for algebrakit schema types."""
 
-from algebrakit import (
+from alma_algebrakit import (
     Attribute,
     Catalog,
     ColumnSchema,

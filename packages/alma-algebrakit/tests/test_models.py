@@ -1,6 +1,6 @@
 """Tests for algebrakit model types."""
 
-from algebrakit import (
+from alma_algebrakit import (
     AggregateFunction,
     AggregateSpec,
     Aggregation,

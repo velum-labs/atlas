@@ -38,8 +38,7 @@ def downstream(
 
 
 def _show_lineage(asset_id: str, direction: str, depth: int | None) -> None:
-    from alma_analysis.edges import Edge
-    from alma_analysis.lineage import compute_lineage
+    from alma_analysis.lineage import Edge, compute_lineage
     from alma_atlas.config import get_config
     from alma_atlas_store.db import Database
     from alma_atlas_store.edge_repository import EdgeRepository
