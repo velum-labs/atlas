@@ -265,9 +265,12 @@ def _handle_get_schema(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[Text
             return [TextContent(type="text", text="\n".join(lines))]
         return [TextContent(type="text", text=f"No schema snapshot found for {asset_id}.")]
 
-    columns = json.loads(snapshot.columns) if isinstance(snapshot.columns, str) else snapshot.columns
+    if isinstance(snapshot.columns, str):
+        col_list = json.loads(snapshot.columns)
+    else:
+        col_list = [vars(c) if hasattr(c, "__dict__") else c for c in snapshot.columns]
     lines = [f"Schema for {asset_id} (captured {snapshot.captured_at}):\n"]
-    for col in columns:
+    for col in col_list:
         name = col.get("name", "?")
         dtype = col.get("type", "unknown")
         nullable = "NULL" if col.get("nullable", True) else "NOT NULL"
