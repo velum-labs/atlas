@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import alma_algebrakit
-
 
 def test_algebrakit_exports_are_unique() -> None:
     exports = list(algebrakit.__all__)

@@ -1,7 +1,6 @@
 """Tests for the algebrakit.folding module."""
 
 import pytest
-
 from algebrakit import (
     AggregateFunction,
     AggregateSpec,
@@ -21,6 +20,7 @@ from algebrakit import (
     Selection,
     Union,
 )
+
 from alma_algebrakit.folding import (
     FoldCoverage,
     FoldingConfig,

@@ -1,7 +1,6 @@
 """Tests for algebrakit scope and resolution."""
 
 import pytest
-
 from algebrakit import (
     AmbiguousColumnError,
     ColumnSchema,

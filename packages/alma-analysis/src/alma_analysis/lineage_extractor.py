@@ -29,8 +29,9 @@ from dataclasses import dataclass
 from typing import Literal
 
 import sqlglot
-from alma_analysis.extract_tables import TableRef, extract_tables_from_sql
 from sqlglot import exp
+
+from alma_analysis.extract_tables import TableRef, extract_tables_from_sql
 
 logger = logging.getLogger(__name__)
 

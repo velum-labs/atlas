@@ -41,6 +41,10 @@ line-length = 120
 select = ["E", "F", "I", "UP", "B", "SIM"]
 ignore = ["E501"]  # line length handled by formatter
 
+[tool.ruff.lint.per-file-ignores]
+# learning/__init__.py uses TYPE_CHECKING imports with _ aliases for __getattr__ lazy loading
+"packages/alma-algebrakit/src/alma_algebrakit/learning/__init__.py" = ["F401"]
+
 [tool.ruff.lint.isort]
 known-first-party = [
     "alma_ports",
