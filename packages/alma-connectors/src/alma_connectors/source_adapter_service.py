@@ -90,14 +90,9 @@ class SourceAdapterService:
         if provider in {"env", "environment"}:
             resolved = os.getenv(secret.reference)
             if resolved is None:
-                raise ValueError(
-                    f"environment variable '{secret.reference}' is not configured"
-                    " for adapter secret"
-                )
+                raise ValueError(f"environment variable '{secret.reference}' is not configured for adapter secret")
             return resolved
-        raise ValueError(
-            f"external secret provider '{secret.provider}' is not supported for live resolution"
-        )
+        raise ValueError(f"external secret provider '{secret.provider}' is not supported for live resolution")
 
     def get_capabilities(self, adapter: PersistedSourceAdapter) -> SourceAdapterCapabilities:
         return self._registry[adapter.kind].capabilities
@@ -140,13 +135,8 @@ class SourceAdapterService:
             secrets = {
                 "database_secret": self._serialize_secret(config.database_secret),
             }
-            if (
-                config.read_replica is not None
-                and config.read_replica.database_secret is not None
-            ):
-                secrets["read_replica_database_secret"] = self._serialize_secret(
-                    config.read_replica.database_secret
-                )
+            if config.read_replica is not None and config.read_replica.database_secret is not None:
+                secrets["read_replica_database_secret"] = self._serialize_secret(config.read_replica.database_secret)
             return payload, secrets
 
         config = definition.config
@@ -204,14 +194,8 @@ class SourceAdapterService:
                         else None
                     ),
                     host=read_replica_data.get("host"),
-                    port=(
-                        int(read_replica_data["port"])
-                        if read_replica_data.get("port") is not None
-                        else None
-                    ),
-                    expected_lag_seconds=int(
-                        read_replica_data.get("expected_lag_seconds") or 0
-                    ),
+                    port=(int(read_replica_data["port"]) if read_replica_data.get("port") is not None else None),
+                    expected_lag_seconds=int(read_replica_data.get("expected_lag_seconds") or 0),
                 )
             adapter_config = PostgresAdapterConfig(
                 database_secret=self._secret_from_storage_payload(
@@ -237,11 +221,7 @@ class SourceAdapterService:
                     )
                 ),
                 log_capture=log_capture,
-                probe_target=(
-                    str(config["probe_target"])
-                    if config.get("probe_target") is not None
-                    else None
-                ),
+                probe_target=(str(config["probe_target"]) if config.get("probe_target") is not None else None),
                 read_replica=read_replica,
             )
         else:
@@ -257,11 +237,7 @@ class SourceAdapterService:
                 lookback_hours=int(config.get("lookback_hours") or 24),
                 max_job_rows=int(config.get("max_job_rows") or 10_000),
                 max_column_rows=int(config.get("max_column_rows") or 20_000),
-                probe_target=(
-                    str(config["probe_target"])
-                    if config.get("probe_target") is not None
-                    else None
-                ),
+                probe_target=(str(config["probe_target"]) if config.get("probe_target") is not None else None),
             )
 
         adapter = PersistedSourceAdapter(

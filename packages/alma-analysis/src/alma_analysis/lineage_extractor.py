@@ -332,9 +332,7 @@ def _column_edges_from_aggregation(
     for agg_spec in agg.aggregates:
         if agg_spec.argument is not None:
             refs = agg_spec.argument.referenced_columns()
-            edges.extend(
-                _edges_from_refs(refs, agg_spec.alias, alias_map, cte_names, single_table)
-            )
+            edges.extend(_edges_from_refs(refs, agg_spec.alias, alias_map, cte_names, single_table))
 
     return edges
 
@@ -405,9 +403,7 @@ def extract_lineage(sql: str, *, dialect: str = "postgres") -> LineageResult:
             extraction_method="column",
         )
     except Exception:
-        logger.debug(
-            "algebrakit column extraction failed, using table-level fallback: %.80s", sql
-        )
+        logger.debug("algebrakit column extraction failed, using table-level fallback: %.80s", sql)
         return LineageResult(
             source_tables=source_tables,
             target_table=target_table,

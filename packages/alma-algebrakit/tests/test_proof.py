@@ -708,9 +708,7 @@ class TestFourierMotzkinEdgeCases:
         result = checker_no_smt.check_implication(p1, p2)
         assert result.implies is True
 
-    def test_fm_two_variable_elimination(
-        self, checker_no_smt: PredicateImplicationChecker
-    ) -> None:
+    def test_fm_two_variable_elimination(self, checker_no_smt: PredicateImplicationChecker) -> None:
         """(x > 5 AND y > 10) should imply (x > 3) via FM elimination."""
         x_gt_5 = make_comparison("x", ">", 5)
         y_gt_10 = make_comparison("y", ">", 10)

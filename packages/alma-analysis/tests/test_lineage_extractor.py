@@ -66,9 +66,7 @@ def test_qualified_column_with_alias() -> None:
 
 def test_multi_join_qualified_columns() -> None:
     sql = (
-        "SELECT u.id, u.name, o.amount "
-        "FROM public.users u "
-        "JOIN public.orders o ON u.id = o.user_id"
+        "SELECT u.id, u.name, o.amount FROM public.users u JOIN public.orders o ON u.id = o.user_id"
     )
     result = extract_lineage(sql, dialect="postgres")
     assert set(_canonical_names(result)) == {"public.users", "public.orders"}
@@ -99,8 +97,7 @@ def test_unqualified_column_single_table() -> None:
 def test_unqualified_column_multi_table_skipped() -> None:
     # Ambiguous without a catalog — no edge produced, no crash
     sql = (
-        "SELECT id FROM public.users "
-        "JOIN public.orders ON public.users.id = public.orders.user_id"
+        "SELECT id FROM public.users JOIN public.orders ON public.users.id = public.orders.user_id"
     )
     result = extract_lineage(sql, dialect="postgres")
     # Source tables still present
@@ -125,20 +122,14 @@ def test_cte_base_tables_in_source_tables() -> None:
 
 
 def test_cte_names_recorded() -> None:
-    sql = (
-        "WITH foo AS (SELECT id FROM public.bar) "
-        "SELECT f.id FROM foo f"
-    )
+    sql = "WITH foo AS (SELECT id FROM public.bar) SELECT f.id FROM foo f"
     result = extract_lineage(sql, dialect="postgres")
     assert "foo" in result.cte_names
 
 
 def test_cte_column_refs_skipped() -> None:
     # Columns that reference a CTE alias should not produce edges
-    sql = (
-        "WITH active AS (SELECT u.id FROM public.users u) "
-        "SELECT a.id FROM active a"
-    )
+    sql = "WITH active AS (SELECT u.id FROM public.users u) SELECT a.id FROM active a"
     result = extract_lineage(sql, dialect="postgres")
     # 'active' is a CTE — its column refs must be skipped
     for edge in result.column_edges:
@@ -151,11 +142,7 @@ def test_cte_column_refs_skipped() -> None:
 
 
 def test_group_by_columns_have_edges() -> None:
-    sql = (
-        "SELECT o.user_id, SUM(o.amount) AS total "
-        "FROM public.orders o "
-        "GROUP BY o.user_id"
-    )
+    sql = "SELECT o.user_id, SUM(o.amount) AS total FROM public.orders o GROUP BY o.user_id"
     result = extract_lineage(sql, dialect="postgres")
     assert _edge("public.orders", "user_id", "user_id") in result.column_edges
     assert _edge("public.orders", "amount", "total") in result.column_edges
@@ -222,10 +209,7 @@ def test_empty_sql_returns_empty() -> None:
 def test_concat_expression_does_not_crash() -> None:
     # The postgres || operator (DPipe) falls back to a Literal in the RA parser,
     # producing no column edges for that expression — but the table ref is still correct.
-    sql = (
-        "SELECT u.first_name || ' ' || u.last_name AS full_name "
-        "FROM public.users u"
-    )
+    sql = "SELECT u.first_name || ' ' || u.last_name AS full_name FROM public.users u"
     result = extract_lineage(sql, dialect="postgres")
     assert _canonical_names(result) == ["public.users"]
     # No crash; column_edges may be empty for DPipe expressions (RA parser limitation)

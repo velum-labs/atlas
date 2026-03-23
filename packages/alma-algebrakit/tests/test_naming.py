@@ -1,6 +1,5 @@
 """Tests for algebrakit naming qualified and aliases modules."""
 
-
 from alma_algebrakit.naming.aliases import (
     effective_table_name,
     generate_column_alias,

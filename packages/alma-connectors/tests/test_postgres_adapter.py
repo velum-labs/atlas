@@ -213,9 +213,7 @@ def test_observe_traffic_pg_stat_statements_since_emits_warning(
     monkeypatch.setenv("APP_DB_DSN", "postgresql://localhost/test")
 
     with patch(_PSYCOPG_CONNECT, return_value=conn):
-        result = asyncio.run(
-            service.observe_traffic(adapter, since=datetime(2026, 1, 1, tzinfo=UTC))
-        )
+        result = asyncio.run(service.observe_traffic(adapter, since=datetime(2026, 1, 1, tzinfo=UTC)))
 
     assert len(result.errors) == 1
     assert "pg_stat_statements does not support time-based filtering" in result.errors[0]

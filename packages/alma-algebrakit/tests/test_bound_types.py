@@ -1,6 +1,5 @@
 """Tests for algebrakit bound types and fingerprint module."""
 
-
 from alma_algebrakit.bound.fingerprint import bound_expr_fingerprint, bound_predicate_fingerprint
 from alma_algebrakit.bound.types import (
     AttributeRef,

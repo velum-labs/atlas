@@ -48,6 +48,12 @@ target-version = "py312"
 select = ["E", "W", "F", "I", "B", "C4", "UP"]
 ignore = ["E501", "B008", "C901"]
 
+[tool.ruff.lint.per-file-ignores]
+# TYPE_CHECKING imports with _ aliases used in __getattr__ for lazy loading
+"src/alma_algebrakit/learning/__init__.py" = ["F401"]
+# Test file imports module dynamically via __import__
+"tests/test_public_exports.py" = ["F821"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = "test_*.py"

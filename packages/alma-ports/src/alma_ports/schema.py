@@ -41,9 +41,7 @@ class SchemaReader(Protocol):
         limit: int = 200,
     ) -> list[dict[str, Any]]: ...
 
-    def list_view_dependencies(
-        self, *, target_id: str | None = None
-    ) -> list[dict[str, Any]]: ...
+    def list_view_dependencies(self, *, target_id: str | None = None) -> list[dict[str, Any]]: ...
 
     def get_contracts_for_table(
         self,

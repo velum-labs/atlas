@@ -14,7 +14,13 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from alma_algebrakit.bound.types import AttributeRef, BoundLogical, BoundPredicate
+from alma_algebrakit.bound.types import (
+    AttributeRef,
+    BoundBetween,
+    BoundLiteral,
+    BoundLogical,
+    BoundPredicate,
+)
 from alma_algebrakit.proof.implication import ImplicationResult, PredicateImplicationChecker
 
 
@@ -268,7 +274,6 @@ class ContainmentChecker:
             BoundIn,
             BoundIsNull,
             BoundLike,
-            BoundLiteral,
             BoundLogical,
         )
 
@@ -877,7 +882,7 @@ class QueryGeneralizer:
 
         n_queries = len(pred_sets)
 
-        for col_key, pred_list in column_predicates.items():
+        for _col_key, pred_list in column_predicates.items():
             # Check if this column is constrained in all queries
             query_indices = {idx for _, idx in pred_list}
 
@@ -974,7 +979,7 @@ class QueryGeneralizer:
         - x < 10 and x < 5 → x < 10 (max of upper bounds)
         - x = 'a' and x = 'b' → None (incompatible)
         """
-        from alma_algebrakit.bound.types import BoundComparison, BoundLiteral
+        from alma_algebrakit.bound.types import BoundComparison
 
         if not comparisons:
             return None
@@ -1078,7 +1083,7 @@ class QueryGeneralizer:
 
         x BETWEEN 1 AND 10 and x BETWEEN 5 AND 15 → x BETWEEN 1 AND 15
         """
-        from alma_algebrakit.bound.types import BoundBetween, BoundLiteral
+        from alma_algebrakit.bound.types import BoundBetween
 
         if not betweens:
             return None

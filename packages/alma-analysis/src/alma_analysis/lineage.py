@@ -49,7 +49,9 @@ class LineageGraph:
         # In networkx: ancestors traverses reversed edges
         ancestors = nx.ancestors(self._graph, asset_id)
         if depth is not None:
-            ancestors = {n for n in ancestors if nx.shortest_path_length(self._graph, n, asset_id) <= depth}
+            ancestors = {
+                n for n in ancestors if nx.shortest_path_length(self._graph, n, asset_id) <= depth
+            }
         return sorted(ancestors)
 
     def downstream(self, asset_id: str, depth: int | None = None) -> list[str]:
@@ -66,7 +68,9 @@ class LineageGraph:
             return []
         descendants = nx.descendants(self._graph, asset_id)
         if depth is not None:
-            descendants = {n for n in descendants if nx.shortest_path_length(self._graph, asset_id, n) <= depth}
+            descendants = {
+                n for n in descendants if nx.shortest_path_length(self._graph, asset_id, n) <= depth
+            }
         return sorted(descendants)
 
     def has_asset(self, asset_id: str) -> bool:

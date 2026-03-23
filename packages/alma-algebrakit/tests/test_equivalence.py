@@ -1,6 +1,5 @@
 """Tests for algebrakit rewriting equivalence module."""
 
-
 from alma_algebrakit.models.algebra import (
     AtomicPredicate,
     ColumnRef,

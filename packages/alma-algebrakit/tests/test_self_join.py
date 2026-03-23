@@ -1,6 +1,5 @@
 """Tests for algebrakit folding self-join module."""
 
-
 from alma_algebrakit.folding.self_join import (
     analyze_self_joins,
     check_self_join_rewritable,

@@ -512,9 +512,7 @@ _SAMPLE_JOB_ROWS = [
         "user_email": "alice@example.com",
         "labels": {"dag_id": "etl", "task_id": "load"},
         "query": "SELECT * FROM analytics.events",
-        "referenced_tables": [
-            {"project_id": "acme-project", "dataset_id": "analytics", "table_id": "events"}
-        ],
+        "referenced_tables": [{"project_id": "acme-project", "dataset_id": "analytics", "table_id": "events"}],
     },
     {
         "job_id": "bq-job-002",
@@ -621,9 +619,7 @@ def test_observe_traffic_uses_since_parameter() -> None:
 def test_observe_traffic_uses_cursor_parameter_when_available() -> None:
     client = _FakeBigQueryClient(job_rows=_SAMPLE_JOB_ROWS)
     bq = _make_bq_adapter(client)
-    adapter = _make_adapter(
-        observation_cursor={"bq_creation_time": "2026-03-10T11:30:00+00:00"}
-    )
+    adapter = _make_adapter(observation_cursor={"bq_creation_time": "2026-03-10T11:30:00+00:00"})
 
     asyncio.run(bq.observe_traffic(adapter, since=datetime(2026, 3, 1, tzinfo=UTC)))
 
@@ -631,9 +627,7 @@ def test_observe_traffic_uses_cursor_parameter_when_available() -> None:
     assert "creation_time > @cursor" in jobs_query
     assert "@since" not in jobs_query
 
-    jobs_config = next(
-        c for c in client.job_configs_issued if hasattr(c, "query_parameters")
-    )
+    jobs_config = next(c for c in client.job_configs_issued if hasattr(c, "query_parameters"))
     cursor_param = next(p for p in jobs_config.query_parameters if p.name == "cursor")
     assert cursor_param.value == datetime(2026, 3, 10, 11, 30, tzinfo=UTC)
 
@@ -645,17 +639,13 @@ def test_observe_traffic_returns_cursor_for_latest_creation_time() -> None:
 
     result = asyncio.run(bq.observe_traffic(adapter))
 
-    assert result.observation_cursor == {
-        "bq_creation_time": "2026-03-10T13:00:00+00:00"
-    }
+    assert result.observation_cursor == {"bq_creation_time": "2026-03-10T13:00:00+00:00"}
 
 
 def test_observe_traffic_empty_result_does_not_advance_cursor() -> None:
     client = _FakeBigQueryClient(job_rows=[])
     bq = _make_bq_adapter(client)
-    adapter = _make_adapter(
-        observation_cursor={"bq_creation_time": "2026-03-10T11:30:00+00:00"}
-    )
+    adapter = _make_adapter(observation_cursor={"bq_creation_time": "2026-03-10T11:30:00+00:00"})
 
     result = asyncio.run(bq.observe_traffic(adapter))
 
@@ -675,8 +665,9 @@ def test_observe_traffic_since_clamped_to_180_days() -> None:
 
     # The TIMESTAMP parameter passed to BQ should be near the boundary
     jobs_config = next(
-        c for c in client.job_configs_issued if hasattr(c, "query_parameters")
-        and any(getattr(p, "name", None) == "since" for p in c.query_parameters)
+        c
+        for c in client.job_configs_issued
+        if hasattr(c, "query_parameters") and any(getattr(p, "name", None) == "since" for p in c.query_parameters)
     )
     since_param = next(p for p in jobs_config.query_parameters if p.name == "since")
     delta = abs((since_param.value - boundary).total_seconds())
@@ -734,9 +725,7 @@ def test_execute_query_dry_run() -> None:
     assert result.success is True
     assert result.row_count == 0
     # Verify dry_run=True was passed to job config
-    dry_run_config = next(
-        c for c in client.job_configs_issued if getattr(c, "dry_run", False)
-    )
+    dry_run_config = next(c for c in client.job_configs_issued if getattr(c, "dry_run", False))
     assert dry_run_config.dry_run is True
 
 
@@ -982,9 +971,7 @@ def test_observe_traffic_no_fallback_when_referenced_tables_present() -> None:
             "user_email": "bob@example.com",
             "labels": {},
             "query": "SELECT * FROM analytics.events",
-            "referenced_tables": [
-                {"project_id": "acme-project", "dataset_id": "analytics", "table_id": "events"}
-            ],
+            "referenced_tables": [{"project_id": "acme-project", "dataset_id": "analytics", "table_id": "events"}],
         }
     ]
     client = _FakeBigQueryClient(job_rows=rows)
@@ -1032,9 +1019,7 @@ def test_source_table_schema_size_bytes_must_be_non_negative() -> None:
 def test_source_table_schema_optional_fields_default() -> None:
     from alma_connectors import SchemaObjectKind, SourceTableSchema
 
-    obj = SourceTableSchema(
-        schema_name="ds", object_name="tbl", object_kind=SchemaObjectKind.TABLE
-    )
+    obj = SourceTableSchema(schema_name="ds", object_name="tbl", object_kind=SchemaObjectKind.TABLE)
     assert obj.row_count is None
     assert obj.size_bytes is None
     assert obj.partition_column is None

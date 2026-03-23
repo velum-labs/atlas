@@ -22,49 +22,53 @@ from sqlglot import exp
 
 logger = logging.getLogger(__name__)
 
-_SKIP_NAMES: frozenset[str] = frozenset({
-    "select",
-    "where",
-    "and",
-    "or",
-    "on",
-    "as",
-    "set",
-    "values",
-    "into",
-    "limit",
-    "order",
-    "group",
-    "having",
-    "case",
-    "when",
-    "then",
-    "else",
-    "end",
-    "not",
-    "null",
-    "true",
-    "false",
-    "is",
-    "in",
-    "between",
-    "like",
-    "exists",
-    "all",
-    "any",
-    "some",
-    "lateral",
-    "unnest",
-    "generate_series",
-    "dual",
-})
+_SKIP_NAMES: frozenset[str] = frozenset(
+    {
+        "select",
+        "where",
+        "and",
+        "or",
+        "on",
+        "as",
+        "set",
+        "values",
+        "into",
+        "limit",
+        "order",
+        "group",
+        "having",
+        "case",
+        "when",
+        "then",
+        "else",
+        "end",
+        "not",
+        "null",
+        "true",
+        "false",
+        "is",
+        "in",
+        "between",
+        "like",
+        "exists",
+        "all",
+        "any",
+        "some",
+        "lateral",
+        "unnest",
+        "generate_series",
+        "dual",
+    }
+)
 
-_SKIP_SCHEMAS: frozenset[str] = frozenset({
-    "information_schema",
-    "pg_catalog",
-    "pg_toast",
-    "pg_temp",
-})
+_SKIP_SCHEMAS: frozenset[str] = frozenset(
+    {
+        "information_schema",
+        "pg_catalog",
+        "pg_toast",
+        "pg_temp",
+    }
+)
 
 _TRANSACTION_STMTS: frozenset[str] = frozenset({"BEGIN", "COMMIT", "ROLLBACK"})
 
@@ -166,11 +170,7 @@ def _ast_extract_postgres(
         if not name:
             continue
         name_lower = name.lower()
-        if (
-            name_lower in _SKIP_NAMES
-            or name_lower in cte_aliases
-            or name_lower.startswith("_")
-        ):
+        if name_lower in _SKIP_NAMES or name_lower in cte_aliases or name_lower.startswith("_"):
             continue
         schema = (table_expr.db or "").lower() or default_schema
         if schema in _SKIP_SCHEMAS:
@@ -257,8 +257,11 @@ def extract_table_names(
     default_schema: str = "public",
 ) -> list[str]:
     """Convenience wrapper returning just canonical table names as strings."""
-    return [ref.canonical_name for ref in extract_tables_from_sql(
-        sql,
-        dialect=dialect,
-        default_schema=default_schema,
-    )]
+    return [
+        ref.canonical_name
+        for ref in extract_tables_from_sql(
+            sql,
+            dialect=dialect,
+            default_schema=default_schema,
+        )
+    ]

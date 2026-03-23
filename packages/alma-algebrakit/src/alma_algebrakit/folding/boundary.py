@@ -295,10 +295,7 @@ def _build_join_plan(
     # CTEs (e.g., WITH latest_snapshots AS (...)) appear as relation instances
     # but are not base tables — they're kept as-is in the rewritten query.
     cte_names = _extract_cte_names(original_ra) if original_ra else set()
-    truly_unreachable = {
-        r for r in unreachable
-        if r.physical_table.lower() not in cte_names
-    }
+    truly_unreachable = {r for r in unreachable if r.physical_table.lower() not in cte_names}
 
     if truly_unreachable and len(remaining) > 0:
         if len(remaining) == 1 and not joined_remaining:

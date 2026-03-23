@@ -14,6 +14,7 @@ from alma_algebrakit.bound.types import (
     BoundLiteral,
     BoundPredicate,
 )
+from alma_algebrakit.schema.catalog import TableSchema
 from alma_algebrakit.schema.types import DataType, SQLDataType
 from alma_algebrakit.scope.instance import RelationInstance
 from alma_algebrakit.scope.scope import Scope

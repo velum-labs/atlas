@@ -64,9 +64,7 @@ _POSTGRES_LOG_PREFIX_PATTERN = re.compile(
     r"db=(?P<database>[^,]*),user=(?P<user>[^,]*),app=(?P<app>[^,]*),client=(?P<client>\S+) "
     r"(?P<level>LOG|ERROR|STATEMENT):\s+(?P<body>.*)$"
 )
-_POSTGRES_DURATION_BODY_PATTERN = re.compile(
-    r"duration:\s+(?P<duration_ms>[0-9.]+)\s+ms\s+statement:\s+(?P<sql>.+)$"
-)
+_POSTGRES_DURATION_BODY_PATTERN = re.compile(r"duration:\s+(?P<duration_ms>[0-9.]+)\s+ms\s+statement:\s+(?P<sql>.+)$")
 _POSTGRES_LOG_TIMEZONE_OFFSETS = {
     "UTC": "+00:00",
     "GMT": "+00:00",
@@ -90,9 +88,7 @@ def _parse_postgres_log_timestamp(raw_value: str) -> datetime:
 
     if " " in normalized:
         candidate_body, candidate_timezone = normalized.rsplit(" ", 1)
-        if candidate_timezone.isalpha() or re.fullmatch(
-            r"[+-]\d{2}(?::?\d{2})?", candidate_timezone
-        ):
+        if candidate_timezone.isalpha() or re.fullmatch(r"[+-]\d{2}(?::?\d{2})?", candidate_timezone):
             timestamp_body = candidate_body
             timezone_suffix = candidate_timezone
 
@@ -101,9 +97,7 @@ def _parse_postgres_log_timestamp(raw_value: str) -> datetime:
         if timezone_suffix.isalpha():
             offset = _POSTGRES_LOG_TIMEZONE_OFFSETS.get(timezone_suffix.upper())
             if offset is None:
-                raise ValueError(
-                    f"unsupported postgres log timezone abbreviation: {timezone_suffix}"
-                )
+                raise ValueError(f"unsupported postgres log timezone abbreviation: {timezone_suffix}")
             normalized += offset
         elif re.fullmatch(r"[+-]\d{2}", timezone_suffix):
             normalized += f"{timezone_suffix}:00"
@@ -128,9 +122,7 @@ class PostgresAdapter(SourceAdapter):
         can_execute_query=True,
     )
 
-    def __init__(
-        self, *, resolve_secret: Callable[[ManagedSecret | ExternalSecretRef], str]
-    ) -> None:
+    def __init__(self, *, resolve_secret: Callable[[ManagedSecret | ExternalSecretRef], str]) -> None:
         self._resolve_secret = resolve_secret
 
     def _resolve_secret_value(self, secret: ManagedSecret | ExternalSecretRef) -> str:
@@ -155,9 +147,7 @@ class PostgresAdapter(SourceAdapter):
         config = self._get_config(adapter)
         replica = config.read_replica
         if replica is None:
-            raise ValueError(
-                f"adapter '{adapter.key}' does not define a read_replica configuration"
-            )
+            raise ValueError(f"adapter '{adapter.key}' does not define a read_replica configuration")
         base_dsn = (
             self._resolve_secret_value(replica.database_secret)
             if replica.database_secret is not None
@@ -330,11 +320,7 @@ class PostgresAdapter(SourceAdapter):
 
         with psycopg.connect(dsn, row_factory=dict_row) as conn:
             rows = list(conn.execute(schema_sql, params + params).fetchall())
-            dependency_rows = (
-                list(conn.execute(dependency_sql, include_schemas).fetchall())
-                if include_schemas
-                else []
-            )
+            dependency_rows = list(conn.execute(dependency_sql, include_schemas).fetchall()) if include_schemas else []
             stats_rows = list(conn.execute(stats_sql, stats_params).fetchall())
         row_count_by_object = {
             (str(row["schema_name"]), str(row["table_name"])): max(0, int(row["row_count"]))
@@ -342,9 +328,7 @@ class PostgresAdapter(SourceAdapter):
             if row.get("row_count") is not None
         }
 
-        grouped_columns: dict[tuple[str, str, SchemaObjectKind], list[SourceColumnSchema]] = (
-            defaultdict(list)
-        )
+        grouped_columns: dict[tuple[str, str, SchemaObjectKind], list[SourceColumnSchema]] = defaultdict(list)
         for row in rows:
             object_kind = SchemaObjectKind.TABLE
             table_type = str(row["table_type"]).upper()
@@ -439,11 +423,7 @@ class PostgresAdapter(SourceAdapter):
                 current_inode = None
 
             # Seek to the stored offset only when the inode matches (no rotation).
-            if (
-                cursor_inode is not None
-                and cursor_offset is not None
-                and current_inode == cursor_inode
-            ):
+            if cursor_inode is not None and cursor_offset is not None and current_inode == cursor_inode:
                 try:
                     handle.seek(cursor_offset)
                 except OSError:
@@ -547,15 +527,11 @@ class PostgresAdapter(SourceAdapter):
                     ObservedQueryEvent(
                         captured_at=_parse_postgres_log_timestamp(pending_error["timestamp"]),
                         sql=body,
-                        source_name=pending_error["app"].strip()
-                        or log_capture.default_source
-                        or adapter.key,
+                        source_name=pending_error["app"].strip() or log_capture.default_source or adapter.key,
                         query_type="error_statement",
                         event_id=event_id,
-                        database_name=pending_error["database"].strip()
-                        or log_capture.default_database_name,
-                        database_user=pending_error["user"].strip()
-                        or log_capture.default_database_user,
+                        database_name=pending_error["database"].strip() or log_capture.default_database_name,
+                        database_user=pending_error["user"].strip() or log_capture.default_database_user,
                         client_addr=client_addr,
                         statement_id=pid,
                         error_message=pending_error["error_message"],
@@ -706,10 +682,8 @@ class PostgresAdapter(SourceAdapter):
             ),
             steps=(
                 "Create a read-only PostgreSQL role for schema introspection and query validation.",
-                "Provide the connection DSN as a managed secret"
-                " or an environment-variable reference.",
-                "Configure include_schemas and exclude_schemas"
-                " to limit introspection scope (default: public).",
+                "Provide the connection DSN as a managed secret or an environment-variable reference.",
+                "Configure include_schemas and exclude_schemas to limit introspection scope (default: public).",
                 "For log-based traffic: set log_min_duration_statement=0 and"
                 " log_line_prefix='%m [%p] db=%d,user=%u,app=%a,client=%h '"
                 " in postgresql.conf, then set log_capture.log_path to the active log file.",

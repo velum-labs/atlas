@@ -64,9 +64,7 @@ def normalize_source_adapter_key(value: str) -> str:
     """Normalize a source-adapter key to the canonical persisted form."""
     normalized = value.strip().lower().replace(" ", "-")
     if not _KEY_PATTERN.fullmatch(normalized):
-        raise ValueError(
-            "source adapter key must match '^[a-z0-9][a-z0-9_-]*$' after normalization"
-        )
+        raise ValueError("source adapter key must match '^[a-z0-9][a-z0-9_-]*$' after normalization")
     return normalized
 
 
@@ -195,9 +193,7 @@ class PostgresReadReplicaConfig:
         if self.expected_lag_seconds < 0:
             raise ValueError("expected_lag_seconds must be >= 0")
         if self.database_secret is None and self.host is None and self.port is None:
-            raise ValueError(
-                "read_replica must provide at least one of database_secret, host, or port"
-            )
+            raise ValueError("read_replica must provide at least one of database_secret, host, or port")
 
 
 @dataclass(frozen=True)
@@ -225,9 +221,7 @@ class PostgresAdapterConfig:
         )
         if overlap:
             overlap_list = ", ".join(sorted(overlap))
-            raise ValueError(
-                "include_schemas and exclude_schemas overlap after normalization: " + overlap_list
-            )
+            raise ValueError("include_schemas and exclude_schemas overlap after normalization: " + overlap_list)
         object.__setattr__(self, "include_schemas", normalized_include)
         object.__setattr__(self, "exclude_schemas", normalized_exclude)
         object.__setattr__(
@@ -327,16 +321,8 @@ def apply_probe_routing_override(
     if isinstance(adapter.config, PostgresAdapterConfig):
         updated_config = replace(
             adapter.config,
-            probe_target=(
-                override.probe_target
-                if override.probe_target is not None
-                else adapter.config.probe_target
-            ),
-            read_replica=(
-                override.read_replica
-                if override.read_replica is not None
-                else adapter.config.read_replica
-            ),
+            probe_target=(override.probe_target if override.probe_target is not None else adapter.config.probe_target),
+            read_replica=(override.read_replica if override.read_replica is not None else adapter.config.read_replica),
         )
         return replace(adapter, config=updated_config)
 
@@ -344,11 +330,7 @@ def apply_probe_routing_override(
         raise ValueError("read_replica is only supported for postgres adapters")
     updated_config = replace(
         adapter.config,
-        probe_target=(
-            override.probe_target
-            if override.probe_target is not None
-            else adapter.config.probe_target
-        ),
+        probe_target=(override.probe_target if override.probe_target is not None else adapter.config.probe_target),
     )
     return replace(adapter, config=updated_config)
 

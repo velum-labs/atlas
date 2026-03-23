@@ -166,9 +166,7 @@ class TestIdentifyBqConsumer:
         assert identity.name == "backoffice"
 
     def test_user_email_fallback(self) -> None:
-        identity = identify_bq_consumer(
-            labels={}, user_email="analyst@example.com", job_id="job-6"
-        )
+        identity = identify_bq_consumer(labels={}, user_email="analyst@example.com", job_id="job-6")
         assert identity.name == "user:analyst@example.com"
         assert identity.type == "user"
         assert identity.confidence == 0.7

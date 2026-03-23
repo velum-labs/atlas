@@ -32,9 +32,7 @@ def _normalize_optional_string(value: str | None, *, field_name: str) -> str | N
     return normalized
 
 
-def _normalize_optional_datetime(
-    value: datetime | str | None, *, field_name: str
-) -> datetime | None:
+def _normalize_optional_datetime(value: datetime | str | None, *, field_name: str) -> datetime | None:
     if value is None:
         return None
     if isinstance(value, datetime):
@@ -43,9 +41,7 @@ def _normalize_optional_datetime(
         normalized = value.strip()
         if not normalized:
             raise ValueError(f"{field_name} must be a non-empty ISO-8601 string when provided")
-        normalized_iso = (
-            f"{normalized[:-1]}+00:00" if normalized.endswith(("Z", "z")) else normalized
-        )
+        normalized_iso = f"{normalized[:-1]}+00:00" if normalized.endswith(("Z", "z")) else normalized
         try:
             return datetime.fromisoformat(normalized_iso)
         except ValueError as error:
@@ -53,9 +49,7 @@ def _normalize_optional_datetime(
     raise ValueError(f"{field_name} must be a datetime or ISO-8601 string")
 
 
-def _normalize_optional_timedelta(
-    value: timedelta | float | int | None, *, field_name: str
-) -> timedelta | None:
+def _normalize_optional_timedelta(value: timedelta | float | int | None, *, field_name: str) -> timedelta | None:
     if value is None:
         return None
     if isinstance(value, timedelta):
@@ -348,9 +342,7 @@ class NullWarning:
             "column_name",
             _normalize_required_string(self.column_name, field_name="column_name"),
         )
-        object.__setattr__(
-            self, "issue", _normalize_required_string(self.issue, field_name="issue")
-        )
+        object.__setattr__(self, "issue", _normalize_required_string(self.issue, field_name="issue"))
 
 
 @dataclass(frozen=True)
@@ -382,9 +374,7 @@ class EdgeTransport:
             "select_mode",
             _normalize_optional_string(self.select_mode, field_name="select_mode"),
         )
-        object.__setattr__(
-            self, "metadata", _normalize_mapping(self.metadata, field_name="metadata")
-        )
+        object.__setattr__(self, "metadata", _normalize_mapping(self.metadata, field_name="metadata"))
 
 
 @dataclass(frozen=True)
@@ -580,9 +570,7 @@ class TransportGroup:
             "edge_ids",
             _normalize_uuid_tuple(self.edge_ids, field_name="edge_ids"),
         )
-        object.__setattr__(
-            self, "metadata", _normalize_mapping(self.metadata, field_name="metadata")
-        )
+        object.__setattr__(self, "metadata", _normalize_mapping(self.metadata, field_name="metadata"))
 
 
 @dataclass(frozen=True)
@@ -660,9 +648,7 @@ class ProbeState:
             "last_failure_at",
             _normalize_optional_datetime(self.last_failure_at, field_name="last_failure_at"),
         )
-        if isinstance(self.consecutive_failures, bool) or not isinstance(
-            self.consecutive_failures, int
-        ):
+        if isinstance(self.consecutive_failures, bool) or not isinstance(self.consecutive_failures, int):
             raise ValueError("consecutive_failures must be an integer")
         if self.consecutive_failures < 0:
             raise ValueError("consecutive_failures must be >= 0")
@@ -681,9 +667,7 @@ def data_edge_to_row_payload(edge: DataEdge) -> dict[str, object]:
         "confidence": edge.confidence,
         "status": edge.status.value,
         "transport_json": edge_transport_to_json(edge.transport),
-        "contract_json": edge_contract_to_json(edge.contract)
-        if edge.contract is not None
-        else None,
+        "contract_json": edge_contract_to_json(edge.contract) if edge.contract is not None else None,
         "created_at": edge.created_at,
         "updated_at": edge.updated_at,
     }
@@ -727,20 +711,14 @@ def edge_transport_from_json(value: object | None) -> EdgeTransport:
         kind=TransportKind(str(payload.get("kind", TransportKind.UNKNOWN.value))),
         schedule=payload.get("schedule") if isinstance(payload.get("schedule"), str) else None,
         strategy=CopyStrategy(str(payload.get("strategy", CopyStrategy.UNKNOWN.value))),
-        write_disposition=WriteDisposition(
-            str(payload.get("write_disposition", WriteDisposition.UNKNOWN.value))
-        ),
+        write_disposition=WriteDisposition(str(payload.get("write_disposition", WriteDisposition.UNKNOWN.value))),
         serialization_format=SerializationFormat(
             str(payload.get("serialization_format", SerializationFormat.UNKNOWN.value))
         ),
         watermark_column=(
-            payload.get("watermark_column")
-            if isinstance(payload.get("watermark_column"), str)
-            else None
+            payload.get("watermark_column") if isinstance(payload.get("watermark_column"), str) else None
         ),
-        select_mode=payload.get("select_mode")
-        if isinstance(payload.get("select_mode"), str)
-        else None,
+        select_mode=payload.get("select_mode") if isinstance(payload.get("select_mode"), str) else None,
         metadata=_normalize_mapping(payload.get("metadata"), field_name="metadata"),
     )
 
@@ -804,18 +782,12 @@ def edge_contract_from_json(value: object | None) -> EdgeContract | None:
             payload.get("observed_lag_seconds"),
             field_name="observed_lag",
         ),
-        analyzed_at=_normalize_optional_datetime(
-            payload.get("analyzed_at"), field_name="analyzed_at"
-        ),
+        analyzed_at=_normalize_optional_datetime(payload.get("analyzed_at"), field_name="analyzed_at"),
         schema_hash_source=(
-            payload.get("schema_hash_source")
-            if isinstance(payload.get("schema_hash_source"), str)
-            else None
+            payload.get("schema_hash_source") if isinstance(payload.get("schema_hash_source"), str) else None
         ),
         schema_hash_dest=(
-            payload.get("schema_hash_dest")
-            if isinstance(payload.get("schema_hash_dest"), str)
-            else None
+            payload.get("schema_hash_dest") if isinstance(payload.get("schema_hash_dest"), str) else None
         ),
     )
 

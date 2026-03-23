@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -42,9 +43,7 @@ def _get_bigquery_module() -> Any:
     try:
         from google.cloud import bigquery  # type: ignore[import-untyped]
     except ImportError as exc:
-        raise RuntimeError(
-            "google-cloud-bigquery is required for the BigQuery source adapter"
-        ) from exc
+        raise RuntimeError("google-cloud-bigquery is required for the BigQuery source adapter") from exc
     return bigquery
 
 
@@ -339,10 +338,7 @@ class BigQueryAdapter(SourceAdapter):
 
             return ConnectionTestResult(
                 success=True,
-                message=(
-                    f"Connected to project '{config.project_id}'."
-                    f" Found {dataset_count} dataset(s)."
-                ),
+                message=(f"Connected to project '{config.project_id}'. Found {dataset_count} dataset(s)."),
                 resource_count=dataset_count,
                 resource_label="datasets",
             )
@@ -434,10 +430,8 @@ class BigQueryAdapter(SourceAdapter):
 
             clustering_pos = row.get("clustering_ordinal_position")
             if clustering_pos is not None:
-                try:
+                with contextlib.suppress(TypeError, ValueError):
                     table_clustering[key][int(clustering_pos)] = column_name
-                except (TypeError, ValueError):
-                    pass
 
         # --- TABLE_STORAGE query (row counts + logical bytes) ---
         storage_lookup: dict[tuple[str, str], dict[str, int]] = {}
@@ -477,10 +471,7 @@ class BigQueryAdapter(SourceAdapter):
                 columns=tuple(cols),
                 partition_column=table_partition.get((schema_name, table_name)),
                 clustering_columns=tuple(
-                    col
-                    for _, col in sorted(
-                        table_clustering.get((schema_name, table_name), {}).items()
-                    )
+                    col for _, col in sorted(table_clustering.get((schema_name, table_name), {}).items())
                 ),
                 row_count=storage_lookup.get((schema_name, table_name), {}).get("row_count"),
                 size_bytes=storage_lookup.get((schema_name, table_name), {}).get("size_bytes"),
@@ -505,10 +496,7 @@ class BigQueryAdapter(SourceAdapter):
         project_id, sa_json = self._credentials(adapter)
         client = self._get_client(project_id, sa_json)
         bigquery = _get_bigquery_module()
-        jobs_view = (
-            f"`{config.project_id}`."
-            f"`region-{config.location}`.INFORMATION_SCHEMA.JOBS_BY_PROJECT"
-        )
+        jobs_view = f"`{config.project_id}`.`region-{config.location}`.INFORMATION_SCHEMA.JOBS_BY_PROJECT"
 
         cursor_creation_time = _cursor_creation_time(adapter)
         if cursor_creation_time is not None:

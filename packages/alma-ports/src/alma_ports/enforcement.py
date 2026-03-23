@@ -47,9 +47,7 @@ class EnforcementReader(Protocol):
         gate_type: str | None = None,
     ) -> list[dict[str, Any]]: ...
 
-    def get_pilot_readiness_summary(
-        self, *, target_id: str | None = None
-    ) -> dict[str, Any]: ...
+    def get_pilot_readiness_summary(self, *, target_id: str | None = None) -> dict[str, Any]: ...
 
 
 @runtime_checkable
