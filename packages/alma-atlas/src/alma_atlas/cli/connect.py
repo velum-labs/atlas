@@ -84,18 +84,44 @@ def connect_snowflake(
 
 @app.command("dbt")
 def connect_dbt(
-    manifest: Annotated[str, typer.Option("--manifest", "-m", help="Path to manifest.json.")],
+    manifest: Annotated[str | None, typer.Option("--manifest", "-m", help="Path to manifest.json.")] = None,
+    project_dir: Annotated[
+        str | None,
+        typer.Option("--project-dir", help="Path to dbt project directory (looks for target/manifest.json)."),
+    ] = None,
     project: Annotated[str | None, typer.Option("--project", help="dbt project name override.")] = None,
 ) -> None:
     """Register a dbt project source."""
+    from pathlib import Path
+
+    if project_dir is not None:
+        project_path = Path(project_dir).resolve()
+        if manifest is not None:
+            manifest_path = str(Path(manifest).resolve())
+        else:
+            target_manifest = project_path / "target" / "manifest.json"
+            root_manifest = project_path / "manifest.json"
+            if target_manifest.exists():
+                manifest_path = str(target_manifest)
+            elif root_manifest.exists():
+                manifest_path = str(root_manifest)
+            else:
+                rprint(f"[red]Error:[/red] No manifest.json found in {project_dir}/target/ or {project_dir}/")
+                raise typer.Exit(1)
+    elif manifest is not None:
+        manifest_path = str(Path(manifest).resolve())
+    else:
+        rprint("[red]Error:[/red] Provide --manifest or --project-dir")
+        raise typer.Exit(1)
+
     cfg = get_config()
     source = SourceConfig(
         id=f"dbt:{project or 'project'}",
         kind="dbt",
-        params={"manifest_path": manifest, **({"project_name": project} if project else {})},
+        params={"manifest_path": manifest_path, **({"project_name": project} if project else {})},
     )
     cfg.add_source(source)
-    rprint(f"[green]Connected:[/green] dbt project from [bold]{manifest}[/bold]")
+    rprint(f"[green]Connected:[/green] dbt project from [bold]{manifest_path}[/bold]")
 
 
 @app.command("list")

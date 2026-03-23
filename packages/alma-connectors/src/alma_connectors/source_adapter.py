@@ -266,7 +266,17 @@ class BigQueryAdapterConfig:
         )
 
 
-type SourceAdapterConfig = PostgresAdapterConfig | BigQueryAdapterConfig
+@dataclass(frozen=True)
+class DbtAdapterConfig:
+    """Canonical persisted config for dbt adapters."""
+
+    manifest_path: str
+    catalog_path: str | None = None
+    run_results_path: str | None = None
+    project_name: str | None = None
+
+
+type SourceAdapterConfig = PostgresAdapterConfig | BigQueryAdapterConfig | DbtAdapterConfig
 
 
 @dataclass(frozen=True)

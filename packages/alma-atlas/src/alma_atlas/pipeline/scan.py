@@ -58,6 +58,7 @@ def run_scan(source: SourceConfig, cfg: AtlasConfig) -> ScanResult:
     with Database(cfg.db_path) as db:  # type: ignore[arg-type]
         repo = AssetRepository(db)
 
+        asset_id_map: dict[tuple[str, str], str] = {}
         for obj in snapshot.objects:
             asset_id = f"{source.id}::{obj.schema_name}.{obj.object_name}"
             repo.upsert(
@@ -68,6 +69,26 @@ def run_scan(source: SourceConfig, cfg: AtlasConfig) -> ScanResult:
                     name=f"{obj.schema_name}.{obj.object_name}",
                 )
             )
+            asset_id_map[(obj.schema_name, obj.object_name)] = asset_id
+
+        # Persist schema-level dependency edges (e.g. from dbt manifest lineage).
+        dep_edge_count = 0
+        if snapshot.dependencies:
+            from alma_atlas_store.edge_repository import Edge, EdgeRepository
+
+            edge_repo = EdgeRepository(db)
+            for dep in snapshot.dependencies:
+                upstream_id = asset_id_map.get((dep.target_schema, dep.target_object))
+                downstream_id = asset_id_map.get((dep.source_schema, dep.source_object))
+                if upstream_id and downstream_id:
+                    edge_repo.upsert(
+                        Edge(
+                            upstream_id=upstream_id,
+                            downstream_id=downstream_id,
+                            kind="depends_on",
+                        )
+                    )
+                    dep_edge_count += 1
 
         try:
             traffic = asyncio.run(adapter.observe_traffic(persisted))
@@ -75,10 +96,11 @@ def run_scan(source: SourceConfig, cfg: AtlasConfig) -> ScanResult:
             return ScanResult(
                 source_id=source.id,
                 asset_count=len(snapshot.objects),
+                edge_count=dep_edge_count,
                 warnings=[f"Traffic observation failed: {exc}"],
             )
 
-        edge_count = stitch(traffic, db, source_id=source.id, source_kind=source.kind)
+        edge_count = stitch(traffic, db, source_id=source.id, source_kind=source.kind) + dep_edge_count
 
     return ScanResult(
         source_id=source.id,
@@ -111,6 +133,8 @@ def _build_adapter(source: SourceConfig):  # type: ignore[return]
     )
 
     adapter_id = str(uuid.uuid5(uuid.NAMESPACE_URL, source.id))
+    # PersistedSourceAdapter.key must match ^[a-z0-9][a-z0-9_-]*$ — sanitize colons.
+    adapter_key = source.id.replace(":", "-")
 
     def _resolve_env(secret: object) -> str:
         ref = getattr(secret, "reference", None)
@@ -132,7 +156,7 @@ def _build_adapter(source: SourceConfig):  # type: ignore[return]
         )
         persisted = PersistedSourceAdapter(
             id=adapter_id,
-            key=source.id,
+            key=adapter_key,
             display_name=source.id,
             kind=SourceAdapterKind.BIGQUERY,
             target_id=source.id,
@@ -153,7 +177,7 @@ def _build_adapter(source: SourceConfig):  # type: ignore[return]
         )
         persisted = PersistedSourceAdapter(
             id=adapter_id,
-            key=source.id,
+            key=adapter_key,
             display_name=source.id,
             kind=SourceAdapterKind.POSTGRES,
             target_id=source.id,
@@ -162,4 +186,34 @@ def _build_adapter(source: SourceConfig):  # type: ignore[return]
         )
         return PostgresAdapter(resolve_secret=_resolve_env), persisted
 
-    raise ValueError(f"Unknown source kind: {kind!r}. Supported: bigquery, postgres")
+    if kind == "dbt":
+        from alma_connectors.adapters.dbt import DbtAdapter
+        from alma_connectors.source_adapter import DbtAdapterConfig, SourceAdapterKind
+
+        manifest_path = source.params.get("manifest_path", "")
+        catalog_path = source.params.get("catalog_path")
+        run_results_path = source.params.get("run_results_path")
+        project_name = source.params.get("project_name")
+        config = DbtAdapterConfig(
+            manifest_path=manifest_path,
+            catalog_path=catalog_path,
+            run_results_path=run_results_path,
+            project_name=project_name,
+        )
+        persisted = PersistedSourceAdapter(
+            id=adapter_id,
+            key=adapter_key,
+            display_name=source.id,
+            kind=SourceAdapterKind.DBT,
+            target_id=source.id,
+            status=SourceAdapterStatus.READY,
+            config=config,
+        )
+        return DbtAdapter(
+            manifest_path=manifest_path,
+            catalog_path=catalog_path,
+            run_results_path=run_results_path,
+            project_name=project_name,
+        ), persisted
+
+    raise ValueError(f"Unknown source kind: {kind!r}. Supported: bigquery, dbt, postgres")
