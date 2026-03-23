@@ -4,20 +4,22 @@ Provides stateless, side-effect-free functions for computing lineage,
 extracting edges, and identifying consumers from raw connector observations.
 
 All functions take plain data in, return plain data out — no I/O, no store
-dependencies. The alma-atlas pipeline orchestrates the store writes.
+dependencies.
 """
 
 __version__ = "0.1.0"
 
-from alma_analysis.consumers import ConsumerObservation, identify_consumers
-from alma_analysis.edges import Edge, extract_edges
-from alma_analysis.lineage import LineageGraph, compute_lineage
+from alma_analysis.consumer_identity import ConsumerIdentity, identify_pg_consumer
+from alma_analysis.edge_discovery import EdgeDiscoveryConfig, EdgeDiscoveryEngine
+from alma_analysis.extract_tables import extract_tables_from_sql
+from alma_analysis.lineage_extractor import LineageResult, extract_lineage
 
 __all__ = [
-    "ConsumerObservation",
-    "Edge",
-    "LineageGraph",
-    "compute_lineage",
-    "extract_edges",
-    "identify_consumers",
+    "ConsumerIdentity",
+    "EdgeDiscoveryConfig",
+    "EdgeDiscoveryEngine",
+    "LineageResult",
+    "extract_lineage",
+    "extract_tables_from_sql",
+    "identify_pg_consumer",
 ]
