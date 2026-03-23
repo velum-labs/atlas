@@ -885,3 +885,153 @@ __all__ = [
     "type_warning_from_json",
     "type_warning_to_json",
 ]
+
+
+def edge_waypoint_to_row_payload(waypoint: EdgeWaypoint) -> dict[str, object]:
+    return {
+        "id": waypoint.id,
+        "edge_id": waypoint.edge_id,
+        "ordinal": waypoint.ordinal,
+        "kind": waypoint.kind.value,
+        "location": waypoint.location,
+        "observable": waypoint.observable,
+        "probe_method": waypoint.probe_method.value,
+        "last_seen_at": waypoint.last_seen_at,
+        "last_size_bytes": waypoint.last_size_bytes,
+        "last_row_count": waypoint.last_row_count,
+        "status": waypoint.status.value,
+    }
+
+
+def edge_waypoint_from_row(row: Mapping[str, Any]) -> EdgeWaypoint:
+    return EdgeWaypoint(
+        id=str(row.get("id", "")),
+        edge_id=str(row.get("edge_id", "")),
+        ordinal=int(row.get("ordinal", 0)),
+        kind=WaypointKind(str(row.get("kind", ""))),
+        location=str(row.get("location", "")),
+        observable=bool(row.get("observable", False)),
+        probe_method=ProbeMethod(str(row.get("probe_method", ProbeMethod.NONE.value))),
+        last_seen_at=_normalize_optional_datetime(row.get("last_seen_at"), field_name="last_seen_at"),
+        last_size_bytes=(int(row["last_size_bytes"]) if row.get("last_size_bytes") is not None else None),
+        last_row_count=(int(row["last_row_count"]) if row.get("last_row_count") is not None else None),
+        status=WaypointStatus(str(row.get("status", WaypointStatus.UNKNOWN.value))),
+    )
+
+
+def transport_group_to_row_payload(group: TransportGroup) -> dict[str, object]:
+    return {
+        "id": group.id,
+        "kind": group.kind.value,
+        "group_key": group.group_key,
+        "display_name": group.display_name,
+        "metadata_json": dict(group.metadata),
+    }
+
+
+def transport_group_from_row(
+    row: Mapping[str, Any],
+    *,
+    edge_ids: Sequence[str] | None = None,
+) -> TransportGroup:
+    return TransportGroup(
+        id=str(row.get("id", "")),
+        kind=TransportGroupKind(str(row.get("kind", ""))),
+        group_key=str(row.get("group_key", "")),
+        display_name=str(row.get("display_name", "")),
+        edge_ids=tuple(edge_ids or ()),
+        metadata=_normalize_mapping(row.get("metadata_json"), field_name="metadata_json"),
+    )
+
+
+def probe_error_to_json(error: ProbeError) -> dict[str, object]:
+    return {
+        "error_type": error.error_type.value,
+        "message": error.message,
+        "probed_at": _datetime_to_json(error.probed_at),
+        "retryable": error.retryable,
+    }
+
+
+def probe_error_from_json(value: object | None) -> ProbeError | None:
+    if value is None:
+        return None
+    payload = _require_mapping(value, field_name="probe_error")
+    return ProbeError(
+        error_type=ProbeErrorType(str(payload.get("error_type", ""))),
+        message=str(payload.get("message", "")),
+        probed_at=_normalize_optional_datetime(payload.get("probed_at"), field_name="probed_at"),
+        retryable=bool(payload.get("retryable", False)),
+    )
+
+
+def probe_state_to_row_payload(state: ProbeState) -> dict[str, object]:
+    return {
+        "edge_id": state.edge_id,
+        "probe_type": state.probe_type,
+        "consecutive_failures": state.consecutive_failures,
+        "last_success_at": state.last_success_at,
+        "last_failure_at": state.last_failure_at,
+        "last_error_json": probe_error_to_json(state.last_error) if state.last_error is not None else None,
+    }
+
+
+def probe_state_from_row(row: Mapping[str, Any]) -> ProbeState:
+    return ProbeState(
+        edge_id=str(row.get("edge_id", "")),
+        probe_type=str(row.get("probe_type", "")),
+        consecutive_failures=int(row.get("consecutive_failures", 0)),
+        last_success_at=_normalize_optional_datetime(row.get("last_success_at"), field_name="last_success_at"),
+        last_failure_at=_normalize_optional_datetime(row.get("last_failure_at"), field_name="last_failure_at"),
+        last_error=probe_error_from_json(row.get("last_error_json")),
+    )
+
+
+__all__ = [
+    "ColumnParity",
+    "CopyStrategy",
+    "DataEdge",
+    "EdgeContract",
+    "EdgeDiscoveryMethod",
+    "EdgeStatus",
+    "EdgeTransport",
+    "EdgeWaypoint",
+    "NullWarning",
+    "ProbeError",
+    "ProbeErrorType",
+    "ProbeMethod",
+    "ProbeResult",
+    "ProbeState",
+    "ProbeSuccess",
+    "ProbeTarget",
+    "SerializationFormat",
+    "TransportGroup",
+    "TransportGroupKind",
+    "TransportKind",
+    "TypeCompatibility",
+    "TypeMapping",
+    "TypeWarning",
+    "WaypointKind",
+    "WaypointStatus",
+    "WriteDisposition",
+    "data_edge_from_row",
+    "data_edge_to_row_payload",
+    "edge_contract_from_json",
+    "edge_contract_to_json",
+    "edge_transport_from_json",
+    "edge_transport_to_json",
+    "edge_waypoint_from_row",
+    "edge_waypoint_to_row_payload",
+    "null_warning_from_json",
+    "null_warning_to_json",
+    "probe_error_from_json",
+    "probe_error_to_json",
+    "probe_state_from_row",
+    "probe_state_to_row_payload",
+    "transport_group_from_row",
+    "transport_group_to_row_payload",
+    "type_mapping_from_json",
+    "type_mapping_to_json",
+    "type_warning_from_json",
+    "type_warning_to_json",
+]
