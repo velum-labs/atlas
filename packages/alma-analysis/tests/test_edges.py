@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import pytest
-
 from alma_analysis.edges import Edge, extract_edges
-
 
 # ---------------------------------------------------------------------------
 # Edge dataclass
@@ -106,12 +103,15 @@ def test_extract_edges_cte_base_table_included() -> None:
 
 
 def test_extract_edges_dialect_as_string() -> None:
-    edges = extract_edges("SELECT id FROM public.orders", consumer_id="consumer", dialect="postgres")
+    edges = extract_edges(
+        "SELECT id FROM public.orders", consumer_id="consumer", dialect="postgres"
+    )
     assert isinstance(edges, list)
 
 
 def test_extract_edges_dialect_as_object() -> None:
     from alma_sqlkit.dialect import Dialect
+
     dialect = Dialect.postgres()
     edges = extract_edges("SELECT id FROM public.orders", consumer_id="consumer", dialect=dialect)
     assert isinstance(edges, list)

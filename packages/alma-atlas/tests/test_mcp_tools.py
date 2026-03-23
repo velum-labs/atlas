@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from alma_atlas.config import AtlasConfig
 from alma_atlas.mcp.tools import (
     _handle_get_asset,
@@ -19,7 +17,6 @@ from alma_atlas_store.asset_repository import Asset, AssetRepository
 from alma_atlas_store.db import Database
 from alma_atlas_store.edge_repository import Edge, EdgeRepository
 from alma_atlas_store.schema_repository import ColumnInfo, SchemaRepository, SchemaSnapshot
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -90,6 +87,7 @@ def test_get_asset_returns_json(tmp_path: Path) -> None:
     _seed_assets(cfg.db_path)
     result = _handle_get_asset(cfg, {"asset_id": "pg::public.orders"})
     import json
+
     data = json.loads(result[0].text)
     assert data["id"] == "pg::public.orders"
     assert data["kind"] == "table"

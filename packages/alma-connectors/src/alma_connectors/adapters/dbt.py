@@ -171,11 +171,7 @@ class DbtAdapter:
             col_lower = col_name.lower()
             seen.add(col_lower)
             catalog_col = catalog_cols.get(col_lower, {})
-            data_type = (
-                catalog_col.get("type")
-                or col_data.get("data_type")
-                or "unknown"
-            )
+            data_type = catalog_col.get("type") or col_data.get("data_type") or "unknown"
             columns.append(
                 SourceColumnSchema(
                     name=col_name,
@@ -246,11 +242,7 @@ class DbtAdapter:
                 message="manifest.json is missing metadata.dbt_schema_version",
             )
 
-        project_name = (
-            self._project_name
-            or manifest.get("metadata", {}).get("project_name", "")
-            or "unknown"
-        )
+        project_name = self._project_name or manifest.get("metadata", {}).get("project_name", "") or "unknown"
         node_count = len(manifest.get("nodes", {})) + len(manifest.get("sources", {}))
 
         return ConnectionTestResult(
@@ -371,9 +363,7 @@ class DbtAdapter:
         Raises:
             NotImplementedError: Always.
         """
-        raise NotImplementedError(
-            "dbt adapter does not support query execution (can_execute_query=False)"
-        )
+        raise NotImplementedError("dbt adapter does not support query execution (can_execute_query=False)")
 
     def get_setup_instructions(self) -> SetupInstructions:
         """Return operator guidance for enabling the dbt adapter.

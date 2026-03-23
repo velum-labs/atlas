@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import pytest
 
 from alma_atlas.config import AtlasConfig, SourceConfig, default_config_dir, get_config
-
 
 # ---------------------------------------------------------------------------
 # default_config_dir
@@ -155,6 +153,7 @@ def test_remove_source_only_removes_target(tmp_path: Path) -> None:
 
 def test_get_config_returns_singleton(monkeypatch: pytest.MonkeyPatch) -> None:
     import alma_atlas.config as config_module
+
     monkeypatch.setattr(config_module, "_config", None)
     c1 = get_config()
     c2 = get_config()

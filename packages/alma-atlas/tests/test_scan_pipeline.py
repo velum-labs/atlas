@@ -10,7 +10,6 @@ import pytest
 from alma_atlas.config import AtlasConfig, SourceConfig
 from alma_atlas.pipeline.scan import ScanResult, _build_adapter, run_scan
 
-
 # ---------------------------------------------------------------------------
 # ScanResult dataclass
 # ---------------------------------------------------------------------------
@@ -47,6 +46,7 @@ def test_build_adapter_postgres_returns_adapter() -> None:
     source = SourceConfig(id="pg-mydb", kind="postgres", params={"dsn_env": "PG_URL"})
     adapter, persisted = _build_adapter(source)
     from alma_connectors.adapters.postgres import PostgresAdapter
+
     assert isinstance(adapter, PostgresAdapter)
     assert persisted.key == "pg-mydb"
 
@@ -59,12 +59,14 @@ def test_build_adapter_bigquery_returns_adapter() -> None:
     )
     adapter, persisted = _build_adapter(source)
     from alma_connectors.adapters.bigquery import BigQueryAdapter
+
     assert isinstance(adapter, BigQueryAdapter)
     assert persisted.key == "bq-proj"
 
 
 def test_build_adapter_uses_uuid5_for_id() -> None:
     import uuid
+
     source = SourceConfig(id="pg-mydb", kind="postgres", params={})
     _, persisted = _build_adapter(source)
     expected_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "pg-mydb"))
@@ -89,9 +91,11 @@ def test_run_scan_returns_asset_count(tmp_path: Path, mock_schema_snapshot, mock
     mock_adapter.introspect_schema = AsyncMock(return_value=mock_schema_snapshot)
     mock_adapter.observe_traffic = AsyncMock(return_value=mock_traffic_result)
 
-    with patch("alma_atlas.pipeline.scan._build_adapter", return_value=(mock_adapter, MagicMock())):
-        with patch("alma_atlas.pipeline.stitch.stitch", return_value=0):
-            result = run_scan(source, cfg)
+    with (
+        patch("alma_atlas.pipeline.scan._build_adapter", return_value=(mock_adapter, MagicMock())),
+        patch("alma_atlas.pipeline.stitch.stitch", return_value=0),
+    ):
+        result = run_scan(source, cfg)
 
     assert result.source_id == "pg-test"
     assert result.asset_count == 1
@@ -106,9 +110,11 @@ def test_run_scan_returns_edge_count(tmp_path: Path, mock_schema_snapshot, mock_
     mock_adapter.introspect_schema = AsyncMock(return_value=mock_schema_snapshot)
     mock_adapter.observe_traffic = AsyncMock(return_value=mock_traffic_result)
 
-    with patch("alma_atlas.pipeline.scan._build_adapter", return_value=(mock_adapter, MagicMock())):
-        with patch("alma_atlas.pipeline.stitch.stitch", return_value=3):
-            result = run_scan(source, cfg)
+    with (
+        patch("alma_atlas.pipeline.scan._build_adapter", return_value=(mock_adapter, MagicMock())),
+        patch("alma_atlas.pipeline.stitch.stitch", return_value=3),
+    ):
+        result = run_scan(source, cfg)
 
     assert result.edge_count == 3
 
@@ -158,15 +164,18 @@ def test_run_scan_empty_snapshot(tmp_path: Path, mock_traffic_result) -> None:
     source = SourceConfig(id="pg-test", kind="postgres", params={})
 
     from alma_connectors.source_adapter import SchemaSnapshot
+
     empty_snapshot = SchemaSnapshot(captured_at=None, objects=(), dependencies=())
 
     mock_adapter = MagicMock()
     mock_adapter.introspect_schema = AsyncMock(return_value=empty_snapshot)
     mock_adapter.observe_traffic = AsyncMock(return_value=mock_traffic_result)
 
-    with patch("alma_atlas.pipeline.scan._build_adapter", return_value=(mock_adapter, MagicMock())):
-        with patch("alma_atlas.pipeline.stitch.stitch", return_value=0):
-            result = run_scan(source, cfg)
+    with (
+        patch("alma_atlas.pipeline.scan._build_adapter", return_value=(mock_adapter, MagicMock())),
+        patch("alma_atlas.pipeline.stitch.stitch", return_value=0),
+    ):
+        result = run_scan(source, cfg)
 
     assert result.asset_count == 0
     assert result.error is None

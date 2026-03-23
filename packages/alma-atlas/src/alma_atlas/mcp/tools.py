@@ -105,7 +105,6 @@ def register(server: Server, cfg: AtlasConfig) -> None:
         if not cfg.db_path or not cfg.db_path.exists():
             return [TextContent(type="text", text="No Atlas database found. Run `alma-atlas scan` first.")]
 
-
         if name == "atlas_search":
             return _handle_search(cfg, arguments)
 
@@ -306,7 +305,12 @@ def _handle_impact(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextCont
     downstream = graph.downstream(asset_id, depth=depth)
 
     if not downstream:
-        return [TextContent(type="text", text=f"No downstream dependencies found for {asset_id}. Changes to this asset have no detected downstream impact.")]
+        return [
+            TextContent(
+                type="text",
+                text=f"No downstream dependencies found for {asset_id}. Changes to this asset have no detected downstream impact.",
+            )
+        ]
 
     lines = [
         f"Impact analysis for {asset_id}:",
@@ -315,5 +319,7 @@ def _handle_impact(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextCont
     for node_id in downstream:
         lines.append(f"  ⚠ {node_id}")
 
-    lines.append(f"\nRecommendation: Review these {len(downstream)} downstream assets before making changes to {asset_id}.")
+    lines.append(
+        f"\nRecommendation: Review these {len(downstream)} downstream assets before making changes to {asset_id}."
+    )
     return [TextContent(type="text", text="\n".join(lines))]

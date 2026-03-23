@@ -4,15 +4,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-import pytest
-
 from alma_atlas.pipeline.stitch import stitch
 from alma_atlas_store.asset_repository import Asset, AssetRepository
 from alma_atlas_store.db import Database
 from alma_atlas_store.edge_repository import EdgeRepository
 from alma_atlas_store.query_repository import QueryRepository
 from alma_connectors.source_adapter import ObservedQueryEvent, TrafficObservationResult
-
 
 # ---------------------------------------------------------------------------
 # Helpers

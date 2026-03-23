@@ -64,7 +64,9 @@ def test_columns_roundtrip(schema_repo, sample_snapshot):
 
 def test_list_history_returns_all_snapshots(schema_repo, sample_asset):
     s1 = SchemaSnapshot(asset_id=sample_asset.id, columns=[ColumnInfo(name="a", type="INT")])
-    s2 = SchemaSnapshot(asset_id=sample_asset.id, columns=[ColumnInfo(name="a", type="INT"), ColumnInfo(name="b", type="TEXT")])
+    s2 = SchemaSnapshot(
+        asset_id=sample_asset.id, columns=[ColumnInfo(name="a", type="INT"), ColumnInfo(name="b", type="TEXT")]
+    )
     schema_repo.upsert(s1)
     schema_repo.upsert(s2)
     history = schema_repo.list_history(sample_asset.id)

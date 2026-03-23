@@ -126,11 +126,14 @@ def test_timestamps_set_on_insert(asset_repo, sample_asset):
     assert result.last_seen is not None
 
 
-@pytest.mark.parametrize("query,field_value", [
-    ("table_a", "project.dataset.table_a"),
-    ("Table A", "Table A"),
-    ("sample table", "A sample table"),
-])
+@pytest.mark.parametrize(
+    "query,field_value",
+    [
+        ("table_a", "project.dataset.table_a"),
+        ("Table A", "Table A"),
+        ("sample table", "A sample table"),
+    ],
+)
 def test_search_parametrized(asset_repo, sample_asset, query, field_value):
     asset_repo.upsert(sample_asset)
     results = asset_repo.search(query)

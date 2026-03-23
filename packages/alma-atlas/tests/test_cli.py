@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import pytest
 from typer.testing import CliRunner
 
 from alma_atlas.cli.main import app
 from alma_atlas.config import AtlasConfig, SourceConfig
-
 
 runner = CliRunner()
 
@@ -49,7 +47,9 @@ def test_connect_bigquery(tmp_path: Path) -> None:
 def test_connect_bigquery_with_credentials(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
     with patch("alma_atlas.cli.connect.get_config", return_value=cfg):
-        result = runner.invoke(app, ["connect", "bigquery", "--project", "proj", "--credentials", "/path/to/creds.json"])
+        result = runner.invoke(
+            app, ["connect", "bigquery", "--project", "proj", "--credentials", "/path/to/creds.json"]
+        )
     assert result.exit_code == 0
     sources = cfg.load_sources()
     assert sources[0].params.get("credentials") == "/path/to/creds.json"

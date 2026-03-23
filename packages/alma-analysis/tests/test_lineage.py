@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import pytest
-
 from alma_analysis.edges import Edge
 from alma_analysis.lineage import LineageGraph, compute_lineage
-
 
 # ---------------------------------------------------------------------------
 # compute_lineage — graph construction

@@ -6,11 +6,17 @@ from alma_atlas_store.db import Database
 
 
 def test_tables_created_on_init(db):
-    tables = {
-        row[0]
-        for row in db.conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    tables = {row[0] for row in db.conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    expected = {
+        "assets",
+        "edges",
+        "schema_snapshots",
+        "queries",
+        "consumers",
+        "consumer_assets",
+        "contracts",
+        "_migrations",
     }
-    expected = {"assets", "edges", "schema_snapshots", "queries", "consumers", "consumer_assets", "contracts", "_migrations"}
     assert expected.issubset(tables)
 
 
@@ -46,4 +52,5 @@ def test_context_manager():
 
 def test_conn_property(db):
     import sqlite3
+
     assert isinstance(db.conn, sqlite3.Connection)

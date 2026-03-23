@@ -17,7 +17,6 @@ from alma_atlas_store.asset_repository import AssetRepository
 from alma_atlas_store.db import Database
 from alma_atlas_store.edge_repository import EdgeRepository
 
-
 # ---------------------------------------------------------------------------
 # Minimal dbt manifest fixture
 # ---------------------------------------------------------------------------

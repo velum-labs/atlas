@@ -351,9 +351,7 @@ def test_introspect_schema_source_dependency(tmp_path: Path) -> None:
         ),
     }
     sources = {
-        "source.p.raw.raw_orders": _source_node(
-            uid="source.p.raw.raw_orders", name="raw_orders", schema="raw"
-        ),
+        "source.p.raw.raw_orders": _source_node(uid="source.p.raw.raw_orders", name="raw_orders", schema="raw"),
     }
     manifest_path = _write_json(tmp_path / "manifest.json", _manifest_v12(nodes=nodes, sources=sources))
     adapter = DbtAdapter(manifest_path=manifest_path)
