@@ -1,11 +1,20 @@
 [project]
 name = "alma-sqlkit"
-version = "0.1.0"
-description = "SQL parsing and normalization utilities for Alma Atlas"
-readme = "README.md"
+version = "0.2.0"
+description = "SQL adapters - SQLParser, SQLBinder, SQLEmitter (thin layer over alma-algebrakit)"
 requires-python = ">=3.12"
+readme = "README.md"
 dependencies = [
-    "sqlglot>=26.0",
+    "pydantic>=2.0.0",
+    "sqlglot>=25.0.0",
+    "alma-algebrakit>=0.1.0",  # For algebra types
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "ruff>=0.8.0",
+    "mypy>=1.13.0",
 ]
 
 [build-system]
@@ -14,3 +23,35 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/alma_sqlkit"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+disallow_untyped_decorators = false
+ignore_missing_imports = true
+plugins = ["pydantic.mypy"]
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "UP"]
+ignore = ["E501", "B008", "C901"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
