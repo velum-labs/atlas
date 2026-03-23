@@ -1,6 +1,6 @@
 [project]
 name = "alma-sqlkit"
-version = "0.2.0"
+version = "0.1.0"
 description = "SQL adapters - SQLParser, SQLBinder, SQLEmitter (thin layer over alma-algebrakit)"
 requires-python = ">=3.12"
 readme = "README.md"
