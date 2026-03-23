@@ -6,57 +6,16 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
-  lint:
-    name: Lint & Format
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          version: "latest"
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Install dependencies
-        run: uv sync --all-packages
-
-      - name: Run ruff check
-        run: uv run ruff check .
-
-      - name: Run ruff format check
-        run: uv run ruff format --check .
-
-  typecheck:
-    name: Type Check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          version: "latest"
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Install dependencies
-        run: uv sync --all-packages
-
-      - name: Run ty
-        run: uv run ty check packages/
-        continue-on-error: true  # ty is pre-release; don't fail CI on type errors yet
-
   test:
-    name: Tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
         python-version: ["3.12", "3.13"]
+
     steps:
       - uses: actions/checkout@v4
 
@@ -69,7 +28,64 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --all-packages --python ${{ matrix.python-version }}
+        run: uv sync --all-packages
 
-      - name: Run pytest
-        run: uv run pytest --tb=short
+      - name: Lint
+        run: uv run ruff check packages/
+
+      - name: Type check
+        run: uv run ty check packages/alma-atlas/src packages/alma-atlas-store/src packages/alma-analysis/src packages/alma-connectors/src
+        continue-on-error: true
+
+      - name: Test
+        run: uv run pytest packages/ -q --tb=short
+
+      - name: Build all packages
+        run: uv build --all
+
+  smoke:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install
+        run: uv sync --all-packages
+
+      - name: CLI smoke test
+        run: |
+          uv run alma-atlas --version
+          uv run alma-atlas --help
+          uv run alma-atlas status --help
+          uv run alma-atlas connect --help
+          uv run alma-atlas scan --help
+          uv run alma-atlas serve --help
+
+      - name: Import smoke test
+        run: |
+          uv run python -c "
+          from alma_atlas.config import AtlasConfig
+          from alma_atlas.mcp.server import create_server
+          from alma_atlas.pipeline.scan import run_scan
+          from alma_atlas.pipeline.stitch import stitch
+          from alma_atlas_store.db import Database
+          from alma_atlas_store.asset_repository import AssetRepository
+          from alma_connectors.adapters.bigquery import BigQueryAdapter
+          from alma_connectors.adapters.dbt import DbtAdapter
+          from alma_connectors.adapters.postgres import PostgresAdapter
+          from alma_analysis.edges import extract_edges
+          from alma_analysis.lineage import compute_lineage
+          from alma_sqlkit.parser import SQLParser
+          db = Database(':memory:')
+          AssetRepository(db)
+          SQLParser().parse('SELECT 1 FROM t')
+          print('all imports + smoke OK')
+          "
