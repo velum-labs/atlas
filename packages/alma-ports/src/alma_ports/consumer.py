@@ -1,30 +1,68 @@
-"""Consumer port — Protocol interface for data consumer repositories.
-
-Consumers are downstream users of assets: BI dashboards, notebooks, services,
-pipelines, or individuals who run queries against data assets.
-"""
+"""Consumer registry storage protocols."""
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from datetime import datetime
+from typing import Any, Protocol, runtime_checkable
+from uuid import UUID
 
 
 @runtime_checkable
-class ConsumerPort(Protocol):
-    """Protocol for persisting and retrieving data consumers."""
+class ConsumerReader(Protocol):
+    """Read-only access to the consumer registry."""
 
-    def upsert(self, consumer: object) -> None:
-        """Insert or update a consumer record."""
-        ...
+    def list_consumers(self, target_id: str, limit: int = 100) -> list[dict[str, Any]]: ...
 
-    def get(self, consumer_id: str) -> object | None:
-        """Retrieve a consumer by ID."""
-        ...
+    def search_consumers(
+        self, query: str, target_id: str | None = None, limit: int = 20
+    ) -> list[dict[str, Any]]: ...
 
-    def list_for_asset(self, asset_id: str) -> list[object]:
-        """Return all consumers that depend on a given asset."""
-        ...
+    def list_consumer_dependencies(
+        self,
+        target_id: str,
+        consumer_id: str | None = None,
+        asset_id: str | None = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]: ...
 
-    def list_all(self) -> list[object]:
-        """Return all known consumers."""
-        ...
+    def get_traffic_based_query_edges(
+        self, *, filter_target_id: str | None = None, limit: int = 500
+    ) -> list[dict[str, Any]]: ...
+
+
+@runtime_checkable
+class ConsumerWriter(Protocol):
+    """Write access to the consumer registry."""
+
+    def upsert_consumer(
+        self,
+        *,
+        target_id: str,
+        consumer_key: str,
+        source_type: str = "unknown",
+        user_email: str | None = None,
+        dag_id: str | None = None,
+        task_id: str | None = None,
+        identity_confidence: float = 0.5,
+        metadata: dict[str, Any] | None = None,
+        seen_at: datetime | None = None,
+    ) -> dict[str, Any] | None: ...
+
+    def upsert_consumer_dependency(
+        self,
+        *,
+        target_id: str,
+        consumer_id: str | UUID,
+        asset_id: str | UUID,
+        query_fingerprint: str,
+        query_volume: int = 1,
+        last_seen: datetime | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None: ...
+
+
+@runtime_checkable
+class ConsumerRepository(ConsumerReader, ConsumerWriter, Protocol):
+    """Full consumer storage."""
+
+    ...
