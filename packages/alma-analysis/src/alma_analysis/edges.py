@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from alma_algebrakit.fingerprint import fingerprint_sql
+from alma_algebrakit.bound.fingerprint import fingerprint_sql
 from alma_sqlkit.dialect import Dialect
 from alma_sqlkit.parse import extract_tables
 
