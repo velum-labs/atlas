@@ -5,12 +5,15 @@ of the Atlas graph to AI agents: asset search, lineage traversal, schema
 lookup, and status summaries.
 
 Tool catalogue:
-    - atlas_search        Search for assets by name or keyword
-    - atlas_get_asset     Get a specific asset by ID
-    - atlas_lineage       Get upstream or downstream lineage for an asset
-    - atlas_status        Summarise the current graph (counts by kind)
-    - atlas_get_schema    Get the latest schema snapshot for an asset
-    - atlas_impact        Analyse downstream impact of changes to an asset
+    - atlas_search              Search for assets by name or keyword
+    - atlas_get_asset           Get a specific asset by ID
+    - atlas_lineage             Get upstream or downstream lineage for an asset
+    - atlas_status              Summarise the current graph (counts by kind)
+    - atlas_get_schema          Get the latest schema snapshot for an asset
+    - atlas_impact              Analyse downstream impact of changes to an asset
+    - atlas_get_query_patterns  Show top SQL query patterns by execution count
+    - atlas_suggest_tables      Suggest relevant tables for a search query
+    - atlas_check_contract      Validate schema against data contract spec
 """
 
 from __future__ import annotations
@@ -88,12 +91,45 @@ def register(server: Server, cfg: AtlasConfig) -> None:
             ),
             Tool(
                 name="atlas_impact",
-                description="Analyse the downstream impact of changes to an asset — shows all assets that depend on it.",
+                description="Analyse the downstream impact of changes to an asset — shows all assets that depend on it, with query exposure and blast radius.",
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "asset_id": {"type": "string", "description": "Asset ID to analyse impact for"},
                         "depth": {"type": "integer", "description": "Maximum depth of impact analysis"},
+                    },
+                    "required": ["asset_id"],
+                },
+            ),
+            Tool(
+                name="atlas_get_query_patterns",
+                description="Show the top SQL query patterns observed in Atlas, grouped by fingerprint with execution counts and referenced tables.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "top_n": {"type": "integer", "description": "Number of top patterns to return", "default": 20},
+                    },
+                },
+            ),
+            Tool(
+                name="atlas_suggest_tables",
+                description="Suggest relevant data tables for a search query, ranked by name relevance and column overlap.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search query describing the data you need"},
+                        "limit": {"type": "integer", "description": "Maximum number of suggestions to return", "default": 10},
+                    },
+                    "required": ["query"],
+                },
+            ),
+            Tool(
+                name="atlas_check_contract",
+                description="Validate the current schema snapshot for an asset against its data contract spec, reporting any violations.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "asset_id": {"type": "string", "description": "Asset ID to check contracts for"},
                     },
                     "required": ["asset_id"],
                 },
@@ -122,6 +158,15 @@ def register(server: Server, cfg: AtlasConfig) -> None:
 
         if name == "atlas_impact":
             return _handle_impact(cfg, arguments)
+
+        if name == "atlas_get_query_patterns":
+            return _handle_get_query_patterns(cfg, arguments)
+
+        if name == "atlas_suggest_tables":
+            return _handle_suggest_tables(cfg, arguments)
+
+        if name == "atlas_check_contract":
+            return _handle_check_contract(cfg, arguments)
 
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
@@ -284,14 +329,15 @@ def _handle_impact(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextCont
     from alma_atlas_store.asset_repository import AssetRepository
     from alma_atlas_store.db import Database
     from alma_atlas_store.edge_repository import EdgeRepository
+    from alma_atlas_store.query_repository import QueryRepository
 
     asset_id = arguments["asset_id"]
     depth = arguments.get("depth")
 
     with Database(cfg.db_path) as db:
         raw_edges = EdgeRepository(db).list_all()
-        asset_repo = AssetRepository(db)
-        asset = asset_repo.get(asset_id)
+        asset = AssetRepository(db).get(asset_id)
+        all_queries = QueryRepository(db).list_all()
 
     if asset is None:
         return [TextContent(type="text", text=f"Asset not found: {asset_id}")]
@@ -312,14 +358,156 @@ def _handle_impact(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextCont
             )
         ]
 
+    # Count query executions touching each downstream asset
+    query_counts: dict[str, int] = {}
+    for q in all_queries:
+        for table in q.tables:
+            if table in downstream:
+                query_counts[table] = query_counts.get(table, 0) + q.execution_count
+
+    blast_radius = len(downstream)
+    total_query_exposure = sum(query_counts.values())
+
     lines = [
         f"Impact analysis for {asset_id}:",
-        f"  {len(downstream)} downstream asset(s) would be affected by changes:\n",
+        f"  Blast radius: {blast_radius} downstream asset(s)",
+        f"  Query exposure: {total_query_exposure} query execution(s) across affected assets\n",
     ]
     for node_id in downstream:
-        lines.append(f"  ⚠ {node_id}")
+        qcount = query_counts.get(node_id, 0)
+        qinfo = f"  ({qcount} query exec(s))" if qcount else ""
+        lines.append(f"  ⚠ {node_id}{qinfo}")
 
     lines.append(
-        f"\nRecommendation: Review these {len(downstream)} downstream assets before making changes to {asset_id}."
+        f"\nRecommendation: Review these {blast_radius} downstream assets before making changes to {asset_id}."
     )
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _handle_get_query_patterns(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
+    from alma_atlas_store.db import Database
+    from alma_atlas_store.query_repository import QueryRepository
+
+    top_n = arguments.get("top_n", 20)
+    with Database(cfg.db_path) as db:
+        queries = QueryRepository(db).list_all()  # already sorted by execution_count DESC
+
+    queries = queries[:top_n]
+    if not queries:
+        return [TextContent(type="text", text="No query patterns found.")]
+
+    lines = [f"Top {len(queries)} query pattern(s) by execution count:\n"]
+    for i, q in enumerate(queries, 1):
+        tables_str = ", ".join(q.tables) if q.tables else "(none)"
+        sql_preview = q.sql_text[:120].replace("\n", " ") + ("..." if len(q.sql_text) > 120 else "")
+        lines.append(f"  {i}. fingerprint={q.fingerprint}  executions={q.execution_count}")
+        lines.append(f"     tables: {tables_str}")
+        lines.append(f"     source: {q.source}")
+        lines.append(f"     sql: {sql_preview}")
+        lines.append("")
+
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _handle_suggest_tables(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
+    from alma_atlas_store.asset_repository import AssetRepository
+    from alma_atlas_store.db import Database
+    from alma_atlas_store.schema_repository import SchemaRepository
+
+    query = arguments["query"]
+    limit = arguments.get("limit", 10)
+    query_tokens = {t.lower() for t in query.split() if t}
+
+    with Database(cfg.db_path) as db:
+        assets = AssetRepository(db).search(query)
+        schema_repo = SchemaRepository(db)
+        results = []
+        for asset in assets:
+            snapshot = schema_repo.get_latest(asset.id)
+            col_names: set[str] = set()
+            if snapshot:
+                col_names = {c.name.lower() for c in snapshot.columns}
+            elif "columns" in asset.metadata:
+                col_names = {c.get("name", "").lower() for c in asset.metadata["columns"]}
+
+            # Jaccard overlap between query tokens and column names
+            if col_names and query_tokens:
+                union = query_tokens | col_names
+                jaccard = len(query_tokens & col_names) / len(union)
+            else:
+                jaccard = 0.0
+
+            name_match = 1.0 if query.lower() in asset.name.lower() else 0.0
+            score = 0.5 * name_match + 0.5 * jaccard
+            results.append((score, asset, col_names))
+
+    results.sort(key=lambda x: -x[0])
+    results = results[:limit]
+
+    if not results:
+        return [TextContent(type="text", text=f"No table suggestions found for {query!r}.")]
+
+    lines = [f"Table suggestions for {query!r} ({len(results)} result(s)):\n"]
+    for score, asset, col_names in results:
+        cols_preview = ", ".join(sorted(col_names)[:5]) + ("..." if len(col_names) > 5 else "")
+        lines.append(f"  {asset.id}  [{asset.kind}]  relevance={score:.2f}")
+        if col_names:
+            lines.append(f"    columns: {cols_preview}")
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _handle_check_contract(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
+    from alma_atlas_store.contract_repository import ContractRepository
+    from alma_atlas_store.db import Database
+    from alma_atlas_store.schema_repository import SchemaRepository
+
+    asset_id = arguments["asset_id"]
+    with Database(cfg.db_path) as db:
+        contracts = ContractRepository(db).list_for_asset(asset_id)
+        if not contracts:
+            return [TextContent(type="text", text=f"No contracts found for asset: {asset_id}")]
+        snapshot = SchemaRepository(db).get_latest(asset_id)
+
+    violations: list[str] = []
+    for contract in contracts:
+        spec_columns = contract.spec.get("columns", [])
+        if not spec_columns:
+            continue
+
+        if snapshot is None:
+            violations.append(
+                f"[{contract.id}] No schema snapshot available to validate against contract v{contract.version}"
+            )
+            continue
+
+        actual_cols = {c.name.lower(): c for c in snapshot.columns}
+        for spec_col in spec_columns:
+            col_name = spec_col.get("name", "")
+            if not col_name:
+                continue
+            actual = actual_cols.get(col_name.lower())
+            if actual is None:
+                violations.append(f"[{contract.id}] Missing column: {col_name!r}")
+                continue
+            spec_type = spec_col.get("type", "")
+            if spec_type and actual.type.lower() != spec_type.lower():
+                violations.append(
+                    f"[{contract.id}] Type mismatch for {col_name!r}: expected {spec_type!r}, got {actual.type!r}"
+                )
+            spec_nullable = spec_col.get("nullable", True)
+            if not spec_nullable and actual.nullable:
+                violations.append(
+                    f"[{contract.id}] Nullability violation for {col_name!r}: contract requires NOT NULL but column is nullable"
+                )
+
+    if not violations:
+        lines = [
+            f"Contract check PASSED for {asset_id}",
+            f"  {len(contracts)} contract(s) validated, no violations found.",
+        ]
+    else:
+        lines = [f"Contract check FAILED for {asset_id}: {len(violations)} violation(s)\n"]
+        for v in violations:
+            lines.append(f"  ✗ {v}")
+
     return [TextContent(type="text", text="\n".join(lines))]

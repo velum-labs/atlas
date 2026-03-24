@@ -6,16 +6,21 @@ from pathlib import Path
 
 from alma_atlas.config import AtlasConfig
 from alma_atlas.mcp.tools import (
+    _handle_check_contract,
     _handle_get_asset,
+    _handle_get_query_patterns,
     _handle_get_schema,
     _handle_impact,
     _handle_lineage,
     _handle_search,
     _handle_status,
+    _handle_suggest_tables,
 )
 from alma_atlas_store.asset_repository import Asset, AssetRepository
+from alma_atlas_store.contract_repository import Contract, ContractRepository
 from alma_atlas_store.db import Database
 from alma_atlas_store.edge_repository import Edge, EdgeRepository
+from alma_atlas_store.query_repository import QueryObservation, QueryRepository
 from alma_atlas_store.schema_repository import ColumnInfo, SchemaRepository, SchemaSnapshot
 
 # ---------------------------------------------------------------------------
@@ -255,6 +260,218 @@ def test_impact_recommendation_text(tmp_path: Path) -> None:
     _seed_edges(cfg.db_path)
     result = _handle_impact(cfg, {"asset_id": "pg::public.orders"})
     assert "Recommendation" in result[0].text
+
+
+# ---------------------------------------------------------------------------
+# _handle_impact — enhanced (query exposure + blast radius)
+# ---------------------------------------------------------------------------
+
+
+def test_impact_includes_blast_radius(tmp_path: Path) -> None:
+    cfg = _make_cfg(tmp_path)
+    _seed_assets(cfg.db_path)
+    _seed_edges(cfg.db_path)
+    result = _handle_impact(cfg, {"asset_id": "pg::public.orders"})
+    assert "Blast radius" in result[0].text
+
+
+def test_impact_includes_query_exposure(tmp_path: Path) -> None:
+    cfg = _make_cfg(tmp_path)
+    _seed_assets(cfg.db_path)
+    _seed_edges(cfg.db_path)
+    with Database(cfg.db_path) as db:
+        QueryRepository(db).upsert(
+            QueryObservation(
+                fingerprint="fp1",
+                sql_text="SELECT * FROM order_items",
+                tables=["pg::public.order_items"],
+                source="pg:test",
+            )
+        )
+    result = _handle_impact(cfg, {"asset_id": "pg::public.orders"})
+    assert "Query exposure" in result[0].text
+
+
+# ---------------------------------------------------------------------------
+# _handle_get_query_patterns
+# ---------------------------------------------------------------------------
+
+
+def test_get_query_patterns_empty(tmp_path: Path) -> None:
+    cfg = _make_cfg(tmp_path)
+    result = _handle_get_query_patterns(cfg, {})
+    assert "No query patterns found" in result[0].text
+
+
+def test_get_query_patterns_returns_data(tmp_path: Path) -> None:
+    cfg = _make_cfg(tmp_path)
+    with Database(cfg.db_path) as db:
+        repo = QueryRepository(db)
+        repo.upsert(QueryObservation(fingerprint="fp1", sql_text="SELECT 1", tables=["t1"], source="pg:test"))
+        repo.upsert(QueryObservation(fingerprint="fp1", sql_text="SELECT 1", tables=["t1"], source="pg:test"))
+        repo.upsert(QueryObservation(fingerprint="fp2", sql_text="SELECT 2", tables=[], source="pg:test"))
+    result = _handle_get_query_patterns(cfg, {})
+    text = result[0].text
+    assert "fp1" in text
+    assert "executions=2" in text
+
+
+def test_get_query_patterns_top_n(tmp_path: Path) -> None:
+    cfg = _make_cfg(tmp_path)
+    with Database(cfg.db_path) as db:
+        repo = QueryRepository(db)
+        for i in range(5):
+            repo.upsert(QueryObservation(fingerprint=f"fp{i}", sql_text=f"SELECT {i}", tables=[], source="pg:test"))
+    result = _handle_get_query_patterns(cfg, {"top_n": 2})
+    # Should mention "Top 2"
+    assert "Top 2" in result[0].text
+
+
+def test_get_query_patterns_shows_tables(tmp_path: Path) -> None:
+    cfg = _make_cfg(tmp_path)
+    with Database(cfg.db_path) as db:
+        QueryRepository(db).upsert(
+            QueryObservation(fingerprint="fp1", sql_text="SELECT * FROM orders", tables=["pg::public.orders"], source="pg:test")
+        )
+    result = _handle_get_query_patterns(cfg, {})
+    assert "pg::public.orders" in result[0].text
+
+
+# ---------------------------------------------------------------------------
+# _handle_suggest_tables
+# ---------------------------------------------------------------------------
+
+
+def test_suggest_tables_no_results(tmp_path: Path) -> None:
+    cfg = _make_cfg(tmp_path)
+    result = _handle_suggest_tables(cfg, {"query": "nonexistent_xyz"})
+    assert "No table suggestions found" in result[0].text
+
+
+def test_suggest_tables_returns_match(tmp_path: Path) -> None:
+    cfg = _make_cfg(tmp_path)
+    _seed_assets(cfg.db_path)
+    result = _handle_suggest_tables(cfg, {"query": "orders"})
+    assert "orders" in result[0].text
+
+
+def test_suggest_tables_respects_limit(tmp_path: Path) -> None:
+    cfg = _make_cfg(tmp_path)
+    _seed_assets(cfg.db_path)
+    result = _handle_suggest_tables(cfg, {"query": "public", "limit": 1})
+    # Should only contain 1 result header line
+    assert "1 result(s)" in result[0].text
+
+
+def test_suggest_tables_includes_column_relevance(tmp_path: Path) -> None:
+    cfg = _make_cfg(tmp_path)
+    _seed_assets(cfg.db_path)
+    with Database(cfg.db_path) as db:
+        SchemaRepository(db).upsert(
+            SchemaSnapshot(
+                asset_id="pg::public.orders",
+                columns=[ColumnInfo(name="orders", type="INTEGER", nullable=False)],
+            )
+        )
+    result = _handle_suggest_tables(cfg, {"query": "orders"})
+    # Column named "orders" should boost score; relevance should be present
+    assert "relevance=" in result[0].text
+
+
+# ---------------------------------------------------------------------------
+# _handle_check_contract
+# ---------------------------------------------------------------------------
+
+
+def _seed_contract(db_path: Path, asset_id: str, spec: dict) -> None:
+    with Database(db_path) as db:
+        ContractRepository(db).upsert(
+            Contract(id=f"contract-{asset_id}", asset_id=asset_id, version="1.0", spec=spec)
+        )
+
+
+def test_check_contract_no_contracts(tmp_path: Path) -> None:
+    cfg = _make_cfg(tmp_path)
+    _seed_assets(cfg.db_path)
+    result = _handle_check_contract(cfg, {"asset_id": "pg::public.orders"})
+    assert "No contracts found" in result[0].text
+
+
+def test_check_contract_passes_when_schema_matches(tmp_path: Path) -> None:
+    cfg = _make_cfg(tmp_path)
+    _seed_assets(cfg.db_path)
+    with Database(cfg.db_path) as db:
+        SchemaRepository(db).upsert(
+            SchemaSnapshot(
+                asset_id="pg::public.orders",
+                columns=[ColumnInfo(name="id", type="INTEGER", nullable=False)],
+            )
+        )
+    _seed_contract(cfg.db_path, "pg::public.orders", {"columns": [{"name": "id", "type": "INTEGER", "nullable": False}]})
+    result = _handle_check_contract(cfg, {"asset_id": "pg::public.orders"})
+    assert "PASSED" in result[0].text
+
+
+def test_check_contract_detects_missing_column(tmp_path: Path) -> None:
+    cfg = _make_cfg(tmp_path)
+    _seed_assets(cfg.db_path)
+    with Database(cfg.db_path) as db:
+        SchemaRepository(db).upsert(
+            SchemaSnapshot(
+                asset_id="pg::public.orders",
+                columns=[ColumnInfo(name="id", type="INTEGER", nullable=False)],
+            )
+        )
+    _seed_contract(
+        cfg.db_path,
+        "pg::public.orders",
+        {"columns": [{"name": "id", "type": "INTEGER"}, {"name": "amount", "type": "NUMERIC"}]},
+    )
+    result = _handle_check_contract(cfg, {"asset_id": "pg::public.orders"})
+    assert "FAILED" in result[0].text
+    assert "Missing column" in result[0].text
+    assert "amount" in result[0].text
+
+
+def test_check_contract_detects_type_mismatch(tmp_path: Path) -> None:
+    cfg = _make_cfg(tmp_path)
+    _seed_assets(cfg.db_path)
+    with Database(cfg.db_path) as db:
+        SchemaRepository(db).upsert(
+            SchemaSnapshot(
+                asset_id="pg::public.orders",
+                columns=[ColumnInfo(name="id", type="TEXT", nullable=True)],
+            )
+        )
+    _seed_contract(cfg.db_path, "pg::public.orders", {"columns": [{"name": "id", "type": "INTEGER"}]})
+    result = _handle_check_contract(cfg, {"asset_id": "pg::public.orders"})
+    assert "FAILED" in result[0].text
+    assert "Type mismatch" in result[0].text
+
+
+def test_check_contract_detects_nullability_violation(tmp_path: Path) -> None:
+    cfg = _make_cfg(tmp_path)
+    _seed_assets(cfg.db_path)
+    with Database(cfg.db_path) as db:
+        SchemaRepository(db).upsert(
+            SchemaSnapshot(
+                asset_id="pg::public.orders",
+                columns=[ColumnInfo(name="id", type="INTEGER", nullable=True)],
+            )
+        )
+    _seed_contract(cfg.db_path, "pg::public.orders", {"columns": [{"name": "id", "type": "INTEGER", "nullable": False}]})
+    result = _handle_check_contract(cfg, {"asset_id": "pg::public.orders"})
+    assert "FAILED" in result[0].text
+    assert "Nullability violation" in result[0].text
+
+
+def test_check_contract_no_snapshot(tmp_path: Path) -> None:
+    cfg = _make_cfg(tmp_path)
+    _seed_assets(cfg.db_path)
+    _seed_contract(cfg.db_path, "pg::public.orders", {"columns": [{"name": "id", "type": "INTEGER"}]})
+    result = _handle_check_contract(cfg, {"asset_id": "pg::public.orders"})
+    assert "FAILED" in result[0].text
+    assert "No schema snapshot" in result[0].text
 
 
 # ---------------------------------------------------------------------------
