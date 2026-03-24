@@ -326,7 +326,10 @@ WHERE TABLE_SCHEMA NOT IN ('INFORMATION_SCHEMA')
         since: datetime | None = None,
     ) -> TrafficObservationResult:
         config = self._get_config(adapter)
-        lookback_hours = config.lookback_hours
+        if since is not None:
+            hours_since = max(1, int((datetime.now(UTC) - since).total_seconds() / 3600) + 1)
+        else:
+            hours_since = config.lookback_hours
         max_rows = config.max_query_rows
 
         traffic_sql = f"""\
@@ -342,7 +345,7 @@ SELECT
     END_TIME,
     TOTAL_ELAPSED_TIME
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-WHERE START_TIME >= DATEADD(hour, -{lookback_hours}, CURRENT_TIMESTAMP())
+WHERE START_TIME >= DATEADD(hour, -{hours_since}, CURRENT_TIMESTAMP())
   AND EXECUTION_STATUS = 'SUCCESS'
   AND QUERY_TYPE IN ('SELECT', 'CTAS', 'INSERT', 'MERGE', 'UPDATE', 'DELETE', 'CREATE_TABLE_AS_SELECT')
 ORDER BY START_TIME DESC
@@ -1181,7 +1184,14 @@ LIMIT {max_rows}
                     ]
                     col_mappings: tuple[tuple[str, str], ...] = ()
                     if source_cols and target_cols:
-                        col_mappings = tuple(zip(source_cols, target_cols, strict=False))
+                        try:
+                            col_mappings = tuple(zip(source_cols, target_cols, strict=True))
+                        except ValueError:
+                            logger.warning(
+                                "Column count mismatch in lineage: %d source vs %d target columns",
+                                len(source_cols), len(target_cols),
+                            )
+                            col_mappings = tuple(zip(source_cols, target_cols, strict=False))
 
                     edges.append(LineageEdge(
                         source_object=source_name,
