@@ -489,10 +489,7 @@ def _handle_list_violations(cfg: AtlasConfig, arguments: dict[str, Any]) -> list
 
     with Database(cfg.db_path) as db:
         repo = ViolationRepository(db)
-        if asset_id:
-            violations = repo.list_for_asset(asset_id)[:limit]
-        else:
-            violations = repo.list_recent(limit=limit)
+        violations = repo.list_for_asset(asset_id)[:limit] if asset_id else repo.list_recent(limit=limit)
 
     if not violations:
         msg = f"No open violations found for {asset_id!r}." if asset_id else "No open violations found."

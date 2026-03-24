@@ -5,19 +5,17 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+
+from alma_atlas.pipeline.cross_system_edges import discover_cross_system_edges
+from alma_atlas_store.asset_repository import Asset, AssetRepository
+from alma_atlas_store.db import Database
+from alma_atlas_store.edge_repository import EdgeRepository
 from alma_connectors.source_adapter import (
     SchemaObjectKind,
     SchemaSnapshot,
     SourceColumnSchema,
     SourceTableSchema,
 )
-
-from alma_atlas_store.asset_repository import Asset, AssetRepository
-from alma_atlas_store.db import Database
-from alma_atlas_store.edge_repository import EdgeRepository
-
-from alma_atlas.pipeline.cross_system_edges import discover_cross_system_edges
-
 
 # ---------------------------------------------------------------------------
 # Helpers / fixtures
@@ -110,7 +108,7 @@ def test_matching_tables_produce_edges(db: Database) -> None:
     edges = EdgeRepository(db).list_all()
     assert len(edges) == 2
     upstream_ids = {e.upstream_id for e in edges}
-    downstream_ids = {e.downstream_id for e in edges}
+    _downstream_ids = {e.downstream_id for e in edges}
     assert "postgres:prod::public.orders" in upstream_ids
     assert "bigquery:warehouse::production.orders" in upstream_ids
     assert all(e.kind == "schema_match" for e in edges)
@@ -234,7 +232,7 @@ def test_source_not_compared_against_itself(db: Database) -> None:
     }
     _seed_assets(db, snapshots)
 
-    count = discover_cross_system_edges(snapshots, db)
+    discover_cross_system_edges(snapshots, db)
     edges = EdgeRepository(db).list_all()
 
     # No self-referential edges

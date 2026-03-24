@@ -6,14 +6,10 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import pytest
-
 from alma_connectors.source_adapter import ObservedQueryEvent
+
 from alma_analysis.derived_analytics import (
     DerivedAnalytics,
-    FrequentQuery,
-    QuerySourceBreakdown,
-    TableAccessSummary,
-    UserActivitySummary,
     _classify_source_type,
     _normalize_sql,
     _query_hash,
@@ -250,7 +246,7 @@ class TestTableAccessSummary:
     def test_query_types_collected(self) -> None:
         events = [
             _event(sql="SELECT 1", query_type="select", metadata={"referenced_tables": ["t"]}),
-            _event(sql="INSERT INTO t VALUES (1)", query_type="insert", metadata={"referenced_tables": ["t"]}),
+            _event(sql="INSERT INTO t VALUES (1)", query_type="insert", metadata={"referenced_tables": ["t"]}),  # noqa: E501
         ]
         ta = compute_analytics(events).table_access[0]
         assert "select" in ta.query_types

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -20,6 +19,8 @@ from alma_connectors.adapters.postgres import PostgresAdapter
 from alma_connectors.source_adapter_v2 import (
     AdapterCapability,
     ExtractionScope,
+)
+from alma_connectors.source_adapter_v2 import (
     SchemaObjectKind as V2Kind,
 )
 
@@ -95,16 +96,15 @@ def _probe_conn(
                 exc.pgcode = "42501"  # type: ignore[attr-defined]
                 raise exc
 
-        elif "pg_stat_statements" in lower:
-            if not pg_stat_ok:
-                if pg_stat_pgcode == "42P01":
-                    exc = psycopg.errors.UndefinedTable("relation does not exist")
-                    exc.pgcode = "42P01"  # type: ignore[attr-defined]
-                    raise exc
-                if pg_stat_pgcode == "42501":
-                    exc = psycopg.errors.InsufficientPrivilege("permission denied")
-                    exc.pgcode = "42501"  # type: ignore[attr-defined]
-                    raise exc
+        elif "pg_stat_statements" in lower and not pg_stat_ok:
+            if pg_stat_pgcode == "42P01":
+                exc = psycopg.errors.UndefinedTable("relation does not exist")
+                exc.pgcode = "42P01"  # type: ignore[attr-defined]
+                raise exc
+            if pg_stat_pgcode == "42501":
+                exc = psycopg.errors.InsufficientPrivilege("permission denied")
+                exc.pgcode = "42501"  # type: ignore[attr-defined]
+                raise exc
 
         return cur
 

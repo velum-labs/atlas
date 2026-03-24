@@ -42,7 +42,7 @@ def team_init(
     cfg.team_id = team_id or "default"
     cfg.save_team_config()
 
-    rprint(f"[green]Team sync configured[/green]")
+    rprint("[green]Team sync configured[/green]")
     rprint(f"  Server:  {server}")
     rprint(f"  Team ID: {cfg.team_id}")
 
@@ -82,7 +82,7 @@ def team_sync() -> None:
                     rprint(f"  [yellow]rejected[/yellow] {r.id}: {r.reason}")
         except Exception as exc:
             rprint(f"[red]Sync failed:[/red] {exc}")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from None
 
 
 @app.command("status")

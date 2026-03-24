@@ -126,7 +126,7 @@ def run_scan(source: SourceConfig, cfg: AtlasConfig) -> ScanResult:
     )
 
 
-def _run_enforcement(snapshot: "SchemaSnapshot", source_id: str, cfg: "AtlasConfig") -> None:
+def _run_enforcement(snapshot: SchemaSnapshot, source_id: str, cfg: AtlasConfig) -> None:
     """Run drift detection + enforcement for any assets that have contracts.
 
     Silently skips assets without contracts.  Enforcement violations are
@@ -201,9 +201,8 @@ def run_scan_all(sources: list[SourceConfig], cfg: AtlasConfig) -> ScanAllResult
         A :class:`ScanAllResult` aggregating per-source results and the total
         number of cross-system edges discovered.
     """
-    from alma_atlas_store.db import Database
-
     from alma_atlas.pipeline.cross_system_edges import discover_cross_system_edges
+    from alma_atlas_store.db import Database
 
     results: list[ScanResult] = []
     snapshots: dict[str, SchemaSnapshot] = {}
@@ -242,6 +241,7 @@ def _build_adapter(source: SourceConfig):  # type: ignore[return]
     from alma_connectors.source_adapter import (
         ExternalSecretRef,
         PersistedSourceAdapter,
+        SourceAdapterSecret,
         SourceAdapterStatus,
     )
 

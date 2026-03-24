@@ -161,7 +161,7 @@ def test_config_frozen() -> None:
         account_secret=ExternalSecretRef(provider="env", reference="SF_SECRET"),
         account="xy12345.us-east-1",
     )
-    with pytest.raises(Exception):
+    with pytest.raises(Exception):  # noqa: B017
         config.account = "something-else"  # type: ignore[misc]
 
 
@@ -254,9 +254,8 @@ def test_test_connection_missing_module() -> None:
     persisted = _make_adapter()
     sf_adapter = _make_snowflake_adapter()
 
-    with patch(_SNOWFLAKE_MODULE, side_effect=RuntimeError("snowflake-connector-python is required")):
-        with pytest.raises(RuntimeError, match="snowflake-connector-python"):
-            asyncio.run(sf_adapter.test_connection(persisted))
+    with patch(_SNOWFLAKE_MODULE, side_effect=RuntimeError("snowflake-connector-python is required")), pytest.raises(RuntimeError, match="snowflake-connector-python"):
+        asyncio.run(sf_adapter.test_connection(persisted))
 
 
 # ---------------------------------------------------------------------------

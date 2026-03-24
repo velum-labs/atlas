@@ -26,6 +26,7 @@ Example usage::
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 from datetime import UTC, datetime
@@ -441,10 +442,8 @@ class FivetranAdapter:
             succeeded_raw = detail.get("succeeded_at")
             last_run_at: datetime | None = None
             if succeeded_raw:
-                try:
+                with contextlib.suppress(ValueError, AttributeError):
                     last_run_at = datetime.fromisoformat(succeeded_raw.replace("Z", "+00:00"))
-                except (ValueError, AttributeError):
-                    pass
 
             sync_state = (detail.get("status") or {}).get("sync_state") or None
 

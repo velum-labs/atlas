@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import time
@@ -30,7 +31,6 @@ from alma_connectors.source_adapter import (
 from alma_connectors.source_adapter_v2 import (
     AdapterCapability,
     CapabilityProbeResult,
-    ColumnSchema as V2ColumnSchema,
     DefinitionSnapshot,
     DiscoveredContainer,
     DiscoverySnapshot,
@@ -41,11 +41,16 @@ from alma_connectors.source_adapter_v2 import (
     LineageSnapshot,
     ObjectDefinition,
     SchemaObject,
-    SchemaObjectKind as V2SchemaObjectKind,
     SchemaSnapshotV2,
     ScopeContext,
     SourceAdapterKindV2,
     TrafficExtractionResult,
+)
+from alma_connectors.source_adapter_v2 import (
+    ColumnSchema as V2ColumnSchema,
+)
+from alma_connectors.source_adapter_v2 import (
+    SchemaObjectKind as V2SchemaObjectKind,
 )
 
 logger = logging.getLogger(__name__)
@@ -256,7 +261,7 @@ WHERE TABLE_SCHEMA NOT IN ('INFORMATION_SCHEMA')
                 cur.execute(row_count_sql)
                 for rc_row in cur.fetchall():
                     rc_desc = [d[0].upper() for d in cur.description]
-                    rc = dict(zip(rc_desc, rc_row))
+                    rc = dict(zip(rc_desc, rc_row, strict=False))
                     schema = str(rc.get("TABLE_SCHEMA", ""))
                     name = str(rc.get("TABLE_NAME", ""))
                     count = rc.get("ROW_COUNT")
@@ -273,7 +278,7 @@ WHERE TABLE_SCHEMA NOT IN ('INFORMATION_SCHEMA')
         columns_by_table: dict[tuple[str, str], list[SourceColumnSchema]] = defaultdict(list)
 
         for raw_row in col_rows:
-            row = dict(zip(col_names, raw_row))
+            row = dict(zip(col_names, raw_row, strict=False))
             schema = str(row.get("TABLE_SCHEMA", ""))
             table = str(row.get("TABLE_NAME", ""))
             table_type = str(row.get("TABLE_TYPE", "BASE TABLE"))
@@ -358,7 +363,7 @@ LIMIT {max_rows}
         errors: list[str] = []
 
         for raw_row in raw_rows:
-            row = dict(zip(col_names, raw_row))
+            row = dict(zip(col_names, raw_row, strict=False))
             sql_text = str(row.get("QUERY_TEXT", "")).strip()
             if not sql_text:
                 continue
@@ -372,10 +377,8 @@ LIMIT {max_rows}
             elapsed_ms = row.get("TOTAL_ELAPSED_TIME")
             duration_ms: float | None = None
             if elapsed_ms is not None:
-                try:
+                with contextlib.suppress(TypeError, ValueError):
                     duration_ms = float(elapsed_ms)
-                except (TypeError, ValueError):
-                    pass
 
             query_id = str(row.get("QUERY_ID", "")) or None
             database_name = str(row.get("DATABASE_NAME", "")) or None
@@ -427,7 +430,7 @@ LIMIT {max_rows}
                 if max_rows is not None and len(all_rows) > max_rows:
                     all_rows = all_rows[:max_rows]
                     truncated = True
-                rows = tuple(dict(zip(col_names, r)) for r in all_rows)
+                rows = tuple(dict(zip(col_names, r, strict=False)) for r in all_rows)
                 cur.close()
             finally:
                 conn.close()
@@ -650,7 +653,7 @@ LIMIT {max_rows}
         containers: list[DiscoveredContainer] = []
 
         for raw_row in db_rows:
-            row = dict(zip(db_col_names, raw_row))
+            row = dict(zip(db_col_names, raw_row, strict=False))
             db_name = str(row.get("name", "")).strip()
             if not db_name:
                 continue
@@ -664,7 +667,7 @@ LIMIT {max_rows}
             ))
 
         for raw_row in schema_rows:
-            row = dict(zip(schema_col_names, raw_row))
+            row = dict(zip(schema_col_names, raw_row, strict=False))
             schema_name = str(row.get("name", "")).strip()
             db_name = str(row.get("database_name", "")).strip()
             if not schema_name or schema_name.upper() == "INFORMATION_SCHEMA":
@@ -776,7 +779,7 @@ WHERE PROCEDURE_SCHEMA NOT IN ('INFORMATION_SCHEMA')
                 cur.execute(tables_sql)
                 tbl_col_names = [d[0].upper() for d in cur.description]
                 for row in cur.fetchall():
-                    r = dict(zip(tbl_col_names, row))
+                    r = dict(zip(tbl_col_names, row, strict=False))
                     tbl_schema = str(r.get("TABLE_SCHEMA", ""))
                     tbl_name = str(r.get("TABLE_NAME", ""))
                     table_meta[(tbl_schema, tbl_name)] = r
@@ -792,7 +795,7 @@ WHERE PROCEDURE_SCHEMA NOT IN ('INFORMATION_SCHEMA')
                 cur.execute(functions_sql)
                 func_col_names = [d[0].upper() for d in cur.description]
                 for row in cur.fetchall():
-                    func_rows.append(dict(zip(func_col_names, row)))
+                    func_rows.append(dict(zip(func_col_names, row, strict=False)))
             except Exception:
                 logger.debug(
                     "SnowflakeAdapter.extract_schema: FUNCTIONS query failed. adapter=%s",
@@ -805,7 +808,7 @@ WHERE PROCEDURE_SCHEMA NOT IN ('INFORMATION_SCHEMA')
                 cur.execute(procedures_sql)
                 proc_col_names = [d[0].upper() for d in cur.description]
                 for row in cur.fetchall():
-                    proc_rows.append(dict(zip(proc_col_names, row)))
+                    proc_rows.append(dict(zip(proc_col_names, row, strict=False)))
             except Exception:
                 logger.debug(
                     "SnowflakeAdapter.extract_schema: PROCEDURES query failed. adapter=%s",
@@ -822,7 +825,7 @@ WHERE PROCEDURE_SCHEMA NOT IN ('INFORMATION_SCHEMA')
         columns_by_table: dict[tuple[str, str], list[V2ColumnSchema]] = defaultdict(list)
 
         for raw_row in col_rows:
-            row = dict(zip(col_names, raw_row))
+            row = dict(zip(col_names, raw_row, strict=False))
             schema = str(row.get("TABLE_SCHEMA", ""))
             table = str(row.get("TABLE_NAME", ""))
 
@@ -969,7 +972,7 @@ WHERE FUNCTION_SCHEMA NOT IN ('INFORMATION_SCHEMA')
                 cur.execute(views_sql)
                 view_col_names = [d[0].upper() for d in cur.description]
                 for raw_row in cur.fetchall():
-                    row = dict(zip(view_col_names, raw_row))
+                    row = dict(zip(view_col_names, raw_row, strict=False))
                     schema_name = str(row.get("TABLE_SCHEMA", "")).strip()
                     object_name = str(row.get("TABLE_NAME", "")).strip()
                     view_def = row.get("VIEW_DEFINITION")
@@ -997,7 +1000,7 @@ WHERE FUNCTION_SCHEMA NOT IN ('INFORMATION_SCHEMA')
                 cur.execute(functions_sql)
                 func_col_names = [d[0].upper() for d in cur.description]
                 for raw_row in cur.fetchall():
-                    row = dict(zip(func_col_names, raw_row))
+                    row = dict(zip(func_col_names, raw_row, strict=False))
                     schema_name = str(row.get("FUNCTION_SCHEMA", "")).strip()
                     object_name = str(row.get("FUNCTION_NAME", "")).strip()
                     func_def = row.get("FUNCTION_DEFINITION")
@@ -1137,7 +1140,7 @@ LIMIT {max_rows}
         seen_edges: set[tuple[str, str]] = set()
 
         for raw_row in raw_rows:
-            row = dict(zip(col_names, raw_row))
+            row = dict(zip(col_names, raw_row, strict=False))
 
             base_objects = _parse_variant(row.get("BASE_OBJECTS_ACCESSED")) or []
             modified_objects = _parse_variant(row.get("OBJECTS_MODIFIED")) or []
@@ -1178,7 +1181,7 @@ LIMIT {max_rows}
                     ]
                     col_mappings: tuple[tuple[str, str], ...] = ()
                     if source_cols and target_cols:
-                        col_mappings = tuple(zip(source_cols, target_cols))
+                        col_mappings = tuple(zip(source_cols, target_cols, strict=False))
 
                     edges.append(LineageEdge(
                         source_object=source_name,

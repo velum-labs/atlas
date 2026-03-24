@@ -5,8 +5,6 @@ from __future__ import annotations
 import math
 from datetime import UTC, datetime, timedelta
 
-import pytest
-
 from alma_connectors.source_adapter import ObservedQueryEvent
 from alma_connectors.source_adapter_v2 import (
     LineageEdge,
@@ -19,7 +17,6 @@ from alma_analysis.lineage_inference import (
     _recency_multiplier,
     infer_lineage,
 )
-
 
 # ---------------------------------------------------------------------------
 # Test helpers
@@ -138,7 +135,7 @@ def test_cte_tables_are_excluded() -> None:
     # Plain SELECT with CTE: extract_lineage properly filters out the CTE alias.
     # "cte" should not appear as a source; only the real base table is emitted.
     sql = "WITH cte AS (SELECT id FROM public.base) SELECT id FROM cte"
-    engine = InferredLineageEngine([_event(sql, source_name="pg_prod")], dialect="postgres", now=_NOW)
+    engine = InferredLineageEngine([_event(sql, source_name="pg_prod")], dialect="postgres", now=_NOW)  # noqa: E501
     edges = engine.build_edges()
     sources = {e.source_object for e in edges}
     assert not any("cte" in s.lower() for s in sources)
