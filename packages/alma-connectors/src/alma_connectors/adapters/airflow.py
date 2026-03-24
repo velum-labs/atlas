@@ -31,16 +31,16 @@ from __future__ import annotations
 import base64
 import logging
 import time
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 import httpx
 
+from alma_connectors.adapters._base import BaseAdapterV2
 from alma_connectors.source_adapter import (
     ConnectionTestResult,
     ObservedQueryEvent,
     PersistedSourceAdapter,
-    QueryResult,
     SetupInstructions,
 )
 from alma_connectors.source_adapter_v2 import (
@@ -48,8 +48,6 @@ from alma_connectors.source_adapter_v2 import (
     CapabilityProbeResult,
     DiscoveredContainer,
     DiscoverySnapshot,
-    DefinitionSnapshot,
-    ExtractionMeta,
     ExtractionScope,
     LineageEdge,
     LineageEdgeKind,
@@ -57,7 +55,6 @@ from alma_connectors.source_adapter_v2 import (
     OrchestrationSnapshot,
     OrchestrationTask,
     OrchestrationUnit,
-    SchemaSnapshotV2,
     ScopeContext,
     SourceAdapterKindV2,
     TrafficExtractionResult,
@@ -68,7 +65,7 @@ logger = logging.getLogger(__name__)
 _PAGE_SIZE = 100
 
 
-class AirflowAdapter:
+class AirflowAdapter(BaseAdapterV2):
     """Apache Airflow source adapter.
 
     Implements the SourceAdapterV2 protocol against the Airflow stable REST API
@@ -186,25 +183,8 @@ class AirflowAdapter:
                 break
         return results
 
-    def _make_meta(
-        self,
-        adapter: PersistedSourceAdapter,
-        capability: AdapterCapability,
-        row_count: int,
-        duration_ms: float,
-    ) -> ExtractionMeta:
-        return ExtractionMeta(
-            adapter_key=adapter.key,
-            adapter_kind=SourceAdapterKindV2.AIRFLOW,
-            capability=capability,
-            scope_context=ScopeContext(
-                scope=ExtractionScope.GLOBAL,
-                identifiers={"base_url": self._base_url},
-            ),
-            captured_at=datetime.now(UTC),
-            duration_ms=duration_ms,
-            row_count=row_count,
-        )
+    def _scope_identifiers(self) -> dict[str, str]:
+        return {"base_url": self._base_url}
 
     # ------------------------------------------------------------------
     # v2 protocol — lifecycle
@@ -298,42 +278,6 @@ class AirflowAdapter:
                 adapter, AdapterCapability.DISCOVER, len(containers), duration_ms
             ),
             containers=containers,
-        )
-
-    # ------------------------------------------------------------------
-    # v2 protocol — SCHEMA (not declared — raises NotImplementedError)
-    # ------------------------------------------------------------------
-
-    async def extract_schema(
-        self,
-        adapter: PersistedSourceAdapter,
-    ) -> SchemaSnapshotV2:
-        """Not supported — Airflow is an orchestrator, not a data warehouse.
-
-        Raises:
-            NotImplementedError: Always.
-        """
-        raise NotImplementedError(
-            "AirflowAdapter does not support SCHEMA extraction "
-            "(AdapterCapability.SCHEMA is not in declared_capabilities)"
-        )
-
-    # ------------------------------------------------------------------
-    # v2 protocol — DEFINITIONS (not declared)
-    # ------------------------------------------------------------------
-
-    async def extract_definitions(
-        self,
-        adapter: PersistedSourceAdapter,
-    ) -> DefinitionSnapshot:
-        """Not supported — Airflow DAG source is Python, not SQL DDL.
-
-        Raises:
-            NotImplementedError: Always.
-        """
-        raise NotImplementedError(
-            "AirflowAdapter does not support DEFINITIONS extraction "
-            "(AdapterCapability.DEFINITIONS is not in declared_capabilities)"
         )
 
     # ------------------------------------------------------------------
@@ -526,28 +470,6 @@ class AirflowAdapter:
                 adapter, AdapterCapability.ORCHESTRATION, len(units), duration_ms
             ),
             units=tuple(units),
-        )
-
-    # ------------------------------------------------------------------
-    # v2 protocol — utility
-    # ------------------------------------------------------------------
-
-    async def execute_query(
-        self,
-        adapter: PersistedSourceAdapter,
-        sql: str,
-        *,
-        max_rows: int | None = None,
-        probe_target: str | None = None,
-        dry_run: bool = False,
-    ) -> QueryResult:
-        """Not supported — Airflow is an orchestrator and does not execute SQL.
-
-        Raises:
-            NotImplementedError: Always.
-        """
-        raise NotImplementedError(
-            "AirflowAdapter does not support query execution"
         )
 
     def get_setup_instructions(self) -> SetupInstructions:

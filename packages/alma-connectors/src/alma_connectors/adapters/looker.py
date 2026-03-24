@@ -32,15 +32,14 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 
+from alma_connectors.adapters._base import BaseAdapterV2
 from alma_connectors.source_adapter import (
     ConnectionTestResult,
     PersistedSourceAdapter,
-    QueryResult,
     SetupInstructions,
 )
 from alma_connectors.source_adapter_v2 import (
@@ -50,25 +49,22 @@ from alma_connectors.source_adapter_v2 import (
     DefinitionSnapshot,
     DiscoveredContainer,
     DiscoverySnapshot,
-    ExtractionMeta,
     ExtractionScope,
     LineageEdge,
     LineageEdgeKind,
     LineageSnapshot,
     ObjectDefinition,
-    OrchestrationSnapshot,
     SchemaObject,
     SchemaObjectKind,
     SchemaSnapshotV2,
     ScopeContext,
     SourceAdapterKindV2,
-    TrafficExtractionResult,
 )
 
 logger = logging.getLogger(__name__)
 
 
-class LookerAdapter:
+class LookerAdapter(BaseAdapterV2):
     """Looker source adapter.
 
     Implements the SourceAdapterV2 protocol against the Looker API (v4.0).
@@ -143,25 +139,8 @@ class LookerAdapter:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _make_meta(
-        self,
-        adapter: PersistedSourceAdapter,
-        capability: AdapterCapability,
-        row_count: int,
-        duration_ms: float,
-    ) -> ExtractionMeta:
-        return ExtractionMeta(
-            adapter_key=adapter.key,
-            adapter_kind=SourceAdapterKindV2.LOOKER,
-            capability=capability,
-            scope_context=ScopeContext(
-                scope=ExtractionScope.GLOBAL,
-                identifiers={"instance_url": self._instance_url},
-            ),
-            captured_at=datetime.now(UTC),
-            duration_ms=duration_ms,
-            row_count=row_count,
-        )
+    def _scope_identifiers(self) -> dict[str, str]:
+        return {"instance_url": self._instance_url}
 
     def _base_url(self) -> str:
         return f"{self._instance_url}:{self._port}/api/4.0"
@@ -457,31 +436,6 @@ class LookerAdapter:
         return DefinitionSnapshot(meta=meta, definitions=tuple(definitions))
 
     # ------------------------------------------------------------------
-    # v2 protocol — TRAFFIC (not declared)
-    # ------------------------------------------------------------------
-
-    async def extract_traffic(
-        self,
-        adapter: PersistedSourceAdapter,
-        *,
-        since: datetime | None = None,
-    ) -> TrafficExtractionResult:
-        """Not supported — Looker TRAFFIC extraction is not declared.
-
-        Note: Looker System Activity explores (``system__activity.history``) do
-        contain query history, but that capability is not declared in this stub.
-        Future implementors may add AdapterCapability.TRAFFIC by querying
-        ``GET /api/4.0/queries/run/json`` against the ``history`` explore.
-
-        Raises:
-            NotImplementedError: Always.
-        """
-        raise NotImplementedError(
-            "LookerAdapter does not declare TRAFFIC extraction. "
-            "See method docstring for notes on implementing it via system__activity."
-        )
-
-    # ------------------------------------------------------------------
     # v2 protocol — LINEAGE
     # ------------------------------------------------------------------
 
@@ -541,46 +495,6 @@ class LookerAdapter:
         duration_ms = (time.monotonic() - t0) * 1000
         meta = self._make_meta(adapter, AdapterCapability.LINEAGE, len(edges), duration_ms)
         return LineageSnapshot(meta=meta, edges=tuple(edges))
-
-    # ------------------------------------------------------------------
-    # v2 protocol — ORCHESTRATION (not declared)
-    # ------------------------------------------------------------------
-
-    async def extract_orchestration(
-        self,
-        adapter: PersistedSourceAdapter,
-    ) -> OrchestrationSnapshot:
-        """Not supported — Looker is a BI tool, not an orchestration system.
-
-        Raises:
-            NotImplementedError: Always.
-        """
-        raise NotImplementedError(
-            "LookerAdapter does not support ORCHESTRATION extraction "
-            "(AdapterCapability.ORCHESTRATION is not in declared_capabilities)"
-        )
-
-    # ------------------------------------------------------------------
-    # v2 protocol — utility
-    # ------------------------------------------------------------------
-
-    async def execute_query(
-        self,
-        adapter: PersistedSourceAdapter,
-        sql: str,
-        *,
-        max_rows: int | None = None,
-        probe_target: str | None = None,
-        dry_run: bool = False,
-    ) -> QueryResult:
-        """Not supported in this adapter.
-
-        Raises:
-            NotImplementedError: Always.
-        """
-        raise NotImplementedError(
-            "LookerAdapter does not support query execution"
-        )
 
     def get_setup_instructions(self) -> SetupInstructions:
         """Return operator guidance for enabling the Looker adapter.

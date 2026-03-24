@@ -10,10 +10,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from alma_connectors.adapters._base import BaseAdapterV2
 from alma_connectors.source_adapter import (
     ConnectionTestResult,
     PersistedSourceAdapter,
-    QueryResult,
     SchemaObjectKind,
     SchemaSnapshot,
     SetupInstructions,
@@ -31,19 +31,17 @@ from alma_connectors.source_adapter_v2 import (
     DefinitionSnapshot,
     DiscoveredContainer,
     DiscoverySnapshot,
-    ExtractionMeta,
     ExtractionScope,
     LineageEdge,
     LineageEdgeKind,
     LineageSnapshot,
     ObjectDefinition,
-    OrchestrationSnapshot,
     SchemaObject,
-    SchemaObjectKind as SchemaObjectKindV2,
     SchemaSnapshotV2,
     ScopeContext,
-    SourceAdapterKindV2,
-    TrafficExtractionResult,
+)
+from alma_connectors.source_adapter_v2 import (
+    SchemaObjectKind as SchemaObjectKindV2,
 )
 
 logger = logging.getLogger(__name__)
@@ -78,7 +76,7 @@ _MATERIALIZATION_KIND_V2: dict[str, SchemaObjectKindV2] = {
 }
 
 
-class DbtAdapter:
+class DbtAdapter(BaseAdapterV2):
     """File-based dbt source adapter.
 
     Parses dbt artifact files (manifest.json, catalog.json, run_results.json)
@@ -419,21 +417,6 @@ class DbtAdapter:
         )
         return TrafficObservationResult(scanned_records=0, events=())
 
-    async def execute_query(
-        self,
-        adapter: PersistedSourceAdapter,
-        sql: str,
-        *,
-        max_rows: int | None = None,
-        probe_target: str | None = None,
-    ) -> QueryResult:
-        """Not supported — dbt adapter is read-only and file-based.
-
-        Raises:
-            NotImplementedError: Always.
-        """
-        raise NotImplementedError("dbt adapter does not support query execution (can_execute_query=False)")
-
     def get_setup_instructions(self) -> SetupInstructions:
         """Return operator guidance for enabling the dbt adapter.
 
@@ -531,25 +514,8 @@ class DbtAdapter:
             tags=tags,
         )
 
-    def _make_meta(
-        self,
-        adapter: PersistedSourceAdapter,
-        capability: AdapterCapability,
-        row_count: int,
-        duration_ms: float,
-    ) -> ExtractionMeta:
-        return ExtractionMeta(
-            adapter_key=adapter.key,
-            adapter_kind=SourceAdapterKindV2.DBT,
-            capability=capability,
-            scope_context=ScopeContext(
-                scope=ExtractionScope.GLOBAL,
-                identifiers={"manifest_path": self._manifest_path},
-            ),
-            captured_at=datetime.now(UTC),
-            duration_ms=duration_ms,
-            row_count=row_count,
-        )
+    def _scope_identifiers(self) -> dict[str, str]:
+        return {"manifest_path": self._manifest_path}
 
     # ------------------------------------------------------------------
     # v2 — protocol methods
@@ -771,26 +737,3 @@ class DbtAdapter:
         meta = self._make_meta(adapter, AdapterCapability.LINEAGE, len(edges), duration_ms)
         return LineageSnapshot(meta=meta, edges=tuple(edges))
 
-    async def extract_traffic(
-        self,
-        adapter: PersistedSourceAdapter,
-        *,
-        since: datetime | None = None,
-    ) -> TrafficExtractionResult:
-        """Not supported — dbt has no live database.
-
-        Raises:
-            NotImplementedError: Always.
-        """
-        raise NotImplementedError("dbt adapter does not support TRAFFIC extraction (no live database)")
-
-    async def extract_orchestration(
-        self,
-        adapter: PersistedSourceAdapter,
-    ) -> OrchestrationSnapshot:
-        """Not supported — dbt has no orchestration primitives.
-
-        Raises:
-            NotImplementedError: Always.
-        """
-        raise NotImplementedError("dbt adapter does not support ORCHESTRATION extraction")

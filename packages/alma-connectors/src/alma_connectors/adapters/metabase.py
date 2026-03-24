@@ -39,24 +39,20 @@ from typing import Any
 
 import httpx
 
+from alma_connectors.adapters._base import BaseAdapterV2
 from alma_connectors.source_adapter import (
     ConnectionTestResult,
     ObservedQueryEvent,
     PersistedSourceAdapter,
-    QueryResult,
     SetupInstructions,
 )
 from alma_connectors.source_adapter_v2 import (
     AdapterCapability,
     CapabilityProbeResult,
     ColumnSchema,
-    DefinitionSnapshot,
     DiscoveredContainer,
     DiscoverySnapshot,
-    ExtractionMeta,
     ExtractionScope,
-    LineageSnapshot,
-    OrchestrationSnapshot,
     SchemaObject,
     SchemaObjectKind,
     SchemaSnapshotV2,
@@ -68,7 +64,7 @@ from alma_connectors.source_adapter_v2 import (
 logger = logging.getLogger(__name__)
 
 
-class MetabaseAdapter:
+class MetabaseAdapter(BaseAdapterV2):
     """Metabase source adapter.
 
     Implements the SourceAdapterV2 protocol against the Metabase REST API.
@@ -136,25 +132,8 @@ class MetabaseAdapter:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _make_meta(
-        self,
-        adapter: PersistedSourceAdapter,
-        capability: AdapterCapability,
-        row_count: int,
-        duration_ms: float,
-    ) -> ExtractionMeta:
-        return ExtractionMeta(
-            adapter_key=adapter.key,
-            adapter_kind=SourceAdapterKindV2.METABASE,
-            capability=capability,
-            scope_context=ScopeContext(
-                scope=ExtractionScope.GLOBAL,
-                identifiers={"instance_url": self._instance_url},
-            ),
-            captured_at=datetime.now(UTC),
-            duration_ms=duration_ms,
-            row_count=row_count,
-        )
+    def _scope_identifiers(self) -> dict[str, str]:
+        return {"instance_url": self._instance_url}
 
     def _get_auth_headers(self) -> dict[str, str]:
         """Return the correct authentication headers for API requests."""
@@ -358,24 +337,6 @@ class MetabaseAdapter:
         )
 
     # ------------------------------------------------------------------
-    # v2 protocol — DEFINITIONS (not declared)
-    # ------------------------------------------------------------------
-
-    async def extract_definitions(
-        self,
-        adapter: PersistedSourceAdapter,
-    ) -> DefinitionSnapshot:
-        """Not supported — Metabase does not expose DDL definitions.
-
-        Raises:
-            NotImplementedError: Always.
-        """
-        raise NotImplementedError(
-            "MetabaseAdapter does not support DEFINITIONS extraction "
-            "(AdapterCapability.DEFINITIONS is not in declared_capabilities)"
-        )
-
-    # ------------------------------------------------------------------
     # v2 protocol — TRAFFIC
     # ------------------------------------------------------------------
 
@@ -454,64 +415,6 @@ class MetabaseAdapter:
         return TrafficExtractionResult(
             meta=self._make_meta(adapter, AdapterCapability.TRAFFIC, len(events), duration_ms),
             events=tuple(events),
-        )
-
-    # ------------------------------------------------------------------
-    # v2 protocol — LINEAGE (not declared)
-    # ------------------------------------------------------------------
-
-    async def extract_lineage(
-        self,
-        adapter: PersistedSourceAdapter,
-    ) -> LineageSnapshot:
-        """Not supported — Metabase does not expose lineage natively.
-
-        Raises:
-            NotImplementedError: Always.
-        """
-        raise NotImplementedError(
-            "MetabaseAdapter does not support LINEAGE extraction "
-            "(AdapterCapability.LINEAGE is not in declared_capabilities)"
-        )
-
-    # ------------------------------------------------------------------
-    # v2 protocol — ORCHESTRATION (not declared)
-    # ------------------------------------------------------------------
-
-    async def extract_orchestration(
-        self,
-        adapter: PersistedSourceAdapter,
-    ) -> OrchestrationSnapshot:
-        """Not supported — Metabase is a BI tool, not an orchestration system.
-
-        Raises:
-            NotImplementedError: Always.
-        """
-        raise NotImplementedError(
-            "MetabaseAdapter does not support ORCHESTRATION extraction "
-            "(AdapterCapability.ORCHESTRATION is not in declared_capabilities)"
-        )
-
-    # ------------------------------------------------------------------
-    # v2 protocol — utility
-    # ------------------------------------------------------------------
-
-    async def execute_query(
-        self,
-        adapter: PersistedSourceAdapter,
-        sql: str,
-        *,
-        max_rows: int | None = None,
-        probe_target: str | None = None,
-        dry_run: bool = False,
-    ) -> QueryResult:
-        """Not supported in this stub.
-
-        Raises:
-            NotImplementedError: Always.
-        """
-        raise NotImplementedError(
-            "MetabaseAdapter does not support query execution in this stub"
         )
 
     def get_setup_instructions(self) -> SetupInstructions:
