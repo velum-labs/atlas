@@ -40,20 +40,26 @@ from alma_connectors.source_adapter import (
 from alma_connectors.source_adapter_v2 import (
     AdapterCapability,
     CapabilityProbeResult,
-    ColumnSchema as ColumnSchemaV2,
     DefinitionSnapshot,
     DiscoveredContainer,
     DiscoverySnapshot,
     ExtractionMeta,
     ExtractionScope,
     ObjectDefinition,
-    ObjectDependency as ObjectDependencyV2,
     SchemaObject,
-    SchemaObjectKind as SchemaObjectKindV2,
     SchemaSnapshotV2,
     ScopeContext,
     SourceAdapterKindV2,
     TrafficExtractionResult,
+)
+from alma_connectors.source_adapter_v2 import (
+    ColumnSchema as ColumnSchemaV2,
+)
+from alma_connectors.source_adapter_v2 import (
+    ObjectDependency as ObjectDependencyV2,
+)
+from alma_connectors.source_adapter_v2 import (
+    SchemaObjectKind as SchemaObjectKindV2,
 )
 
 _DEFAULT_POSTGRES_INCLUDE_SCHEMAS = ("public",)

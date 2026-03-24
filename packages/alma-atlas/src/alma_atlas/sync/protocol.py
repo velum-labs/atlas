@@ -44,7 +44,7 @@ class SyncResponse:
     new_cursor: str = ""
 
     @classmethod
-    def from_dict(cls, data: dict) -> "SyncResponse":
+    def from_dict(cls, data: dict) -> SyncResponse:
         rejected = [RejectedItem(**r) for r in data.get("rejected", [])]
         return cls(
             accepted_count=data.get("accepted_count", 0),

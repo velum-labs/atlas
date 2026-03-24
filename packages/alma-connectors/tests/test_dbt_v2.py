@@ -24,8 +24,10 @@ from alma_connectors.source_adapter_v2 import (
     DiscoverySnapshot,
     LineageEdgeKind,
     LineageSnapshot,
-    SchemaObjectKind as SchemaObjectKindV2,
     SchemaSnapshotV2,
+)
+from alma_connectors.source_adapter_v2 import (
+    SchemaObjectKind as SchemaObjectKindV2,
 )
 
 # ---------------------------------------------------------------------------

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -13,13 +12,9 @@ from alma_atlas.config import AtlasConfig
 from alma_atlas.sync.auth import TeamAuth
 from alma_atlas.sync.client import SyncClient
 from alma_atlas.sync.conflict import ConflictResolver
-from alma_atlas.sync.protocol import RejectedItem, SyncPayload, SyncResponse
+from alma_atlas.sync.protocol import SyncPayload, SyncResponse
 from alma_atlas_store.asset_repository import Asset, AssetRepository
-from alma_atlas_store.contract_repository import Contract, ContractRepository
 from alma_atlas_store.db import Database
-from alma_atlas_store.edge_repository import Edge, EdgeRepository
-from alma_atlas_store.violation_repository import Violation, ViolationRepository
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

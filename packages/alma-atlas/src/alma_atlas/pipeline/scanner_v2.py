@@ -30,8 +30,8 @@ from alma_connectors.source_adapter_v2 import (
 )
 
 if TYPE_CHECKING:
-    from alma_connectors.source_adapter import PersistedSourceAdapter
     from alma_atlas.config import AtlasConfig, SourceConfig
+    from alma_connectors.source_adapter import PersistedSourceAdapter
 
 logger = logging.getLogger(__name__)
 

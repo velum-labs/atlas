@@ -6,16 +6,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 from alma_atlas.config import AtlasConfig, SourceConfig
 from alma_atlas.pipeline.scanner_v2 import (
+    _CAPABILITY_ORDER,
     CapabilityRouter,
     ExtractionPipeline,
     ExtractionPlan,
     ScannerV2,
     ScanResultV2,
-    _CAPABILITY_ORDER,
     run_scan_v2,
 )
 from alma_connectors.source_adapter_v2 import (
@@ -31,7 +29,6 @@ from alma_connectors.source_adapter_v2 import (
     LineageSnapshot,
     ObjectDefinition,
     OrchestrationSnapshot,
-    OrchestrationUnit,
     SchemaObject,
     SchemaObjectKind,
     SchemaSnapshotV2,

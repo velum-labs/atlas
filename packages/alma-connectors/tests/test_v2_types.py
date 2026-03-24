@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
-from datetime import datetime, timezone
 
 from alma_connectors.source_adapter import (
     ConnectionTestResult,
-    ManagedSecret,
     ObservedQueryEvent,
     PersistedSourceAdapter,
-    PostgresAdapterConfig,
     QueryResult,
     SetupInstructions,
 )
@@ -44,7 +43,7 @@ from alma_connectors.source_adapter_v2 import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-_NOW = datetime(2026, 3, 23, 12, 0, 0, tzinfo=timezone.utc)
+_NOW = datetime(2026, 3, 23, 12, 0, 0, tzinfo=UTC)
 
 _SCOPE_CTX = ScopeContext(
     scope=ExtractionScope.GLOBAL,

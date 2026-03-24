@@ -36,7 +36,6 @@ from alma_connectors.source_adapter import (
 from alma_connectors.source_adapter_v2 import (
     AdapterCapability,
     CapabilityProbeResult,
-    ColumnSchema as V2ColumnSchema,
     DefinitionSnapshot,
     DiscoveredContainer,
     DiscoverySnapshot,
@@ -44,11 +43,16 @@ from alma_connectors.source_adapter_v2 import (
     ExtractionScope,
     ObjectDefinition,
     SchemaObject,
-    SchemaObjectKind as V2SchemaObjectKind,
     SchemaSnapshotV2,
     ScopeContext,
     SourceAdapterKindV2,
     TrafficExtractionResult,
+)
+from alma_connectors.source_adapter_v2 import (
+    ColumnSchema as V2ColumnSchema,
+)
+from alma_connectors.source_adapter_v2 import (
+    SchemaObjectKind as V2SchemaObjectKind,
 )
 
 logger = logging.getLogger(__name__)

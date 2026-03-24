@@ -7,7 +7,6 @@ import pytest
 from alma_atlas_store.db import Database
 from alma_atlas_store.schema_repository import ColumnInfo, SchemaSnapshot
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

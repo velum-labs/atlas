@@ -13,16 +13,13 @@ For live Postgres tests, set:
 
 from __future__ import annotations
 
-import json
 import os
 import sqlite3
-import tempfile
 from pathlib import Path
 
 import pytest
 
 from alma_atlas.config import AtlasConfig, SourceConfig
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -204,7 +201,7 @@ class TestMultiSourceIntegration:
     """Integration tests with multiple sources (dbt + Postgres)."""
 
     def test_multi_source_scan(self, atlas_config: AtlasConfig) -> None:
-        from alma_atlas.pipeline.scan import run_scan, run_scan_all
+        from alma_atlas.pipeline.scan import run_scan_all
 
         atlas_config.add_source(
             SourceConfig(

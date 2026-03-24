@@ -387,8 +387,8 @@ def compute_analytics(events: list[ObservedQueryEvent]) -> DerivedAnalytics:
 
 
 async def compute_analytics_server_side(
-    adapter: "SourceAdapterV2",
-    persisted: "PersistedSourceAdapter",
+    adapter: SourceAdapterV2,
+    persisted: PersistedSourceAdapter,
     events: list[ObservedQueryEvent],
 ) -> DerivedAnalytics:
     """Attempt server-side aggregation; fall back to client-side transparently.

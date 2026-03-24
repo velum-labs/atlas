@@ -64,14 +64,14 @@ class SyncClient:
         server_url: str,
         auth: TeamAuth,
         team_id: str,
-        http_client: "httpx.AsyncClient | None" = None,
+        http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self._server_url = server_url.rstrip("/")
         self._auth = auth
         self._team_id = team_id
         self._http_client = http_client  # injected for testing; created lazily otherwise
 
-    def _get_client(self) -> "httpx.AsyncClient":
+    def _get_client(self) -> httpx.AsyncClient:
         import httpx
 
         if self._http_client is not None:
@@ -140,14 +140,14 @@ class SyncClient:
 
     # ------------------------------------------------------------------ full sync
 
-    async def full_sync(self, db: "Database", cfg: "AtlasConfig") -> SyncResponse:
+    async def full_sync(self, db: Database, cfg: AtlasConfig) -> SyncResponse:
         """Push all local changes and pull team contracts/assets.
 
         Uses the stored sync cursor so only records changed since the last
         sync are transmitted.  Saves the new cursor on success.
         """
         from alma_atlas_store.asset_repository import AssetRepository
-        from alma_atlas_store.contract_repository import Contract, ContractRepository
+        from alma_atlas_store.contract_repository import ContractRepository
         from alma_atlas_store.edge_repository import EdgeRepository
         from alma_atlas_store.violation_repository import ViolationRepository
 

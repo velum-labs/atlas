@@ -101,12 +101,14 @@ from alma_connectors.source_adapter_v2 import (
     OrchestrationTask,
     OrchestrationUnit,
     SchemaObject,
-    SchemaObjectKind as SchemaObjectKindV2,
     SchemaSnapshotV2,
     ScopeContext,
     SourceAdapterKindV2,
     SourceAdapterV2,
     TrafficExtractionResult,
+)
+from alma_connectors.source_adapter_v2 import (
+    SchemaObjectKind as SchemaObjectKindV2,
 )
 
 __all__ = [

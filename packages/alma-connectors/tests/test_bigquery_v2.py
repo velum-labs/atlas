@@ -5,14 +5,12 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
 from alma_connectors import (
     BigQueryAdapterConfig,
     ExternalSecretRef,
-    ManagedSecret,
     PersistedSourceAdapter,
     SourceAdapterKind,
     SourceAdapterStatus,
@@ -23,9 +21,11 @@ from alma_connectors.source_adapter_v2 import (
     DefinitionSnapshot,
     DiscoverySnapshot,
     ExtractionScope,
-    SchemaObjectKind as V2SchemaObjectKind,
     SchemaSnapshotV2,
     TrafficExtractionResult,
+)
+from alma_connectors.source_adapter_v2 import (
+    SchemaObjectKind as V2SchemaObjectKind,
 )
 
 # ---------------------------------------------------------------------------

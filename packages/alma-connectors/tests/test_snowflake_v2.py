@@ -20,6 +20,8 @@ from alma_connectors.adapters.snowflake import SnowflakeAdapter
 from alma_connectors.source_adapter_v2 import (
     AdapterCapability,
     LineageEdgeKind,
+)
+from alma_connectors.source_adapter_v2 import (
     SchemaObjectKind as V2SchemaObjectKind,
 )
 

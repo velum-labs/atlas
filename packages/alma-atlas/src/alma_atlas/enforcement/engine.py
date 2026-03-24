@@ -39,7 +39,7 @@ class EnforcementResult:
 class EnforcementEngine:
     """Apply enforcement policy to a DriftReport and persist violations."""
 
-    def __init__(self, db: "Database") -> None:
+    def __init__(self, db: Database) -> None:
         self._db = db
 
     def enforce(
