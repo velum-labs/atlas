@@ -11,7 +11,7 @@ from rich import print as rprint
 from rich.console import Console
 
 import alma_atlas
-from alma_atlas.cli import connect, export, lineage, scan, search, serve, status
+from alma_atlas.cli import connect, enforce, export, lineage, scan, search, serve, status
 
 app = typer.Typer(
     name="alma-atlas",
@@ -28,6 +28,7 @@ app.add_typer(status.app, name="status")
 app.add_typer(search.app, name="search")
 app.add_typer(lineage.app, name="lineage")
 app.add_typer(export.app, name="export")
+app.add_typer(enforce.app, name="enforce")
 
 console = Console()
 

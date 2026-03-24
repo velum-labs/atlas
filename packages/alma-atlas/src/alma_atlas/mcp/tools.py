@@ -14,6 +14,7 @@ Tool catalogue:
     - atlas_get_query_patterns  Show top SQL query patterns by execution count
     - atlas_suggest_tables      Suggest relevant tables for a search query
     - atlas_check_contract      Validate schema against data contract spec
+    - atlas_list_violations     List recent enforcement violations from the store
 """
 
 from __future__ import annotations
@@ -134,6 +135,17 @@ def register(server: Server, cfg: AtlasConfig) -> None:
                     "required": ["asset_id"],
                 },
             ),
+            Tool(
+                name="atlas_list_violations",
+                description="List recent enforcement violations stored in Atlas. Optionally filter by asset ID.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "asset_id": {"type": "string", "description": "Filter violations to a specific asset ID (omit for all assets)"},
+                        "limit": {"type": "integer", "description": "Maximum number of violations to return", "default": 50},
+                    },
+                },
+            ),
         ]
 
     @server.call_tool()
@@ -167,6 +179,9 @@ def register(server: Server, cfg: AtlasConfig) -> None:
 
         if name == "atlas_check_contract":
             return _handle_check_contract(cfg, arguments)
+
+        if name == "atlas_list_violations":
+            return _handle_list_violations(cfg, arguments)
 
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
@@ -453,6 +468,35 @@ def _handle_suggest_tables(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[
         lines.append(f"  {asset.id}  [{asset.kind}]  relevance={score:.2f}")
         if col_names:
             lines.append(f"    columns: {cols_preview}")
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _handle_list_violations(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
+    from alma_atlas_store.db import Database
+    from alma_atlas_store.violation_repository import ViolationRepository
+
+    asset_id = arguments.get("asset_id")
+    limit = arguments.get("limit", 50)
+
+    with Database(cfg.db_path) as db:
+        repo = ViolationRepository(db)
+        if asset_id:
+            violations = repo.list_for_asset(asset_id)[:limit]
+        else:
+            violations = repo.list_recent(limit=limit)
+
+    if not violations:
+        msg = f"No open violations found for {asset_id!r}." if asset_id else "No open violations found."
+        return [TextContent(type="text", text=msg)]
+
+    lines = [f"{len(violations)} open violation(s):\n"]
+    for v in violations:
+        resolved = " [resolved]" if v.resolved_at else ""
+        lines.append(
+            f"  [{v.severity}] {v.asset_id}  {v.violation_type}{resolved}"
+            f"\n    {v.details.get('message', json.dumps(v.details))}"
+            f"\n    detected: {v.detected_at}"
+        )
     return [TextContent(type="text", text="\n".join(lines))]
 
 

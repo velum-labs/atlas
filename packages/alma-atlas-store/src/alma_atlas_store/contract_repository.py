@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from alma_atlas_store.db import Database
 
@@ -19,6 +19,7 @@ class Contract:
     version: str
     spec: dict[str, Any]
     status: str = "draft"
+    mode: Literal["shadow", "warn", "enforce"] = "shadow"
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -33,12 +34,13 @@ class ContractRepository:
         """Insert or update a data contract."""
         self._db.conn.execute(
             """
-            INSERT INTO contracts (id, asset_id, version, spec, status, updated_at)
-            VALUES (:id, :asset_id, :version, :spec, :status, CURRENT_TIMESTAMP)
+            INSERT INTO contracts (id, asset_id, version, spec, status, mode, updated_at)
+            VALUES (:id, :asset_id, :version, :spec, :status, :mode, CURRENT_TIMESTAMP)
             ON CONFLICT(id) DO UPDATE SET
                 version    = excluded.version,
                 spec       = excluded.spec,
                 status     = excluded.status,
+                mode       = excluded.mode,
                 updated_at = CURRENT_TIMESTAMP
             """,
             {
@@ -47,6 +49,7 @@ class ContractRepository:
                 "version": contract.version,
                 "spec": json.dumps(contract.spec),
                 "status": contract.status,
+                "mode": contract.mode,
             },
         )
         self._db.conn.commit()
@@ -75,6 +78,7 @@ class ContractRepository:
             version=row["version"],
             spec=json.loads(row["spec"]),
             status=row["status"],
+            mode=row["mode"] if row["mode"] in ("shadow", "warn", "enforce") else "shadow",
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )

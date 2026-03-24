@@ -116,12 +116,73 @@ def run_scan(source: SourceConfig, cfg: AtlasConfig) -> ScanResult:
 
         edge_count = stitch(traffic, db, source_id=source.id, source_kind=source.kind) + dep_edge_count
 
+    _run_enforcement(snapshot, source.id, cfg)
+
     return ScanResult(
         source_id=source.id,
         asset_count=len(snapshot.objects),
         edge_count=edge_count,
         snapshot=snapshot,
     )
+
+
+def _run_enforcement(snapshot: "SchemaSnapshot", source_id: str, cfg: "AtlasConfig") -> None:
+    """Run drift detection + enforcement for any assets that have contracts.
+
+    Silently skips assets without contracts.  Enforcement violations are
+    always persisted to the store; the mode on each contract controls whether
+    the result is merely logged (shadow), surfaced (warn), or blocking
+    (enforce — currently logged but not raising, as the pipeline caller is
+    responsible for acting on ScanResult.warnings).
+    """
+    import logging
+
+    from alma_atlas.enforcement.drift import DriftDetector
+    from alma_atlas.enforcement.engine import EnforcementEngine
+    from alma_atlas_store.contract_repository import ContractRepository
+    from alma_atlas_store.db import Database
+    from alma_atlas_store.schema_repository import ColumnInfo, SchemaRepository
+    from alma_atlas_store.schema_repository import SchemaSnapshot as StoreSnapshot
+
+    log = logging.getLogger(__name__)
+    detector = DriftDetector()
+
+    with Database(cfg.db_path) as db:  # type: ignore[arg-type]
+        contract_repo = ContractRepository(db)
+        schema_repo = SchemaRepository(db)
+        engine = EnforcementEngine(db)
+
+        for obj in snapshot.objects:
+            asset_id = f"{source_id}::{obj.schema_name}.{obj.object_name}"
+            contracts = contract_repo.list_for_asset(asset_id)
+            if not contracts:
+                continue
+
+            previous = schema_repo.get_latest(asset_id)
+            # Build current StoreSnapshot from the connector SchemaSnapshot object.
+            current_cols = [
+                ColumnInfo(
+                    name=c.name,
+                    type=getattr(c, "data_type", None) or getattr(c, "type", "unknown"),
+                    nullable=getattr(c, "nullable", True),
+                )
+                for c in (obj.columns or [])
+            ]
+            current = StoreSnapshot(asset_id=asset_id, columns=current_cols)
+
+            report = detector.detect(asset_id, previous, current)
+            if not report.has_violations:
+                continue
+
+            for contract in contracts:
+                result = engine.enforce(report, contract.mode)
+                if result.blocked:
+                    log.warning(
+                        "[enforcement/enforce] Pipeline BLOCKED for asset %s — "
+                        "%d error violation(s) detected.",
+                        asset_id,
+                        report.error_count,
+                    )
 
 
 def run_scan_all(sources: list[SourceConfig], cfg: AtlasConfig) -> ScanAllResult:
