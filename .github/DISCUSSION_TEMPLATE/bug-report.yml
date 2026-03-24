@@ -1,0 +1,78 @@
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please fill in as much detail as you can. Include the full error output if available.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear description of the bug.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The exact commands or sequence that triggers the issue.
+      placeholder: |
+        1. alma-atlas connect bigquery --project ...
+        2. alma-atlas scan
+        3. See error: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Full error output
+      description: Paste the complete error message or traceback.
+      render: text
+
+  - type: input
+    id: version
+    attributes:
+      label: Atlas version
+      description: Run `alma-atlas --version`
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: adapter
+    attributes:
+      label: Adapter
+      description: Which adapter is involved?
+      options:
+        - BigQuery
+        - Snowflake
+        - PostgreSQL
+        - dbt
+        - MCP server
+        - CLI (no adapter)
+        - Other / unsure
+
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      description: Run `python --version`
+      placeholder: "3.12.3"
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "macOS 14.4, Ubuntu 22.04, Windows 11"

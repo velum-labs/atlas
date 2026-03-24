@@ -1,0 +1,54 @@
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to propose a feature. Please describe what you need and why.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do that Atlas doesn't support today?
+      placeholder: "e.g. I can't connect Atlas to Redshift, so I can't get schemas for our warehouse"
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would you like Atlas to do? Be as specific as you can.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of Atlas does this relate to?
+      options:
+        - New adapter (data source)
+        - Existing adapter improvement
+        - MCP tools
+        - CLI commands
+        - Lineage inference
+        - Graph / storage
+        - Performance
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: How are you working around this today?
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Stack size, data sources, use case — anything that helps us understand the priority.

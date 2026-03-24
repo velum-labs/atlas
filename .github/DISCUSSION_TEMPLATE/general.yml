@@ -1,0 +1,28 @@
+title: ""
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for questions, sharing how you use Atlas, or anything that doesn't fit a bug report or feature request.
+
+  - type: textarea
+    id: content
+    attributes:
+      label: What's on your mind?
+      description: Questions, ideas, feedback, war stories about data lineage — all welcome.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      options:
+        - Question (how do I...)
+        - Show and tell (here's how I'm using Atlas)
+        - RFC / design discussion
+        - General feedback
+        - Other
+    validations:
+      required: true
