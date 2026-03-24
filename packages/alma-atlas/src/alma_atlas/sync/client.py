@@ -12,6 +12,7 @@ Responsibilities:
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from alma_atlas.sync.auth import TeamAuth
@@ -27,6 +28,15 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 _NULL_CURSOR = "1970-01-01T00:00:00Z"
+
+
+def _parse_ts(ts: str | None) -> datetime:
+    if not ts:
+        return datetime.min.replace(tzinfo=UTC)
+    dt = datetime.fromisoformat(ts)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt
 
 
 def _asset_to_dict(a: Any) -> dict:
@@ -70,13 +80,29 @@ class SyncClient:
         self._auth = auth
         self._team_id = team_id
         self._http_client = http_client  # injected for testing; created lazily otherwise
+        self._owns_client = False
+
+    async def __aenter__(self) -> SyncClient:
+        import httpx
+
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(timeout=30)
+            self._owns_client = True
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        if self._owns_client and self._http_client is not None:
+            await self._http_client.aclose()
+            self._http_client = None
+            self._owns_client = False
 
     def _get_client(self) -> httpx.AsyncClient:
         import httpx
 
-        if self._http_client is not None:
-            return self._http_client
-        return httpx.AsyncClient(timeout=30)
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(timeout=30)
+            self._owns_client = True
+        return self._http_client
 
     async def _post(self, path: str, body: dict) -> dict:
         client = self._get_client()
@@ -159,10 +185,10 @@ class SyncClient:
         all_contracts = ContractRepository(db).list_all()
         all_violations = ViolationRepository(db).list_recent(limit=1000)
 
-        assets = [a for a in all_assets if (a.last_seen or "") >= cursor]
-        edges = [e for e in all_edges if (e.last_seen or "") >= cursor]
-        contracts = [c for c in all_contracts if (c.updated_at or "") >= cursor]
-        violations = [v for v in all_violations if (v.detected_at or "") >= cursor]
+        assets = [a for a in all_assets if _parse_ts(a.last_seen) >= _parse_ts(cursor)]
+        edges = [e for e in all_edges if _parse_ts(e.last_seen) >= _parse_ts(cursor)]
+        contracts = [c for c in all_contracts if _parse_ts(c.updated_at) >= _parse_ts(cursor)]
+        violations = [v for v in all_violations if _parse_ts(v.detected_at) >= _parse_ts(cursor)]
 
         log.info(
             "[sync] pushing %d assets, %d edges, %d contracts, %d violations (cursor=%s)",
@@ -173,11 +199,19 @@ class SyncClient:
             cursor,
         )
 
-        # Push all record types; collect final response from assets push
+        # Push all record types; log warnings for any rejected items
         asset_resp = await self.push_assets([_asset_to_dict(a) for a in assets], cursor)
-        await self.push_edges([_edge_to_dict(e) for e in edges], cursor)
-        await self.push_contracts([_contract_to_dict(c) for c in contracts], cursor)
-        await self.push_violations([_violation_to_dict(v) for v in violations], cursor)
+        if asset_resp.rejected:
+            log.warning("[sync] server rejected %d asset(s)", len(asset_resp.rejected))
+        edge_resp = await self.push_edges([_edge_to_dict(e) for e in edges], cursor)
+        if edge_resp.rejected:
+            log.warning("[sync] server rejected %d edge(s)", len(edge_resp.rejected))
+        contract_push_resp = await self.push_contracts([_contract_to_dict(c) for c in contracts], cursor)
+        if contract_push_resp.rejected:
+            log.warning("[sync] server rejected %d contract(s)", len(contract_push_resp.rejected))
+        violation_resp = await self.push_violations([_violation_to_dict(v) for v in violations], cursor)
+        if violation_resp.rejected:
+            log.warning("[sync] server rejected %d violation(s)", len(violation_resp.rejected))
 
         new_cursor = asset_resp.new_cursor or cursor
 

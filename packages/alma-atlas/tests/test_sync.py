@@ -160,8 +160,8 @@ class TestSyncClientPush:
             pull_assets=[],
             pull_contracts=[],
         )
-        client = SyncClient("https://team.example.com", auth, "team42", http_client=http)
-        resp = await client.push_assets([{"id": "a1"}, {"id": "a2"}], "2024-01-01T00:00:00Z")
+        async with SyncClient("https://team.example.com", auth, "team42", http_client=http) as client:
+            resp = await client.push_assets([{"id": "a1"}, {"id": "a2"}], "2024-01-01T00:00:00Z")
         assert resp.accepted_count == 2
         assert resp.new_cursor == "2024-06-01T00:00:00Z"
         http.post.assert_called_once()
@@ -177,8 +177,8 @@ class TestSyncClientPush:
             pull_assets=[],
             pull_contracts=[],
         )
-        client = SyncClient("https://team.example.com", auth, "teamX", http_client=http)
-        resp = await client.push_edges([{"upstream_id": "a", "downstream_id": "b", "kind": "reads"}], "2024-01-01T00:00:00Z")
+        async with SyncClient("https://team.example.com", auth, "teamX", http_client=http) as client:
+            resp = await client.push_edges([{"upstream_id": "a", "downstream_id": "b", "kind": "reads"}], "2024-01-01T00:00:00Z")
         assert resp.accepted_count == 1
 
     @pytest.mark.asyncio
@@ -188,8 +188,8 @@ class TestSyncClientPush:
             pull_assets=[],
             pull_contracts=[],
         )
-        client = SyncClient("https://team.example.com", auth, "teamX", http_client=http)
-        resp = await client.push_contracts([{"id": "c1"}], "2024-01-01T00:00:00Z")
+        async with SyncClient("https://team.example.com", auth, "teamX", http_client=http) as client:
+            resp = await client.push_contracts([{"id": "c1"}], "2024-01-01T00:00:00Z")
         assert resp.accepted_count == 1
 
     @pytest.mark.asyncio
@@ -199,8 +199,8 @@ class TestSyncClientPush:
             pull_assets=[],
             pull_contracts=[],
         )
-        client = SyncClient("https://team.example.com", auth, "teamX", http_client=http)
-        resp = await client.push_violations([{"id": "v1"}], "2024-01-01T00:00:00Z")
+        async with SyncClient("https://team.example.com", auth, "teamX", http_client=http) as client:
+            resp = await client.push_violations([{"id": "v1"}], "2024-01-01T00:00:00Z")
         assert resp.accepted_count == 1
 
 
@@ -218,8 +218,8 @@ class TestSyncClientPull:
             pull_assets=remote_assets,
             pull_contracts=[],
         )
-        client = SyncClient("https://team.example.com", auth, "teamX", http_client=http)
-        assets = await client.pull_assets("2024-01-01T00:00:00Z")
+        async with SyncClient("https://team.example.com", auth, "teamX", http_client=http) as client:
+            assets = await client.pull_assets("2024-01-01T00:00:00Z")
         assert len(assets) == 1
         assert assets[0]["id"] == "ra1"
 
@@ -231,8 +231,8 @@ class TestSyncClientPull:
             pull_assets=[],
             pull_contracts=remote_contracts,
         )
-        client = SyncClient("https://team.example.com", auth, "teamX", http_client=http)
-        contracts = await client.pull_contracts("2024-01-01T00:00:00Z")
+        async with SyncClient("https://team.example.com", auth, "teamX", http_client=http) as client:
+            contracts = await client.pull_contracts("2024-01-01T00:00:00Z")
         assert len(contracts) == 1
         assert contracts[0]["mode"] == "enforce"
 
@@ -262,9 +262,9 @@ class TestIncrementalSync:
             pull_assets=[],
             pull_contracts=[],
         )
-        client = SyncClient("https://team.example.com", auth, "team1", http_client=http)
-        tmp_cfg.team_id = "team1"
-        await client.full_sync(db, tmp_cfg)
+        async with SyncClient("https://team.example.com", auth, "team1", http_client=http) as client:
+            tmp_cfg.team_id = "team1"
+            await client.full_sync(db, tmp_cfg)
         assert tmp_cfg.load_sync_cursor() == "2024-06-15T00:00:00Z"
 
     @pytest.mark.asyncio
@@ -300,9 +300,9 @@ class TestIncrementalSync:
         http.post = AsyncMock(side_effect=fake_post)
         http.get = AsyncMock(side_effect=fake_get)
 
-        client = SyncClient("https://team.example.com", auth, "team1", http_client=http)
-        tmp_cfg.team_id = "team1"
-        await client.full_sync(db, tmp_cfg)
+        async with SyncClient("https://team.example.com", auth, "team1", http_client=http) as client:
+            tmp_cfg.team_id = "team1"
+            await client.full_sync(db, tmp_cfg)
 
         # The assets push should have sent 0 assets (old asset is before cursor)
         assets_push = posted_bodies[0]  # first post is assets
@@ -328,8 +328,8 @@ class TestTeamAuthHeaders:
 
         http = MagicMock()
         http.post = AsyncMock(side_effect=fake_post)
-        client = SyncClient("https://team.example.com", auth, "team1", http_client=http)
-        await client.push_assets([], "2024-01-01T00:00:00Z")
+        async with SyncClient("https://team.example.com", auth, "team1", http_client=http) as client:
+            await client.push_assets([], "2024-01-01T00:00:00Z")
         assert captured_headers[0].get("Authorization") == "Bearer test-api-key-123"
 
     @pytest.mark.asyncio
@@ -345,8 +345,8 @@ class TestTeamAuthHeaders:
 
         http = MagicMock()
         http.get = AsyncMock(side_effect=fake_get)
-        client = SyncClient("https://team.example.com", auth, "team1", http_client=http)
-        await client.pull_assets("2024-01-01T00:00:00Z")
+        async with SyncClient("https://team.example.com", auth, "team1", http_client=http) as client:
+            await client.pull_assets("2024-01-01T00:00:00Z")
         assert captured_headers[0].get("Authorization") == "Bearer test-api-key-123"
 
 
