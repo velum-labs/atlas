@@ -1213,7 +1213,9 @@ class BigQueryAdapter(SourceAdapter):
         started_at = time.perf_counter()
         captured_at = datetime.now(tz=UTC)
 
-        v1_result = await self.observe_traffic(adapter, since=since)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            v1_result = await self.observe_traffic(adapter, since=since)
 
         config = self._get_config(adapter)
         project_id, _ = self._credentials(adapter)

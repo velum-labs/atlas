@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import time
@@ -62,6 +63,8 @@ from alma_connectors.source_adapter_v2 import (
     SchemaObjectKind as SchemaObjectKindV2,
 )
 
+logger = logging.getLogger(__name__)
+
 _DEFAULT_POSTGRES_INCLUDE_SCHEMAS = ("public",)
 _DEFAULT_POSTGRES_EXCLUDE_SCHEMAS = ("pg_catalog", "information_schema")
 _PG_STAT_STATEMENTS_SQL = """\
@@ -91,8 +94,10 @@ _POSTGRES_LOG_PREFIX_PATTERN = re.compile(
 )
 _POSTGRES_DURATION_BODY_PATTERN = re.compile(r"duration:\s+(?P<duration_ms>[0-9.]+)\s+ms\s+statement:\s+(?P<sql>.+)$")
 _POSTGRES_LOG_TIMEZONE_OFFSETS = {
+    # UTC / GMT
     "UTC": "+00:00",
     "GMT": "+00:00",
+    # North America
     "PST": "-08:00",
     "PDT": "-07:00",
     "MST": "-07:00",
@@ -101,8 +106,32 @@ _POSTGRES_LOG_TIMEZONE_OFFSETS = {
     "CDT": "-05:00",
     "EST": "-05:00",
     "EDT": "-04:00",
+    # South America
+    "BRT": "-03:00",
+    "ART": "-03:00",
+    "CLT": "-04:00",
+    "CLST": "-03:00",
+    # Europe
+    "WET": "+00:00",
+    "WEST": "+01:00",
     "CET": "+01:00",
     "CEST": "+02:00",
+    "EET": "+02:00",
+    "EEST": "+03:00",
+    "MSK": "+03:00",
+    # Asia
+    "IST": "+05:30",
+    "PKT": "+05:00",
+    "HKT": "+08:00",
+    "SGT": "+08:00",
+    "JST": "+09:00",
+    "KST": "+09:00",
+    # Australia / Pacific
+    "ACST": "+09:30",
+    "AEST": "+10:00",
+    "AEDT": "+11:00",
+    "NZST": "+12:00",
+    "NZDT": "+13:00",
 }
 
 
@@ -122,7 +151,11 @@ def _parse_postgres_log_timestamp(raw_value: str) -> datetime:
         if timezone_suffix.isalpha():
             offset = _POSTGRES_LOG_TIMEZONE_OFFSETS.get(timezone_suffix.upper())
             if offset is None:
-                raise ValueError(f"unsupported postgres log timezone abbreviation: {timezone_suffix}")
+                logger.warning(
+                    "Unknown postgres log timezone abbreviation %r, assuming UTC",
+                    timezone_suffix,
+                )
+                offset = "+00:00"
             normalized += offset
         elif re.fullmatch(r"[+-]\d{2}", timezone_suffix):
             normalized += f"{timezone_suffix}:00"
@@ -906,7 +939,9 @@ class PostgresAdapter(SourceAdapter):
     ) -> SchemaSnapshotV2:
         """SCHEMA: tables/views from v1 introspect_schema + routines from pg_proc + freshness."""
         started_at = time.perf_counter()
-        v1_snapshot = await self.introspect_schema(adapter)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            v1_snapshot = await self.introspect_schema(adapter)
 
         config = self._get_config(adapter)
         dsn = self._get_dsn(adapter)
@@ -1165,7 +1200,9 @@ class PostgresAdapter(SourceAdapter):
     ) -> TrafficExtractionResult:
         """TRAFFIC: wraps v1 observe_traffic() with ExtractionMeta."""
         started_at = time.perf_counter()
-        v1_result = await self.observe_traffic(adapter, since=since)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            v1_result = await self.observe_traffic(adapter, since=since)
         duration_ms = (time.perf_counter() - started_at) * 1000.0
         now = datetime.now(tz=UTC)
 
