@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,27 @@ from alma_connectors.source_adapter import (
     SourceObjectDependency,
     SourceTableSchema,
     TrafficObservationResult,
+)
+from alma_connectors.source_adapter_v2 import (
+    AdapterCapability,
+    CapabilityProbeResult,
+    ColumnSchema,
+    DefinitionSnapshot,
+    DiscoveredContainer,
+    DiscoverySnapshot,
+    ExtractionMeta,
+    ExtractionScope,
+    LineageEdge,
+    LineageEdgeKind,
+    LineageSnapshot,
+    ObjectDefinition,
+    OrchestrationSnapshot,
+    SchemaObject,
+    SchemaObjectKind as SchemaObjectKindV2,
+    SchemaSnapshotV2,
+    ScopeContext,
+    SourceAdapterKindV2,
+    TrafficExtractionResult,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,6 +63,17 @@ _MATERIALIZATION_KIND: dict[str, SchemaObjectKind] = {
     "view": SchemaObjectKind.VIEW,
     "ephemeral": SchemaObjectKind.VIEW,
     "materialized_view": SchemaObjectKind.MATERIALIZED_VIEW,
+}
+
+# v2 materialization → SchemaObjectKindV2 mapping.
+_MATERIALIZATION_KIND_V2: dict[str, SchemaObjectKindV2] = {
+    "table": SchemaObjectKindV2.TABLE,
+    "incremental": SchemaObjectKindV2.TABLE,
+    "snapshot": SchemaObjectKindV2.TABLE,
+    "seed": SchemaObjectKindV2.TABLE,
+    "view": SchemaObjectKindV2.VIEW,
+    "ephemeral": SchemaObjectKindV2.VIEW,
+    "materialized_view": SchemaObjectKindV2.MATERIALIZED_VIEW,
 }
 
 
@@ -68,6 +101,14 @@ class DbtAdapter:
         can_observe_traffic=False,
         can_execute_query=False,
     )
+
+    # v2 — dbt has no live DB so TRAFFIC and ORCHESTRATION are not supported.
+    declared_capabilities: frozenset[AdapterCapability] = frozenset({
+        AdapterCapability.DISCOVER,
+        AdapterCapability.SCHEMA,
+        AdapterCapability.DEFINITIONS,
+        AdapterCapability.LINEAGE,
+    })
 
     def __init__(
         self,
@@ -384,3 +425,344 @@ class DbtAdapter:
                 "Provide the file paths when constructing the DbtAdapter",
             ),
         )
+
+    # ------------------------------------------------------------------
+    # v2 — internal helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _object_kind_v2_for_node(node: dict[str, Any]) -> SchemaObjectKindV2:
+        """Derive v2 SchemaObjectKind from node config."""
+        resource_type = node.get("resource_type", "")
+        if resource_type == "source":
+            return SchemaObjectKindV2.EXTERNAL_TABLE
+        materialized = node.get("config", {}).get("materialized", "table")
+        return _MATERIALIZATION_KIND_V2.get(materialized, SchemaObjectKindV2.TABLE)
+
+    @staticmethod
+    def _extract_columns_v2(
+        node: dict[str, Any],
+        catalog_node: dict[str, Any] | None,
+    ) -> tuple[ColumnSchema, ...]:
+        """Build v2 ColumnSchema list, merging manifest and catalog data."""
+        catalog_cols: dict[str, dict[str, Any]] = {}
+        if catalog_node:
+            for col_name, col_data in catalog_node.get("columns", {}).items():
+                catalog_cols[col_name.lower()] = col_data
+
+        columns: list[ColumnSchema] = []
+        seen: set[str] = set()
+
+        for col_name, col_data in node.get("columns", {}).items():
+            col_lower = col_name.lower()
+            seen.add(col_lower)
+            catalog_col = catalog_cols.get(col_lower, {})
+            data_type = catalog_col.get("type") or col_data.get("data_type") or "unknown"
+            description = col_data.get("description") or None
+            columns.append(
+                ColumnSchema(
+                    name=col_name,
+                    data_type=data_type,
+                    is_nullable=True,
+                    description=description if description else None,
+                )
+            )
+
+        for col_lower, col_data in catalog_cols.items():
+            if col_lower not in seen:
+                data_type = col_data.get("type") or "unknown"
+                display_name = col_data.get("name") or col_lower
+                columns.append(
+                    ColumnSchema(
+                        name=display_name,
+                        data_type=data_type,
+                        is_nullable=True,
+                    )
+                )
+
+        return tuple(columns)
+
+    def _node_to_schema_object_v2(
+        self,
+        node: dict[str, Any],
+        catalog_node: dict[str, Any] | None,
+    ) -> SchemaObject:
+        """Convert a manifest node / source to a v2 SchemaObject."""
+        schema_name = node.get("schema", "")
+        object_name = node.get("alias") or node.get("name", "")
+        kind = self._object_kind_v2_for_node(node)
+        columns = self._extract_columns_v2(node, catalog_node)
+        description = node.get("description") or None
+        tags = tuple(node.get("tags", []))
+        return SchemaObject(
+            schema_name=schema_name,
+            object_name=object_name,
+            kind=kind,
+            columns=columns,
+            description=description if description else None,
+            tags=tags,
+        )
+
+    def _make_meta(
+        self,
+        adapter: PersistedSourceAdapter,
+        capability: AdapterCapability,
+        row_count: int,
+        duration_ms: float,
+    ) -> ExtractionMeta:
+        return ExtractionMeta(
+            adapter_key=adapter.key,
+            adapter_kind=SourceAdapterKindV2.DBT,
+            capability=capability,
+            scope_context=ScopeContext(
+                scope=ExtractionScope.GLOBAL,
+                identifiers={"manifest_path": self._manifest_path},
+            ),
+            captured_at=datetime.now(UTC),
+            duration_ms=duration_ms,
+            row_count=row_count,
+        )
+
+    # ------------------------------------------------------------------
+    # v2 — protocol methods
+    # ------------------------------------------------------------------
+
+    async def probe(
+        self,
+        adapter: PersistedSourceAdapter,
+        capabilities: frozenset[AdapterCapability] | None = None,
+    ) -> tuple[CapabilityProbeResult, ...]:
+        """Probe availability of declared capabilities.
+
+        All capabilities gate on manifest.json being present and parseable.
+        """
+        caps_to_probe = capabilities if capabilities is not None else self.declared_capabilities
+
+        try:
+            self._load_manifest()
+            available = True
+            message = None
+        except FileNotFoundError as exc:
+            available = False
+            message = str(exc)
+        except ValueError as exc:
+            available = False
+            message = str(exc)
+
+        return tuple(
+            CapabilityProbeResult(
+                capability=cap,
+                available=available,
+                scope=ExtractionScope.GLOBAL,
+                scope_context=ScopeContext(
+                    scope=ExtractionScope.GLOBAL,
+                    identifiers={"manifest_path": self._manifest_path},
+                ),
+                message=message,
+            )
+            for cap in caps_to_probe
+        )
+
+    async def discover(
+        self,
+        adapter: PersistedSourceAdapter,
+    ) -> DiscoverySnapshot:
+        """DISCOVER: dbt project as top-level container, each unique schema as sub-containers."""
+        t0 = time.monotonic()
+        manifest = self._load_manifest()
+        meta_block = manifest.get("metadata", {})
+        project_name = self._project_name or meta_block.get("project_name") or "unknown"
+
+        # One container for the dbt project itself.
+        containers: list[DiscoveredContainer] = [
+            DiscoveredContainer(
+                container_id=f"dbt://{project_name}",
+                container_type="project",
+                display_name=project_name,
+                metadata={
+                    "dbt_schema_version": meta_block.get("dbt_schema_version", ""),
+                    "dbt_version": meta_block.get("dbt_version", ""),
+                    "adapter_type": meta_block.get("adapter_type", ""),
+                    "node_count": len(manifest.get("nodes", {})),
+                    "source_count": len(manifest.get("sources", {})),
+                },
+            )
+        ]
+
+        # One container per unique schema encountered across models and sources.
+        seen_schemas: set[str] = set()
+        for node in manifest.get("nodes", {}).values():
+            if node.get("resource_type", "") in _MODEL_RESOURCE_TYPES:
+                schema = node.get("schema", "")
+                if schema:
+                    seen_schemas.add(schema)
+        for source in manifest.get("sources", {}).values():
+            schema = source.get("schema", "")
+            if schema:
+                seen_schemas.add(schema)
+
+        for schema in sorted(seen_schemas):
+            containers.append(
+                DiscoveredContainer(
+                    container_id=f"dbt://{project_name}/{schema}",
+                    container_type="schema",
+                    display_name=schema,
+                    metadata={"project": project_name},
+                )
+            )
+
+        duration_ms = (time.monotonic() - t0) * 1000
+        meta = self._make_meta(adapter, AdapterCapability.DISCOVER, len(containers), duration_ms)
+        return DiscoverySnapshot(meta=meta, containers=tuple(containers))
+
+    async def extract_schema(
+        self,
+        adapter: PersistedSourceAdapter,
+    ) -> SchemaSnapshotV2:
+        """SCHEMA: parse catalog.json (if available) → SchemaSnapshotV2.
+
+        Falls back to manifest-only schema when no catalog is provided.
+        Sources are represented as EXTERNAL_TABLE.
+        """
+        t0 = time.monotonic()
+        manifest = self._load_manifest()
+        catalog = self._load_catalog()
+
+        catalog_lookup: dict[str, dict[str, Any]] = {}
+        if catalog:
+            for uid, node_data in catalog.get("nodes", {}).items():
+                catalog_lookup[uid] = node_data
+            for uid, node_data in catalog.get("sources", {}).items():
+                catalog_lookup[uid] = node_data
+
+        objects: list[SchemaObject] = []
+
+        for uid, node in manifest.get("nodes", {}).items():
+            if node.get("resource_type", "") not in _MODEL_RESOURCE_TYPES:
+                continue
+            objects.append(self._node_to_schema_object_v2(node, catalog_lookup.get(uid)))
+
+        for uid, source in manifest.get("sources", {}).items():
+            objects.append(self._node_to_schema_object_v2(source, catalog_lookup.get(uid)))
+
+        duration_ms = (time.monotonic() - t0) * 1000
+        meta = self._make_meta(adapter, AdapterCapability.SCHEMA, len(objects), duration_ms)
+        return SchemaSnapshotV2(meta=meta, objects=tuple(objects))
+
+    async def extract_definitions(
+        self,
+        adapter: PersistedSourceAdapter,
+    ) -> DefinitionSnapshot:
+        """DEFINITIONS: compiled SQL from manifest nodes → DefinitionSnapshot.
+
+        Only nodes with non-empty compiled_code (or compiled_sql for older dbt) are included.
+        """
+        t0 = time.monotonic()
+        manifest = self._load_manifest()
+
+        definitions: list[ObjectDefinition] = []
+        for _uid, node in manifest.get("nodes", {}).items():
+            if node.get("resource_type", "") not in _MODEL_RESOURCE_TYPES:
+                continue
+            compiled = node.get("compiled_code") or node.get("compiled_sql") or ""
+            if not compiled or not compiled.strip():
+                continue
+            schema_name = node.get("schema", "")
+            object_name = node.get("alias") or node.get("name", "")
+            if not schema_name or not object_name:
+                continue
+            kind = self._object_kind_v2_for_node(node)
+            definitions.append(
+                ObjectDefinition(
+                    schema_name=schema_name,
+                    object_name=object_name,
+                    object_kind=kind,
+                    definition_text=compiled.strip(),
+                    definition_language="sql",
+                )
+            )
+
+        duration_ms = (time.monotonic() - t0) * 1000
+        meta = self._make_meta(adapter, AdapterCapability.DEFINITIONS, len(definitions), duration_ms)
+        return DefinitionSnapshot(meta=meta, definitions=tuple(definitions))
+
+    async def extract_lineage(
+        self,
+        adapter: PersistedSourceAdapter,
+    ) -> LineageSnapshot:
+        """LINEAGE: ref() and source() graph from manifest depends_on → LineageSnapshot.
+
+        All edges have edge_kind=DECLARED and confidence=1.0.
+        source() declarations produce cross-system edges (target is the external source).
+        Object identifiers use the format ``schema.name``.
+        """
+        t0 = time.monotonic()
+        manifest = self._load_manifest()
+
+        # Build lookup: unique_id → (schema, name).
+        node_lookup: dict[str, tuple[str, str]] = {}
+        for uid, node in manifest.get("nodes", {}).items():
+            if node.get("resource_type", "") not in _MODEL_RESOURCE_TYPES:
+                continue
+            schema = node.get("schema", "")
+            name = node.get("alias") or node.get("name", "")
+            if schema and name:
+                node_lookup[uid] = (schema, name)
+        for uid, source in manifest.get("sources", {}).items():
+            schema = source.get("schema", "")
+            name = source.get("alias") or source.get("name", "")
+            if schema and name:
+                node_lookup[uid] = (schema, name)
+
+        edges: list[LineageEdge] = []
+        for uid, node in manifest.get("nodes", {}).items():
+            if node.get("resource_type", "") not in _MODEL_RESOURCE_TYPES:
+                continue
+            target_schema = node.get("schema", "")
+            target_name = node.get("alias") or node.get("name", "")
+            if not target_schema or not target_name:
+                continue
+            target_fqn = f"{target_schema}.{target_name}"
+
+            for dep_uid in node.get("depends_on", {}).get("nodes", []):
+                resolved = node_lookup.get(dep_uid)
+                if resolved is None:
+                    logger.debug("Skipping unknown lineage dep %s for node %s", dep_uid, uid)
+                    continue
+                src_schema, src_name = resolved
+                edges.append(
+                    LineageEdge(
+                        source_object=f"{src_schema}.{src_name}",
+                        target_object=target_fqn,
+                        edge_kind=LineageEdgeKind.DECLARED,
+                        confidence=1.0,
+                    )
+                )
+
+        duration_ms = (time.monotonic() - t0) * 1000
+        meta = self._make_meta(adapter, AdapterCapability.LINEAGE, len(edges), duration_ms)
+        return LineageSnapshot(meta=meta, edges=tuple(edges))
+
+    async def extract_traffic(
+        self,
+        adapter: PersistedSourceAdapter,
+        *,
+        since: datetime | None = None,
+    ) -> TrafficExtractionResult:
+        """Not supported — dbt has no live database.
+
+        Raises:
+            NotImplementedError: Always.
+        """
+        raise NotImplementedError("dbt adapter does not support TRAFFIC extraction (no live database)")
+
+    async def extract_orchestration(
+        self,
+        adapter: PersistedSourceAdapter,
+    ) -> OrchestrationSnapshot:
+        """Not supported — dbt has no orchestration primitives.
+
+        Raises:
+            NotImplementedError: Always.
+        """
+        raise NotImplementedError("dbt adapter does not support ORCHESTRATION extraction")
