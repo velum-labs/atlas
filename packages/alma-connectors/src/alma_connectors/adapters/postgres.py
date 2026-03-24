@@ -36,6 +36,24 @@ from alma_connectors.source_adapter import (
     SourceTableSchema,
     TrafficObservationResult,
 )
+from alma_connectors.source_adapter_v2 import (
+    AdapterCapability,
+    CapabilityProbeResult,
+    ColumnSchema as ColumnSchemaV2,
+    DefinitionSnapshot,
+    DiscoveredContainer,
+    DiscoverySnapshot,
+    ExtractionMeta,
+    ExtractionScope,
+    ObjectDefinition,
+    ObjectDependency as ObjectDependencyV2,
+    SchemaObject,
+    SchemaObjectKind as SchemaObjectKindV2,
+    SchemaSnapshotV2,
+    ScopeContext,
+    SourceAdapterKindV2,
+    TrafficExtractionResult,
+)
 
 _DEFAULT_POSTGRES_INCLUDE_SCHEMAS = ("public",)
 _DEFAULT_POSTGRES_EXCLUDE_SCHEMAS = ("pg_catalog", "information_schema")
@@ -121,6 +139,15 @@ class PostgresAdapter(SourceAdapter):
         can_observe_traffic=True,
         can_execute_query=True,
     )
+
+    @property
+    def declared_capabilities(self) -> frozenset[AdapterCapability]:
+        return frozenset({
+            AdapterCapability.DISCOVER,
+            AdapterCapability.SCHEMA,
+            AdapterCapability.DEFINITIONS,
+            AdapterCapability.TRAFFIC,
+        })
 
     def __init__(self, *, resolve_secret: Callable[[ManagedSecret | ExternalSecretRef], str]) -> None:
         self._resolve_secret = resolve_secret
@@ -671,6 +698,463 @@ class PostgresAdapter(SourceAdapter):
             rows=tuple(dict(row) for row in visible_rows),
             truncated=truncated,
         )
+
+    # -----------------------------------------------------------------------
+    # SourceAdapterV2 methods
+    # -----------------------------------------------------------------------
+
+    async def probe(
+        self,
+        adapter: PersistedSourceAdapter,
+        capabilities: frozenset[AdapterCapability] | None = None,
+    ) -> tuple[CapabilityProbeResult, ...]:
+        """Probe which v2 capabilities are actually available at runtime."""
+        caps_to_probe = capabilities if capabilities is not None else self.declared_capabilities
+        config = self._get_config(adapter)
+        dsn = self._get_dsn(adapter)
+
+        info_schema_ok = False
+        pg_proc_ok = False
+        pg_stat_ok = False
+        info_schema_missing: list[str] = []
+        pg_proc_missing: list[str] = []
+        pg_stat_missing: list[str] = []
+        pg_stat_message: str | None = None
+        pg_stat_fallback_used = False
+
+        try:
+            with psycopg.connect(
+                dsn,
+                row_factory=dict_row,
+                autocommit=True,
+                options="-c default_transaction_read_only=on",
+            ) as conn:
+                try:
+                    conn.execute("SELECT 1 FROM information_schema.schemata LIMIT 1")
+                    info_schema_ok = True
+                except psycopg.Error as exc:
+                    if getattr(exc, "pgcode", None) == "42501":
+                        info_schema_missing.append("SELECT ON information_schema.schemata")
+
+                try:
+                    conn.execute("SELECT 1 FROM pg_catalog.pg_proc LIMIT 1")
+                    pg_proc_ok = True
+                except psycopg.Error as exc:
+                    if getattr(exc, "pgcode", None) == "42501":
+                        pg_proc_missing.append("SELECT ON pg_catalog.pg_proc")
+
+                try:
+                    conn.execute("SELECT 1 FROM pg_stat_statements LIMIT 1")
+                    pg_stat_ok = True
+                except psycopg.Error as exc:
+                    pgcode = getattr(exc, "pgcode", None)
+                    if pgcode == "42P01":  # undefined_table — extension not loaded
+                        pg_stat_message = (
+                            "pg_stat_statements extension not loaded;"
+                            " run: CREATE EXTENSION IF NOT EXISTS pg_stat_statements"
+                        )
+                        if config.log_capture is not None:
+                            pg_stat_fallback_used = True
+                    elif pgcode == "42501":
+                        pg_stat_missing.append("SELECT ON pg_stat_statements")
+        except psycopg.Error:
+            pass  # connection failure — all probes stay False
+
+        scope = ExtractionScope.DATABASE
+        results: list[CapabilityProbeResult] = []
+
+        for cap in sorted(caps_to_probe, key=lambda c: c.value):
+            if cap == AdapterCapability.DISCOVER:
+                results.append(CapabilityProbeResult(
+                    capability=cap,
+                    available=info_schema_ok,
+                    scope=scope,
+                    permissions_missing=tuple(info_schema_missing),
+                    message=None if info_schema_ok else "cannot access information_schema.schemata",
+                ))
+            elif cap == AdapterCapability.SCHEMA:
+                available = info_schema_ok and pg_proc_ok
+                missing = info_schema_missing + pg_proc_missing
+                results.append(CapabilityProbeResult(
+                    capability=cap,
+                    available=available,
+                    scope=scope,
+                    permissions_missing=tuple(missing),
+                    message=None if available else "missing access to information_schema or pg_catalog.pg_proc",
+                ))
+            elif cap == AdapterCapability.DEFINITIONS:
+                results.append(CapabilityProbeResult(
+                    capability=cap,
+                    available=pg_proc_ok,
+                    scope=scope,
+                    permissions_missing=tuple(pg_proc_missing),
+                    message=None if pg_proc_ok else "cannot access pg_catalog.pg_proc",
+                ))
+            elif cap == AdapterCapability.TRAFFIC:
+                if pg_stat_ok:
+                    results.append(CapabilityProbeResult(
+                        capability=cap,
+                        available=True,
+                        scope=scope,
+                    ))
+                elif pg_stat_fallback_used:
+                    results.append(CapabilityProbeResult(
+                        capability=cap,
+                        available=True,
+                        scope=scope,
+                        fallback_used=True,
+                        message="using log-based traffic observation (pg_stat_statements not loaded)",
+                    ))
+                else:
+                    results.append(CapabilityProbeResult(
+                        capability=cap,
+                        available=False,
+                        scope=scope,
+                        permissions_missing=tuple(pg_stat_missing),
+                        message=pg_stat_message,
+                    ))
+
+        return tuple(results)
+
+    async def discover(
+        self,
+        adapter: PersistedSourceAdapter,
+    ) -> DiscoverySnapshot:
+        """DISCOVER: enumerate PostgreSQL schemas as containers."""
+        dsn = self._get_dsn(adapter)
+        started_at = time.perf_counter()
+
+        with psycopg.connect(
+            dsn,
+            row_factory=dict_row,
+            options="-c default_transaction_read_only=on",
+        ) as conn:
+            rows = list(conn.execute("""
+                SELECT nspname
+                FROM pg_catalog.pg_namespace
+                WHERE nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+                  AND nspname NOT LIKE 'pg_toast_%'
+                  AND nspname NOT LIKE 'pg_temp_%'
+                ORDER BY nspname
+            """).fetchall())
+
+        duration_ms = (time.perf_counter() - started_at) * 1000.0
+        now = datetime.now(tz=UTC)
+
+        containers = tuple(
+            DiscoveredContainer(
+                container_id=f"{adapter.key}/{row['nspname']}",
+                container_type="schema",
+                display_name=str(row["nspname"]),
+            )
+            for row in rows
+        )
+        meta = ExtractionMeta(
+            adapter_key=adapter.key,
+            adapter_kind=SourceAdapterKindV2.POSTGRES,
+            capability=AdapterCapability.DISCOVER,
+            scope_context=ScopeContext(scope=ExtractionScope.DATABASE),
+            captured_at=now,
+            duration_ms=duration_ms,
+            row_count=len(containers),
+        )
+        return DiscoverySnapshot(meta=meta, containers=containers)
+
+    async def extract_schema(
+        self,
+        adapter: PersistedSourceAdapter,
+    ) -> SchemaSnapshotV2:
+        """SCHEMA: tables/views from v1 introspect_schema + routines from pg_proc + freshness."""
+        started_at = time.perf_counter()
+        v1_snapshot = await self.introspect_schema(adapter)
+
+        config = self._get_config(adapter)
+        dsn = self._get_dsn(adapter)
+        include_schemas = list(config.include_schemas)
+        exclude_schemas = list(config.exclude_schemas)
+
+        routine_conds: list[str] = []
+        freshness_conds: list[str] = []
+        routine_params: list[Any] = []
+        freshness_params: list[Any] = []
+
+        if include_schemas:
+            routine_conds.append("n.nspname = ANY(%s)")
+            freshness_conds.append("s.schemaname = ANY(%s)")
+            routine_params.append(include_schemas)
+            freshness_params.append(include_schemas)
+        if exclude_schemas:
+            routine_conds.append("n.nspname <> ALL(%s)")
+            freshness_conds.append("s.schemaname <> ALL(%s)")
+            routine_params.append(exclude_schemas)
+            freshness_params.append(exclude_schemas)
+
+        routine_where = " AND ".join(routine_conds) if routine_conds else "TRUE"
+        freshness_where = " AND ".join(freshness_conds) if freshness_conds else "TRUE"
+
+        routine_sql = f"""
+            SELECT
+                n.nspname AS schema_name,
+                p.proname AS routine_name,
+                p.prokind,
+                l.lanname AS language,
+                pg_catalog.pg_get_function_result(p.oid) AS return_type
+            FROM pg_catalog.pg_proc p
+            JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+            JOIN pg_catalog.pg_language l ON l.oid = p.prolang
+            WHERE p.prokind IN ('f', 'p')
+              AND {routine_where}
+            ORDER BY n.nspname, p.proname
+        """
+        freshness_sql = f"""
+            SELECT s.schemaname, s.relname, s.last_autovacuum, s.n_live_tup
+            FROM pg_catalog.pg_stat_user_tables s
+            WHERE {freshness_where}
+        """
+
+        with psycopg.connect(
+            dsn,
+            row_factory=dict_row,
+            options="-c default_transaction_read_only=on",
+        ) as conn:
+            routine_rows = list(conn.execute(routine_sql, routine_params).fetchall())
+            freshness_rows = list(conn.execute(freshness_sql, freshness_params).fetchall())
+
+        freshness_by_table: dict[tuple[str, str], dict[str, Any]] = {
+            (str(row["schemaname"]), str(row["relname"])): dict(row)
+            for row in freshness_rows
+        }
+
+        _v1_to_v2_kind = {
+            SchemaObjectKind.TABLE: SchemaObjectKindV2.TABLE,
+            SchemaObjectKind.VIEW: SchemaObjectKindV2.VIEW,
+            SchemaObjectKind.MATERIALIZED_VIEW: SchemaObjectKindV2.MATERIALIZED_VIEW,
+            SchemaObjectKind.EXTERNAL_TABLE: SchemaObjectKindV2.EXTERNAL_TABLE,
+        }
+
+        objects: list[SchemaObject] = []
+
+        for obj in v1_snapshot.objects:
+            freshness = freshness_by_table.get((obj.schema_name, obj.object_name))
+            last_modified: datetime | None = None
+            row_count = obj.row_count
+            if freshness:
+                raw_vac = freshness.get("last_autovacuum")
+                if isinstance(raw_vac, datetime):
+                    last_modified = raw_vac
+                if row_count is None:
+                    n_live = freshness.get("n_live_tup")
+                    if n_live is not None:
+                        row_count = max(0, int(n_live))
+
+            columns_v2 = tuple(
+                ColumnSchemaV2(
+                    name=col.name,
+                    data_type=col.data_type,
+                    is_nullable=col.is_nullable,
+                )
+                for col in obj.columns
+            )
+            objects.append(SchemaObject(
+                schema_name=obj.schema_name,
+                object_name=obj.object_name,
+                kind=_v1_to_v2_kind.get(obj.object_kind, SchemaObjectKindV2.TABLE),
+                columns=columns_v2,
+                last_modified=last_modified,
+                row_count=row_count,
+            ))
+
+        _prokind_to_v2 = {"f": SchemaObjectKindV2.UDF, "p": SchemaObjectKindV2.PROCEDURE}
+        for row in routine_rows:
+            rt = str(row.get("return_type") or "").strip() or None
+            lang = str(row.get("language") or "").strip() or None
+            objects.append(SchemaObject(
+                schema_name=str(row["schema_name"]),
+                object_name=str(row["routine_name"]),
+                kind=_prokind_to_v2.get(str(row.get("prokind", "f")), SchemaObjectKindV2.UDF),
+                language=lang,
+                return_type=rt,
+            ))
+
+        dependencies_v2 = tuple(
+            ObjectDependencyV2(
+                source_schema=dep.source_schema,
+                source_object=dep.source_object,
+                target_schema=dep.target_schema,
+                target_object=dep.target_object,
+            )
+            for dep in v1_snapshot.dependencies
+        )
+
+        duration_ms = (time.perf_counter() - started_at) * 1000.0
+        now = datetime.now(tz=UTC)
+        meta = ExtractionMeta(
+            adapter_key=adapter.key,
+            adapter_kind=SourceAdapterKindV2.POSTGRES,
+            capability=AdapterCapability.SCHEMA,
+            scope_context=ScopeContext(scope=ExtractionScope.DATABASE),
+            captured_at=now,
+            duration_ms=duration_ms,
+            row_count=len(objects),
+        )
+        return SchemaSnapshotV2(meta=meta, objects=tuple(objects), dependencies=dependencies_v2)
+
+    async def extract_definitions(
+        self,
+        adapter: PersistedSourceAdapter,
+    ) -> DefinitionSnapshot:
+        """DEFINITIONS: view SQL via pg_get_viewdef + routine source via pg_get_functiondef."""
+        config = self._get_config(adapter)
+        dsn = self._get_dsn(adapter)
+        include_schemas = list(config.include_schemas)
+        exclude_schemas = list(config.exclude_schemas)
+
+        view_conds: list[str] = []
+        routine_conds: list[str] = []
+        view_params: list[Any] = []
+        routine_params: list[Any] = []
+
+        if include_schemas:
+            view_conds.append("n.nspname = ANY(%s)")
+            routine_conds.append("n.nspname = ANY(%s)")
+            view_params.append(include_schemas)
+            routine_params.append(include_schemas)
+        if exclude_schemas:
+            view_conds.append("n.nspname <> ALL(%s)")
+            routine_conds.append("n.nspname <> ALL(%s)")
+            view_params.append(exclude_schemas)
+            routine_params.append(exclude_schemas)
+
+        view_where = " AND ".join(view_conds) if view_conds else "TRUE"
+        routine_where = " AND ".join(routine_conds) if routine_conds else "TRUE"
+
+        view_sql = f"""
+            SELECT
+                n.nspname AS schema_name,
+                c.relname AS object_name,
+                CASE c.relkind
+                    WHEN 'v' THEN 'view'
+                    WHEN 'm' THEN 'materialized_view'
+                END AS kind,
+                pg_catalog.pg_get_viewdef(c.oid, true) AS definition
+            FROM pg_catalog.pg_class c
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relkind IN ('v', 'm')
+              AND {view_where}
+            ORDER BY n.nspname, c.relname
+        """
+        routine_sql = f"""
+            SELECT
+                n.nspname AS schema_name,
+                p.proname AS object_name,
+                p.prokind,
+                l.lanname AS language,
+                pg_catalog.pg_get_functiondef(p.oid) AS definition
+            FROM pg_catalog.pg_proc p
+            JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+            JOIN pg_catalog.pg_language l ON l.oid = p.prolang
+            WHERE p.prokind IN ('f', 'p')
+              AND l.lanname NOT IN ('c', 'internal')
+              AND {routine_where}
+            ORDER BY n.nspname, p.proname
+        """
+
+        started_at = time.perf_counter()
+        with psycopg.connect(
+            dsn,
+            row_factory=dict_row,
+            options="-c default_transaction_read_only=on",
+        ) as conn:
+            view_rows = list(conn.execute(view_sql, view_params).fetchall())
+            routine_rows = list(conn.execute(routine_sql, routine_params).fetchall())
+
+        duration_ms = (time.perf_counter() - started_at) * 1000.0
+        now = datetime.now(tz=UTC)
+
+        _kind_map: dict[str, SchemaObjectKindV2] = {
+            "view": SchemaObjectKindV2.VIEW,
+            "materialized_view": SchemaObjectKindV2.MATERIALIZED_VIEW,
+        }
+        _prokind_map: dict[str, SchemaObjectKindV2] = {
+            "f": SchemaObjectKindV2.UDF,
+            "p": SchemaObjectKindV2.PROCEDURE,
+        }
+
+        definitions: list[ObjectDefinition] = []
+        for row in view_rows:
+            defn = str(row.get("definition") or "").strip()
+            if not defn:
+                continue
+            definitions.append(ObjectDefinition(
+                schema_name=str(row["schema_name"]),
+                object_name=str(row["object_name"]),
+                object_kind=_kind_map.get(str(row["kind"]), SchemaObjectKindV2.VIEW),
+                definition_text=defn,
+                definition_language="sql",
+            ))
+
+        for row in routine_rows:
+            defn = str(row.get("definition") or "").strip()
+            if not defn:
+                continue
+            lang = str(row.get("language") or "sql").strip() or "sql"
+            definitions.append(ObjectDefinition(
+                schema_name=str(row["schema_name"]),
+                object_name=str(row["object_name"]),
+                object_kind=_prokind_map.get(str(row.get("prokind", "f")), SchemaObjectKindV2.UDF),
+                definition_text=defn,
+                definition_language=lang,
+            ))
+
+        meta = ExtractionMeta(
+            adapter_key=adapter.key,
+            adapter_kind=SourceAdapterKindV2.POSTGRES,
+            capability=AdapterCapability.DEFINITIONS,
+            scope_context=ScopeContext(scope=ExtractionScope.DATABASE),
+            captured_at=now,
+            duration_ms=duration_ms,
+            row_count=len(definitions),
+        )
+        return DefinitionSnapshot(meta=meta, definitions=tuple(definitions))
+
+    async def extract_traffic(
+        self,
+        adapter: PersistedSourceAdapter,
+        *,
+        since: datetime | None = None,
+    ) -> TrafficExtractionResult:
+        """TRAFFIC: wraps v1 observe_traffic() with ExtractionMeta."""
+        started_at = time.perf_counter()
+        v1_result = await self.observe_traffic(adapter, since=since)
+        duration_ms = (time.perf_counter() - started_at) * 1000.0
+        now = datetime.now(tz=UTC)
+
+        meta = ExtractionMeta(
+            adapter_key=adapter.key,
+            adapter_kind=SourceAdapterKindV2.POSTGRES,
+            capability=AdapterCapability.TRAFFIC,
+            scope_context=ScopeContext(scope=ExtractionScope.DATABASE),
+            captured_at=now,
+            duration_ms=duration_ms,
+            row_count=len(v1_result.events),
+        )
+        return TrafficExtractionResult(
+            meta=meta,
+            events=v1_result.events,
+            observation_cursor=v1_result.observation_cursor,
+        )
+
+    async def extract_lineage(
+        self,
+        adapter: PersistedSourceAdapter,
+    ) -> None:  # type: ignore[override]
+        raise NotImplementedError("lineage extraction is not supported by PostgresAdapter")
+
+    async def extract_orchestration(
+        self,
+        adapter: PersistedSourceAdapter,
+    ) -> None:  # type: ignore[override]
+        raise NotImplementedError("orchestration extraction is not supported by PostgresAdapter")
 
     def get_setup_instructions(self) -> SetupInstructions:
         return SetupInstructions(
