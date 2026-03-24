@@ -8,6 +8,7 @@ import json
 import logging
 import re
 import time
+import warnings
 from collections import defaultdict
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -363,7 +364,17 @@ class BigQueryAdapter(SourceAdapter):
     # ------------------------------------------------------------------
 
     async def test_connection(self, adapter: PersistedSourceAdapter) -> ConnectionTestResult:
-        """Verify connectivity and that the service account can list datasets and run queries."""
+        """Verify connectivity and that the service account can list datasets and run queries.
+
+        .. deprecated:: 0.2.0
+            Use :meth:`~alma_connectors.source_adapter_v2.SourceAdapterV2.probe` instead.
+        """
+        warnings.warn(
+            "BigQueryAdapter.test_connection() is deprecated since 0.2.0 and will be removed in 1.0.0. "
+            "Use probe() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         config = self._get_config(adapter)  # raises ValueError for wrong kind — intentional
         try:
             project_id, sa_json = self._credentials(adapter)
@@ -414,7 +425,16 @@ class BigQueryAdapter(SourceAdapter):
         clustering_columns on each SourceTableSchema. Row counts and storage sizes
         come from a secondary TABLE_STORAGE query; if that query fails (e.g. missing
         permission), those fields are omitted without raising.
+
+        .. deprecated:: 0.2.0
+            Use :meth:`~alma_connectors.source_adapter_v2.SourceAdapterV2.extract_schema` instead.
         """
+        warnings.warn(
+            "BigQueryAdapter.introspect_schema() is deprecated since 0.2.0 and will be removed in 1.0.0. "
+            "Use extract_schema() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         config = self._get_config(adapter)
         project_id, sa_json = self._credentials(adapter)
         client = self._get_client(project_id, sa_json)
@@ -533,7 +553,16 @@ class BigQueryAdapter(SourceAdapter):
         When a stored observation cursor is present, it takes precedence over the
         caller-supplied ``since`` watermark so repeated runs can resume exactly from
         the newest creation_time seen in the previous batch.
+
+        .. deprecated:: 0.2.0
+            Use :meth:`~alma_connectors.source_adapter_v2.SourceAdapterV2.extract_traffic` instead.
         """
+        warnings.warn(
+            "BigQueryAdapter.observe_traffic() is deprecated since 0.2.0 and will be removed in 1.0.0. "
+            "Use extract_traffic() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         config = self._get_config(adapter)
         project_id, sa_json = self._credentials(adapter)
         client = self._get_client(project_id, sa_json)

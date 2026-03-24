@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import warnings
 from collections import defaultdict
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -126,6 +127,17 @@ class SnowflakeAdapter:
         self,
         adapter: PersistedSourceAdapter,
     ) -> ConnectionTestResult:
+        """Validate credentials and connectivity for the Snowflake adapter.
+
+        .. deprecated:: 0.2.0
+            Use :meth:`~alma_connectors.source_adapter_v2.SourceAdapterV2.probe` instead.
+        """
+        warnings.warn(
+            "SnowflakeAdapter.test_connection() is deprecated since 0.2.0 and will be removed in 1.0.0. "
+            "Use probe() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         config = self._get_config(adapter)
         try:
             conn = self._connect(config)
@@ -155,6 +167,17 @@ class SnowflakeAdapter:
         self,
         adapter: PersistedSourceAdapter,
     ) -> SchemaSnapshot:
+        """Return a typed snapshot of source objects and dependencies.
+
+        .. deprecated:: 0.2.0
+            Use :meth:`~alma_connectors.source_adapter_v2.SourceAdapterV2.extract_schema` instead.
+        """
+        warnings.warn(
+            "SnowflakeAdapter.introspect_schema() is deprecated since 0.2.0 and will be removed in 1.0.0. "
+            "Use extract_schema() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         config = self._get_config(adapter)
         database = config.database
         db_prefix = f"{database}." if database else ""
@@ -262,6 +285,17 @@ WHERE TABLE_SCHEMA NOT IN ('INFORMATION_SCHEMA')
         *,
         since: datetime | None = None,
     ) -> TrafficObservationResult:
+        """Observe traffic and return canonical query events.
+
+        .. deprecated:: 0.2.0
+            Use :meth:`~alma_connectors.source_adapter_v2.SourceAdapterV2.extract_traffic` instead.
+        """
+        warnings.warn(
+            "SnowflakeAdapter.observe_traffic() is deprecated since 0.2.0 and will be removed in 1.0.0. "
+            "Use extract_traffic() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         config = self._get_config(adapter)
         lookback_hours = config.lookback_hours
         max_rows = config.max_query_rows

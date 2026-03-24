@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import warnings
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -268,7 +269,16 @@ class DbtAdapter:
 
         Returns:
             ConnectionTestResult indicating success or failure with a message.
+
+        .. deprecated:: 0.2.0
+            Use :meth:`~alma_connectors.source_adapter_v2.SourceAdapterV2.probe` instead.
         """
+        warnings.warn(
+            "DbtAdapter.test_connection() is deprecated since 0.2.0 and will be removed in 1.0.0. "
+            "Use probe() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         try:
             manifest = self._load_manifest()
         except FileNotFoundError as exc:
@@ -311,7 +321,16 @@ class DbtAdapter:
 
         Returns:
             SchemaSnapshot with all discovered objects and lineage edges.
+
+        .. deprecated:: 0.2.0
+            Use :meth:`~alma_connectors.source_adapter_v2.SourceAdapterV2.extract_schema` instead.
         """
+        warnings.warn(
+            "DbtAdapter.introspect_schema() is deprecated since 0.2.0 and will be removed in 1.0.0. "
+            "Use extract_schema() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         manifest = self._load_manifest()
         catalog = self._load_catalog()
 
@@ -388,7 +407,16 @@ class DbtAdapter:
 
         Returns:
             TrafficObservationResult with zero records and no events.
+
+        .. deprecated:: 0.2.0
+            Use :meth:`~alma_connectors.source_adapter_v2.SourceAdapterV2.extract_traffic` instead.
         """
+        warnings.warn(
+            "DbtAdapter.observe_traffic() is deprecated since 0.2.0 and will be removed in 1.0.0. "
+            "Use extract_traffic() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         return TrafficObservationResult(scanned_records=0, events=())
 
     async def execute_query(

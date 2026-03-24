@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import time
+import warnings
 from collections import defaultdict
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -193,6 +194,17 @@ class PostgresAdapter(SourceAdapter):
         self,
         adapter: PersistedSourceAdapter,
     ) -> ConnectionTestResult:
+        """Validate credentials and connectivity for the PostgreSQL adapter.
+
+        .. deprecated:: 0.2.0
+            Use :meth:`~alma_connectors.source_adapter_v2.SourceAdapterV2.probe` instead.
+        """
+        warnings.warn(
+            "PostgresAdapter.test_connection() is deprecated since 0.2.0 and will be removed in 1.0.0. "
+            "Use probe() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         config = self._get_config(adapter)
         include_schemas = list(config.include_schemas)
         exclude_schemas = list(config.exclude_schemas)
@@ -242,6 +254,17 @@ class PostgresAdapter(SourceAdapter):
         self,
         adapter: PersistedSourceAdapter,
     ) -> SchemaSnapshot:
+        """Return a typed snapshot of source objects and dependencies.
+
+        .. deprecated:: 0.2.0
+            Use :meth:`~alma_connectors.source_adapter_v2.SourceAdapterV2.extract_schema` instead.
+        """
+        warnings.warn(
+            "PostgresAdapter.introspect_schema() is deprecated since 0.2.0 and will be removed in 1.0.0. "
+            "Use extract_schema() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         config = self._get_config(adapter)
         dsn = self._get_dsn(adapter)
         include_schemas = list(config.include_schemas)
@@ -402,6 +425,17 @@ class PostgresAdapter(SourceAdapter):
         *,
         since: datetime | None = None,
     ) -> TrafficObservationResult:
+        """Observe traffic and return canonical query events.
+
+        .. deprecated:: 0.2.0
+            Use :meth:`~alma_connectors.source_adapter_v2.SourceAdapterV2.extract_traffic` instead.
+        """
+        warnings.warn(
+            "PostgresAdapter.observe_traffic() is deprecated since 0.2.0 and will be removed in 1.0.0. "
+            "Use extract_traffic() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         config = self._get_config(adapter)
         if config.log_capture is not None:
             return self._observe_from_logs(adapter, config.log_capture, since=since)
