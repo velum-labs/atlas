@@ -1,4 +1,4 @@
-"""Looker source adapter stub — community contribution welcome.
+"""Looker source adapter — community contribution.
 
 This adapter authenticates with the Looker API using OAuth2 client credentials
 and extracts project metadata, LookML model definitions, and lineage between
@@ -15,7 +15,7 @@ Authentication:
 Capabilities declared:
     DISCOVER     — list projects / models / explores as containers
     SCHEMA       — field definitions (dimensions, measures) for each explore
-    DEFINITIONS  — raw LookML source code for models and views
+    DEFINITIONS  — LookML SQL expressions for models and views
     LINEAGE      — explore → underlying database view / table edges
 
 Example usage::
@@ -35,6 +35,8 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
+import httpx
+
 from alma_connectors.source_adapter import (
     ConnectionTestResult,
     PersistedSourceAdapter,
@@ -50,6 +52,8 @@ from alma_connectors.source_adapter_v2 import (
     DiscoverySnapshot,
     ExtractionMeta,
     ExtractionScope,
+    LineageEdge,
+    LineageEdgeKind,
     LineageSnapshot,
     ObjectDefinition,
     OrchestrationSnapshot,
@@ -65,35 +69,34 @@ logger = logging.getLogger(__name__)
 
 
 class LookerAdapter:
-    """Community stub — Looker source adapter.
+    """Looker source adapter.
 
     Implements the SourceAdapterV2 protocol against the Looker API (v4.0).
-    LookML projects → models → explores are mapped to containers; field
-    definitions become schema objects; and raw LookML source drives definitions.
+    LookML models and explores are mapped to containers; field definitions
+    become schema objects; LookML SQL expressions drive definitions; and
+    join/sql_table_name metadata produces declared lineage edges.
 
     Capabilities
     ------------
     DISCOVER
-        Lists all LookML projects via ``GET /api/4.0/all_projects``, and for
-        each project fetches models (``GET /api/4.0/all_lookml_models``) and
-        explores.  Each project, model, and explore becomes a
-        ``DiscoveredContainer``.
+        Lists all LookML models via ``GET /api/4.0/lookml_models`` and maps
+        projects, models, and explores to ``DiscoveredContainer`` objects.
 
     SCHEMA
-        For each explore, fetches the field explorer via
-        ``GET /api/4.0/lookml_model/{model}/explore/{explore}`` and maps
+        For each explore, fetches field metadata via
+        ``GET /api/4.0/lookml_models/{model}/explores/{explore}`` and maps
         dimensions and measures to ``ColumnSchema`` objects on a
         ``SchemaObject`` of kind ``SEMANTIC_MODEL``.
 
     DEFINITIONS
-        Fetches raw LookML source files via
-        ``GET /api/4.0/project/{project_id}/files/all`` and returns one
-        ``ObjectDefinition`` per file with ``definition_language="lookml"``.
+        For each explore, extracts the ``sql`` field from dimensions and
+        measures and returns one ``ObjectDefinition`` per explore with
+        ``definition_language="lookml"``.
 
     LINEAGE
-        Resolves ``sql_table_name`` and ``derived_table.sql`` in each view to
-        map explores back to the underlying database tables, emitting
-        ``LineageEdge`` records with ``edge_kind=CONNECTOR_API``.
+        Resolves ``sql_table_name`` on the primary view and explore joins to
+        emit ``LineageEdge`` records with ``edge_kind=DECLARED`` pointing from
+        the database table to the explore URI.
 
     Args:
         instance_url: Base URL of the Looker instance, e.g.
@@ -160,52 +163,38 @@ class LookerAdapter:
             row_count=row_count,
         )
 
+    def _base_url(self) -> str:
+        return f"{self._instance_url}:{self._port}/api/4.0"
+
     def _get_access_token(self) -> str:
-        """Obtain or refresh an OAuth2 access token.
+        """Obtain or refresh an OAuth2 access token via POST /api/4.0/login.
 
-        TODO: POST credentials to /api/4.0/login to exchange client_id and
-        client_secret for a bearer token.  Cache the token and refresh when
-        it is within 60 seconds of expiry:
-
-            import requests, time
-            now = time.monotonic()
-            if self._access_token and now < self._token_expires_at - 60:
-                return self._access_token
-
-            resp = requests.post(
-                f"{self._instance_url}:{self._port}/api/4.0/login",
-                data={"client_id": self._client_id, "client_secret": self._client_secret},
-                timeout=self._timeout_seconds,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            self._access_token = data["access_token"]
-            self._token_expires_at = now + data.get("expires_in", 3600)
-            return self._access_token
+        Caches the token and only re-fetches when it is within 60 seconds of
+        expiry.
 
         Returns:
             Valid bearer token string.
         """
-        raise NotImplementedError(
-            "LookerAdapter._get_access_token() is not implemented. "
-            "POST to /api/4.0/login with client_id and client_secret."
+        now = time.monotonic()
+        if self._access_token and now < self._token_expires_at - 60:
+            return self._access_token
+
+        resp = httpx.post(
+            f"{self._base_url()}/login",
+            data={"client_id": self._client_id, "client_secret": self._client_secret},
+            timeout=self._timeout_seconds,
         )
+        resp.raise_for_status()
+        data = resp.json()
+        self._access_token = data["access_token"]
+        self._token_expires_at = now + data.get("expires_in", 3600)
+        return self._access_token
 
     def _api_get(self, path: str, *, params: dict[str, Any] | None = None) -> Any:
         """Execute an authenticated GET request against the Looker API.
 
-        TODO: Include the bearer token in the Authorization header:
-
-            import requests
-            token = self._get_access_token()
-            resp = requests.get(
-                f"{self._instance_url}:{self._port}/api/4.0/{path}",
-                headers={"Authorization": f"token {token}"},
-                params=params,
-                timeout=self._timeout_seconds,
-            )
-            resp.raise_for_status()
-            return resp.json()
+        Automatically refreshes the access token on a 401 response and retries
+        the request once.
 
         Args:
             path: API path relative to /api/4.0/ (no leading slash).
@@ -214,10 +203,26 @@ class LookerAdapter:
         Returns:
             Parsed JSON response (dict or list).
         """
-        raise NotImplementedError(
-            "LookerAdapter._api_get() is not implemented. "
-            "See the docstring for implementation guidance."
+        token = self._get_access_token()
+        resp = httpx.get(
+            f"{self._base_url()}/{path}",
+            headers={"Authorization": f"token {token}"},
+            params=params,
+            timeout=self._timeout_seconds,
         )
+        if resp.status_code == 401:
+            # Token expired mid-flight — clear cache and retry once.
+            self._access_token = None
+            self._token_expires_at = 0.0
+            token = self._get_access_token()
+            resp = httpx.get(
+                f"{self._base_url()}/{path}",
+                headers={"Authorization": f"token {token}"},
+                params=params,
+                timeout=self._timeout_seconds,
+            )
+        resp.raise_for_status()
+        return resp.json()
 
     # ------------------------------------------------------------------
     # v2 protocol — lifecycle
@@ -227,47 +232,64 @@ class LookerAdapter:
         self,
         adapter: PersistedSourceAdapter,
     ) -> ConnectionTestResult:
-        """Validate credentials by calling ``GET /api/4.0/user`` (me endpoint).
-
-        TODO: Call ``self._api_get("user")`` after obtaining a token.  A 200
-        response confirms both authentication and network connectivity:
-
-            try:
-                me = self._api_get("user")
-                return ConnectionTestResult(
-                    success=True,
-                    message=f"Looker instance reachable; logged in as {me.get('email', 'unknown')}",
-                )
-            except Exception as exc:
-                return ConnectionTestResult(success=False, message=str(exc))
+        """Validate credentials by calling ``GET /api/4.0/user`` (whoami).
 
         Returns:
             ConnectionTestResult indicating success or failure.
         """
-        raise NotImplementedError(
-            "LookerAdapter.test_connection() is not implemented. "
-            "Call GET /api/4.0/user and check for a 200 response."
-        )
+        try:
+            me = self._api_get("user")
+            return ConnectionTestResult(
+                success=True,
+                message=f"Looker instance reachable; logged in as {me.get('email', 'unknown')}",
+            )
+        except Exception as exc:
+            return ConnectionTestResult(success=False, message=str(exc))
 
     async def probe(
         self,
         adapter: PersistedSourceAdapter,
         capabilities: frozenset[AdapterCapability] | None = None,
     ) -> tuple[CapabilityProbeResult, ...]:
-        """Probe capability availability by verifying API access.
+        """Probe capability availability.
 
-        TODO: Attempt ``self._api_get("all_projects")`` to confirm connectivity,
-        then check permission flags in the authenticated user's roles to confirm
-        whether DEFINITIONS (requires access to project files) is available.
-        Return one CapabilityProbeResult per requested capability.
+        Validates auth via ``GET /api/4.0/user``, then confirms model access
+        via ``GET /api/4.0/lookml_models`` with ``limit=1``.
 
         Returns:
             Tuple of CapabilityProbeResult — one per requested capability.
         """
         caps_to_probe = capabilities if capabilities is not None else self.declared_capabilities
-        raise NotImplementedError(
-            "LookerAdapter.probe() is not implemented. "
-            f"Must return a CapabilityProbeResult for each of: {caps_to_probe}"
+        scope_ctx = ScopeContext(
+            scope=ExtractionScope.GLOBAL,
+            identifiers={"instance_url": self._instance_url},
+        )
+
+        available = True
+        message: str | None = None
+
+        try:
+            self._api_get("user")
+        except Exception as exc:
+            available = False
+            message = f"auth check failed: {exc}"
+
+        if available:
+            try:
+                self._api_get("lookml_models", params={"limit": "1"})
+            except Exception as exc:
+                available = False
+                message = f"model access check failed: {exc}"
+
+        return tuple(
+            CapabilityProbeResult(
+                capability=cap,
+                available=available,
+                scope=ExtractionScope.GLOBAL,
+                scope_context=scope_ctx,
+                message=message,
+            )
+            for cap in caps_to_probe
         )
 
     # ------------------------------------------------------------------
@@ -278,70 +300,49 @@ class LookerAdapter:
         self,
         adapter: PersistedSourceAdapter,
     ) -> DiscoverySnapshot:
-        """DISCOVER: enumerate projects → models → explores as containers.
+        """DISCOVER: enumerate models and explores as containers.
 
-        Looker API endpoints:
-            GET /api/4.0/all_projects
-            GET /api/4.0/all_lookml_models?fields=name,project_name,explores
-
-        Response shape (all_projects)::
-
-            [
-              {
-                "id": "my_project",
-                "name": "my_project",
-                "pr_mode": "off",
-                "git_remote_url": "git@github.com:acme/lookml.git"
-              }
-            ]
-
-        Response shape (all_lookml_models)::
-
-            [
-              {
-                "name": "ecommerce",
-                "project_name": "my_project",
-                "explores": [
-                  {"name": "orders", "label": "Orders"},
-                  {"name": "users", "label": "Users"}
-                ]
-              }
-            ]
-
-        TODO: Build three tiers of DiscoveredContainer — project, model, explore:
-
-            containers = []
-            for project in projects:
-                containers.append(DiscoveredContainer(
-                    container_id=f"looker://project/{project['id']}",
-                    container_type="project",
-                    display_name=project["id"],
-                    metadata={"git_remote_url": project.get("git_remote_url") or ""},
-                ))
-            for model in models:
-                containers.append(DiscoveredContainer(
-                    container_id=f"looker://model/{model['name']}",
-                    container_type="model",
-                    display_name=model["name"],
-                    metadata={"project": model.get("project_name") or ""},
-                ))
-                for explore in model.get("explores", []):
-                    containers.append(DiscoveredContainer(
-                        container_id=f"looker://explore/{model['name']}/{explore['name']}",
-                        container_type="explore",
-                        display_name=explore.get("label") or explore["name"],
-                        metadata={"model": model["name"]},
-                    ))
+        Fetches ``GET /api/4.0/lookml_models`` and builds three tiers of
+        ``DiscoveredContainer``: project, model, explore.
 
         Returns:
             DiscoverySnapshot with containers for all projects, models, and explores.
         """
         t0 = time.monotonic()
-        raise NotImplementedError(
-            "LookerAdapter.discover() is not implemented. "
-            "Fetch all_projects and all_lookml_models and convert to DiscoveredContainers. "
-            "See method docstring for the expected request/response shape."
-        )
+        models = self._api_get("lookml_models")
+
+        containers: list[DiscoveredContainer] = []
+        seen_projects: set[str] = set()
+
+        for model in models:
+            project_name = model.get("project_name") or ""
+            if project_name and project_name not in seen_projects:
+                seen_projects.add(project_name)
+                containers.append(DiscoveredContainer(
+                    container_id=f"looker://project/{project_name}",
+                    container_type="project",
+                    display_name=project_name,
+                    metadata={},
+                ))
+
+            containers.append(DiscoveredContainer(
+                container_id=f"looker://model/{model['name']}",
+                container_type="model",
+                display_name=model["name"],
+                metadata={"project": project_name},
+            ))
+
+            for explore in model.get("explores", []):
+                containers.append(DiscoveredContainer(
+                    container_id=f"looker://explore/{model['name']}/{explore['name']}",
+                    container_type="explore",
+                    display_name=explore.get("label") or explore["name"],
+                    metadata={"model": model["name"]},
+                ))
+
+        duration_ms = (time.monotonic() - t0) * 1000
+        meta = self._make_meta(adapter, AdapterCapability.DISCOVER, len(containers), duration_ms)
+        return DiscoverySnapshot(meta=meta, containers=tuple(containers))
 
     # ------------------------------------------------------------------
     # v2 protocol — SCHEMA
@@ -353,60 +354,51 @@ class LookerAdapter:
     ) -> SchemaSnapshotV2:
         """SCHEMA: field definitions for each explore → SchemaSnapshotV2.
 
-        Looker API endpoint:
-            GET /api/4.0/lookml_model/{model_name}/explore/{explore_name}
-              ?fields=fields.dimensions.name,fields.dimensions.type,
-                      fields.measures.name,fields.measures.type,
-                      fields.dimensions.description
-
-        Response shape (explore field metadata)::
-
-            {
-              "name": "orders",
-              "model_name": "ecommerce",
-              "fields": {
-                "dimensions": [
-                  {"name": "orders.id",   "type": "number", "description": "Order PK"},
-                  {"name": "orders.date", "type": "date",   "description": null}
-                ],
-                "measures": [
-                  {"name": "orders.count", "type": "count", "description": "Total orders"}
-                ]
-              }
-            }
-
-        TODO: For each explore, build a SchemaObject of kind SEMANTIC_MODEL with
-        ColumnSchema entries for each dimension and measure:
-
-            columns = []
-            for dim in fields.get("dimensions", []):
-                columns.append(ColumnSchema(
-                    name=dim["name"],
-                    data_type=dim.get("type") or "unknown",
-                    description=dim.get("description") or None,
-                ))
-            for measure in fields.get("measures", []):
-                columns.append(ColumnSchema(
-                    name=measure["name"],
-                    data_type=measure.get("type") or "unknown",
-                    description=measure.get("description") or None,
-                ))
-            obj = SchemaObject(
-                schema_name=model_name,
-                object_name=explore_name,
-                kind=SchemaObjectKind.SEMANTIC_MODEL,
-                columns=tuple(columns),
-            )
+        For each explore, fetches ``GET /api/4.0/lookml_models/{model}/explores/{explore}``
+        and maps dimensions and measures to ``ColumnSchema`` objects on a
+        ``SchemaObject`` of kind ``SEMANTIC_MODEL``.
 
         Returns:
             SchemaSnapshotV2 with one SchemaObject per explore.
         """
         t0 = time.monotonic()
-        raise NotImplementedError(
-            "LookerAdapter.extract_schema() is not implemented. "
-            "Fetch field definitions for each explore and map to SchemaObjects. "
-            "See method docstring for the expected request/response shape."
-        )
+        models = self._api_get("lookml_models")
+
+        objects: list[SchemaObject] = []
+        for model in models:
+            model_name = model["name"]
+            for explore_stub in model.get("explores", []):
+                explore_name = explore_stub["name"]
+                explore = self._api_get(
+                    f"lookml_models/{model_name}/explores/{explore_name}",
+                    params={"fields": "fields"},
+                )
+                fields = explore.get("fields", {})
+
+                columns: list[ColumnSchema] = []
+                for dim in fields.get("dimensions", []):
+                    columns.append(ColumnSchema(
+                        name=dim["name"],
+                        data_type=dim.get("type") or "unknown",
+                        description=dim.get("description") or None,
+                    ))
+                for measure in fields.get("measures", []):
+                    columns.append(ColumnSchema(
+                        name=measure["name"],
+                        data_type=measure.get("type") or "unknown",
+                        description=measure.get("description") or None,
+                    ))
+
+                objects.append(SchemaObject(
+                    schema_name=model_name,
+                    object_name=explore_name,
+                    kind=SchemaObjectKind.SEMANTIC_MODEL,
+                    columns=tuple(columns),
+                ))
+
+        duration_ms = (time.monotonic() - t0) * 1000
+        meta = self._make_meta(adapter, AdapterCapability.SCHEMA, len(objects), duration_ms)
+        return SchemaSnapshotV2(meta=meta, objects=tuple(objects))
 
     # ------------------------------------------------------------------
     # v2 protocol — DEFINITIONS
@@ -416,47 +408,53 @@ class LookerAdapter:
         self,
         adapter: PersistedSourceAdapter,
     ) -> DefinitionSnapshot:
-        """DEFINITIONS: raw LookML source files → DefinitionSnapshot.
+        """DEFINITIONS: LookML SQL expressions → DefinitionSnapshot.
 
-        Looker API endpoints:
-            GET /api/4.0/all_projects                          — list projects
-            GET /api/4.0/project/{project_id}/files/all       — list files
-            GET /api/4.0/project/{project_id}/files/content?file_id={file_id}
-                                                               — file content
-
-        Response shape (all files for a project)::
-
-            [
-              {"id": "models/ecommerce.model.lkml", "title": "ecommerce", "type": "model"},
-              {"id": "views/orders.view.lkml",       "title": "orders",    "type": "view"}
-            ]
-
-        TODO: For each project, fetch file list and then content.  Use the file
-        type ("model" vs "view") to set schema_name and object_name:
-
-            for file_meta in project_files:
-                content_resp = self._api_get(
-                    f"project/{project_id}/files/content",
-                    params={"file_id": file_meta["id"]},
-                )
-                definitions.append(ObjectDefinition(
-                    schema_name=project_id,
-                    object_name=file_meta["id"],
-                    object_kind=SchemaObjectKind.SEMANTIC_MODEL,
-                    definition_text=content_resp.get("content") or "",
-                    definition_language="lookml",
-                    metadata={"file_type": file_meta.get("type") or ""},
-                ))
+        For each explore, fetches ``GET /api/4.0/lookml_models/{model}/explores/{explore}``
+        and concatenates the ``sql`` field from each dimension and measure into
+        one ``ObjectDefinition`` per explore.
 
         Returns:
-            DefinitionSnapshot with one ObjectDefinition per LookML file.
+            DefinitionSnapshot with one ObjectDefinition per explore.
         """
         t0 = time.monotonic()
-        raise NotImplementedError(
-            "LookerAdapter.extract_definitions() is not implemented. "
-            "Fetch raw LookML file content from each project and wrap in ObjectDefinitions. "
-            "See method docstring for the expected request/response shape."
-        )
+        models = self._api_get("lookml_models")
+
+        definitions: list[ObjectDefinition] = []
+        for model in models:
+            model_name = model["name"]
+            for explore_stub in model.get("explores", []):
+                explore_name = explore_stub["name"]
+                explore = self._api_get(
+                    f"lookml_models/{model_name}/explores/{explore_name}",
+                    params={"fields": "fields"},
+                )
+                fields = explore.get("fields", {})
+
+                sql_parts: list[str] = []
+                for dim in fields.get("dimensions", []):
+                    sql = (dim.get("sql") or "").strip()
+                    if sql:
+                        sql_parts.append(f"-- dimension: {dim['name']}\n{sql}")
+                for measure in fields.get("measures", []):
+                    sql = (measure.get("sql") or "").strip()
+                    if sql:
+                        sql_parts.append(f"-- measure: {measure['name']}\n{sql}")
+
+                definition_text = "\n\n".join(sql_parts) or f"-- {explore_name}"
+
+                definitions.append(ObjectDefinition(
+                    schema_name=model_name,
+                    object_name=explore_name,
+                    object_kind=SchemaObjectKind.SEMANTIC_MODEL,
+                    definition_text=definition_text,
+                    definition_language="lookml",
+                    metadata={"explore": explore_name, "model": model_name},
+                ))
+
+        duration_ms = (time.monotonic() - t0) * 1000
+        meta = self._make_meta(adapter, AdapterCapability.DEFINITIONS, len(definitions), duration_ms)
+        return DefinitionSnapshot(meta=meta, definitions=tuple(definitions))
 
     # ------------------------------------------------------------------
     # v2 protocol — TRAFFIC (not declared)
@@ -491,56 +489,58 @@ class LookerAdapter:
         self,
         adapter: PersistedSourceAdapter,
     ) -> LineageSnapshot:
-        """LINEAGE: map explores → underlying database tables via view sql_table_name.
+        """LINEAGE: map explores → underlying database tables via sql_table_name.
 
-        Looker API endpoint:
-            GET /api/4.0/lookml_model/{model_name}/explore/{explore_name}
-              ?fields=name,joins,view_name,sql_table_name
-
-        Response shape (explore with joins)::
-
-            {
-              "name": "orders",
-              "model_name": "ecommerce",
-              "view_name": "orders",
-              "joins": [
-                {
-                  "name": "users",
-                  "sql_table_name": "analytics.users",
-                  "type": "left_outer",
-                  "sql_on": "${users.id} = ${orders.user_id}"
-                }
-              ]
-            }
-
-        TODO: For each explore, collect the primary view and all joined views.
-        Resolve ``sql_table_name`` to emit LineageEdge records pointing from the
-        database table to the explore:
-
-            from alma_connectors.source_adapter_v2 import LineageEdge, LineageEdgeKind
-            edges = []
-            for explore in explores:
-                target = f"looker://explore/{model_name}/{explore['name']}"
-                for join in ([explore] + explore.get("joins", [])):
-                    table = join.get("sql_table_name", "")
-                    if table:
-                        edges.append(LineageEdge(
-                            source_object=table,
-                            target_object=target,
-                            edge_kind=LineageEdgeKind.CONNECTOR_API,
-                            confidence=0.95,
-                            metadata={"join_type": join.get("type") or ""},
-                        ))
+        For each explore, fetches join metadata and resolves ``sql_table_name``
+        on the primary view and all joined views to emit ``LineageEdge`` records
+        with ``edge_kind=DECLARED``.
 
         Returns:
             LineageSnapshot with edges from database tables to Looker explores.
         """
         t0 = time.monotonic()
-        raise NotImplementedError(
-            "LookerAdapter.extract_lineage() is not implemented. "
-            "Resolve sql_table_name in explore/join metadata to LineageEdges. "
-            "See method docstring for the expected request/response shape."
-        )
+        models = self._api_get("lookml_models")
+
+        edges: list[LineageEdge] = []
+        for model in models:
+            model_name = model["name"]
+            for explore_stub in model.get("explores", []):
+                explore_name = explore_stub["name"]
+                explore = self._api_get(
+                    f"lookml_models/{model_name}/explores/{explore_name}",
+                    params={"fields": "name,joins,view_name,sql_table_name"},
+                )
+                target = f"looker://explore/{model_name}/{explore_name}"
+
+                # Primary view → source table
+                primary_table = (explore.get("sql_table_name") or "").strip()
+                if primary_table:
+                    edges.append(LineageEdge(
+                        source_object=primary_table,
+                        target_object=target,
+                        edge_kind=LineageEdgeKind.DECLARED,
+                        confidence=0.95,
+                        metadata={"view": explore.get("view_name") or explore_name},
+                    ))
+
+                # Joined views → source tables
+                for join in explore.get("joins", []):
+                    join_table = (join.get("sql_table_name") or "").strip()
+                    if join_table:
+                        edges.append(LineageEdge(
+                            source_object=join_table,
+                            target_object=target,
+                            edge_kind=LineageEdgeKind.DECLARED,
+                            confidence=0.95,
+                            metadata={
+                                "join_name": join.get("name") or "",
+                                "join_type": join.get("type") or "",
+                            },
+                        ))
+
+        duration_ms = (time.monotonic() - t0) * 1000
+        meta = self._make_meta(adapter, AdapterCapability.LINEAGE, len(edges), duration_ms)
+        return LineageSnapshot(meta=meta, edges=tuple(edges))
 
     # ------------------------------------------------------------------
     # v2 protocol — ORCHESTRATION (not declared)
@@ -573,17 +573,13 @@ class LookerAdapter:
         probe_target: str | None = None,
         dry_run: bool = False,
     ) -> QueryResult:
-        """Not supported in this stub.
-
-        Note: Looker does support running queries via ``POST /api/4.0/queries``
-        followed by ``GET /api/4.0/queries/{query_id}/run/json``, but that is
-        not implemented here.
+        """Not supported in this adapter.
 
         Raises:
             NotImplementedError: Always.
         """
         raise NotImplementedError(
-            "LookerAdapter does not support query execution in this stub"
+            "LookerAdapter does not support query execution"
         )
 
     def get_setup_instructions(self) -> SetupInstructions:

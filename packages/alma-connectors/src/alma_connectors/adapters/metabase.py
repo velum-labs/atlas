@@ -1,4 +1,4 @@
-"""Metabase source adapter stub — community contribution welcome.
+"""Metabase source adapter — community contribution.
 
 This adapter authenticates with the Metabase API using a session token and
 extracts database/collection metadata and query execution history.
@@ -37,6 +37,8 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
+import httpx
+
 from alma_connectors.source_adapter import (
     ConnectionTestResult,
     ObservedQueryEvent,
@@ -67,7 +69,7 @@ logger = logging.getLogger(__name__)
 
 
 class MetabaseAdapter:
-    """Community stub — Metabase source adapter.
+    """Metabase source adapter.
 
     Implements the SourceAdapterV2 protocol against the Metabase REST API.
     Connected databases and collections are mapped to ``DiscoveredContainer``
@@ -79,7 +81,7 @@ class MetabaseAdapter:
     DISCOVER
         Lists all connected databases via ``GET /api/database`` and all
         collections via ``GET /api/collection``.  Each database and root-level
-        collection becomes a ``DiscoveredContainer``.
+        (non-archived) collection becomes a ``DiscoveredContainer``.
 
     SCHEMA
         For each database, fetches table list via
@@ -87,10 +89,9 @@ class MetabaseAdapter:
         ``SchemaObject`` / ``ColumnSchema`` records.
 
     TRAFFIC
-        Reads query execution history from the Metabase internal API:
-        ``GET /api/activity`` (older) or the Audit/Analytics endpoints
-        (Metabase Pro/Enterprise).  Returns ``ObservedQueryEvent`` records
-        representing user queries against connected databases.
+        Reads query execution history from ``GET /api/activity``.  On
+        Pro/Enterprise instances the adapter tries the audit endpoint first:
+        ``GET /api/ee/audit-app/query_execution``.
 
     Args:
         instance_url: Root URL of the Metabase instance, e.g.
@@ -156,60 +157,29 @@ class MetabaseAdapter:
         )
 
     def _get_auth_headers(self) -> dict[str, str]:
-        """Return the correct authentication headers for API requests.
-
-        TODO: If api_key is set, return the x-api-key header (Metabase 0.49+).
-        Otherwise, obtain a session token via POST /api/session and return the
-        X-Metabase-Session header.  Cache the session token:
-
-            if self._api_key:
-                return {"x-api-key": self._api_key}
-
-            if not self._session_token:
-                import requests
-                resp = requests.post(
-                    f"{self._instance_url}/api/session",
-                    json={"username": self._username, "password": self._password},
-                    timeout=self._timeout_seconds,
-                )
-                resp.raise_for_status()
-                self._session_token = resp.json()["id"]
-            return {"X-Metabase-Session": self._session_token}
-
-        Returns:
-            Dict of HTTP headers for authentication.
-        """
-        raise NotImplementedError(
-            "MetabaseAdapter._get_auth_headers() is not implemented. "
-            "Return {'x-api-key': ...} or obtain a session token via POST /api/session."
-        )
-
-    def _api_get(self, path: str, *, params: dict[str, Any] | None = None) -> Any:
-        """Execute an authenticated GET request against the Metabase API.
-
-        TODO: Build the request with auth headers from ``_get_auth_headers()``:
-
-            import requests
-            resp = requests.get(
-                f"{self._instance_url}/api/{path}",
-                headers=self._get_auth_headers(),
-                params=params,
+        """Return the correct authentication headers for API requests."""
+        if self._api_key:
+            return {"x-api-key": self._api_key}
+        if not self._session_token:
+            resp = httpx.post(
+                f"{self._instance_url}/api/session",
+                json={"username": self._username, "password": self._password},
                 timeout=self._timeout_seconds,
             )
             resp.raise_for_status()
-            return resp.json()
+            self._session_token = resp.json()["id"]
+        return {"X-Metabase-Session": self._session_token}
 
-        Args:
-            path: API path relative to /api/ (no leading slash).
-            params: Optional query parameters.
-
-        Returns:
-            Parsed JSON response (dict or list).
-        """
-        raise NotImplementedError(
-            "MetabaseAdapter._api_get() is not implemented. "
-            "See the docstring for implementation guidance."
+    def _api_get(self, path: str, *, params: dict[str, Any] | None = None) -> Any:
+        """Execute an authenticated GET request against the Metabase API."""
+        resp = httpx.get(
+            f"{self._instance_url}/api/{path}",
+            headers=self._get_auth_headers(),
+            params=params,
+            timeout=self._timeout_seconds,
         )
+        resp.raise_for_status()
+        return resp.json()
 
     # ------------------------------------------------------------------
     # v2 protocol — lifecycle
@@ -219,47 +189,76 @@ class MetabaseAdapter:
         self,
         adapter: PersistedSourceAdapter,
     ) -> ConnectionTestResult:
-        """Validate connectivity by calling ``GET /api/user/current``.
-
-        TODO: Call ``self._api_get("user/current")`` and inspect the response:
-
-            try:
-                me = self._api_get("user/current")
-                return ConnectionTestResult(
-                    success=True,
-                    message=f"Metabase reachable; logged in as {me.get('email', 'unknown')}",
-                )
-            except Exception as exc:
-                return ConnectionTestResult(success=False, message=str(exc))
-
-        Returns:
-            ConnectionTestResult indicating success or failure.
-        """
-        raise NotImplementedError(
-            "MetabaseAdapter.test_connection() is not implemented. "
-            "Call GET /api/user/current to verify credentials and connectivity."
-        )
+        """Validate connectivity by calling ``GET /api/user/current``."""
+        try:
+            me = self._api_get("user/current")
+            return ConnectionTestResult(
+                success=True,
+                message=f"Metabase reachable; logged in as {me.get('email', 'unknown')}",
+            )
+        except Exception as exc:
+            return ConnectionTestResult(success=False, message=str(exc))
 
     async def probe(
         self,
         adapter: PersistedSourceAdapter,
         capabilities: frozenset[AdapterCapability] | None = None,
     ) -> tuple[CapabilityProbeResult, ...]:
-        """Probe capability availability by verifying API access.
-
-        TODO: Attempt ``self._api_get("database")`` to confirm connectivity.
-        For TRAFFIC, check whether the instance is running Pro/Enterprise by
-        calling ``GET /api/setting`` and inspecting ``"token-features"`` for
-        ``"audit-app-subscription"``.  Return a CapabilityProbeResult per cap.
-
-        Returns:
-            Tuple of CapabilityProbeResult — one per requested capability.
-        """
+        """Probe capability availability by verifying API access."""
         caps_to_probe = capabilities if capabilities is not None else self.declared_capabilities
-        raise NotImplementedError(
-            "MetabaseAdapter.probe() is not implemented. "
-            f"Must return a CapabilityProbeResult for each of: {caps_to_probe}"
+
+        # Verify basic connectivity
+        try:
+            self._api_get("database")
+            db_ok = True
+        except Exception:
+            db_ok = False
+
+        # Check for Pro/Enterprise audit feature
+        enterprise_traffic = False
+        if db_ok and AdapterCapability.TRAFFIC in caps_to_probe:
+            try:
+                settings = self._api_get("setting")
+                features = {}
+                if isinstance(settings, list):
+                    features = {
+                        s["key"]: s.get("value")
+                        for s in settings
+                        if isinstance(s, dict) and "key" in s
+                    }
+                elif isinstance(settings, dict):
+                    features = settings.get("token-features", {}) or {}
+                enterprise_traffic = bool(features.get("audit-app-subscription"))
+            except Exception:
+                pass
+
+        results: list[CapabilityProbeResult] = []
+        scope_ctx = ScopeContext(
+            scope=ExtractionScope.GLOBAL,
+            identifiers={"instance_url": self._instance_url},
         )
+        for cap in caps_to_probe:
+            if cap == AdapterCapability.TRAFFIC:
+                results.append(CapabilityProbeResult(
+                    capability=cap,
+                    available=db_ok,
+                    scope=ExtractionScope.GLOBAL,
+                    scope_context=scope_ctx,
+                    fallback_used=not enterprise_traffic,
+                    message=(
+                        "Enterprise audit endpoint available"
+                        if enterprise_traffic
+                        else "Using OSS activity feed (limited history)"
+                    ),
+                ))
+            else:
+                results.append(CapabilityProbeResult(
+                    capability=cap,
+                    available=db_ok,
+                    scope=ExtractionScope.GLOBAL,
+                    scope_context=scope_ctx,
+                ))
+        return tuple(results)
 
     # ------------------------------------------------------------------
     # v2 protocol — DISCOVER
@@ -269,72 +268,43 @@ class MetabaseAdapter:
         self,
         adapter: PersistedSourceAdapter,
     ) -> DiscoverySnapshot:
-        """DISCOVER: list databases and collections → DiscoveredContainers.
-
-        Metabase API endpoints:
-            GET /api/database
-            GET /api/collection
-
-        Response shape (database list)::
-
-            {
-              "data": [
-                {
-                  "id": 1,
-                  "name": "Production PostgreSQL",
-                  "engine": "postgres",
-                  "details": {"host": "db.example.com", "port": 5432, "dbname": "app"},
-                  "is_full_sync": true,
-                  "is_sample": false
-                }
-              ]
-            }
-
-        Response shape (collection list)::
-
-            [
-              {
-                "id": 1,
-                "name": "Our analytics",
-                "slug": "our_analytics",
-                "location": "/",
-                "archived": false
-              }
-            ]
-
-        TODO: Build a DiscoveredContainer for each database and each top-level
-        (non-archived) collection:
-
-            containers = []
-            for db in databases:
-                containers.append(DiscoveredContainer(
-                    container_id=f"metabase://database/{db['id']}",
-                    container_type="database",
-                    display_name=db["name"],
-                    metadata={
-                        "engine": db.get("engine") or "",
-                        "is_full_sync": db.get("is_full_sync", False),
-                        "is_sample": db.get("is_sample", False),
-                    },
-                ))
-            for coll in collections:
-                if coll.get("archived"):
-                    continue
-                containers.append(DiscoveredContainer(
-                    container_id=f"metabase://collection/{coll['id']}",
-                    container_type="collection",
-                    display_name=coll["name"],
-                    metadata={"slug": coll.get("slug") or "", "location": coll.get("location") or "/"},
-                ))
-
-        Returns:
-            DiscoverySnapshot with containers for all databases and collections.
-        """
+        """DISCOVER: list databases and collections → DiscoveredContainers."""
         t0 = time.monotonic()
-        raise NotImplementedError(
-            "MetabaseAdapter.discover() is not implemented. "
-            "Fetch /api/database and /api/collection and convert to DiscoveredContainers. "
-            "See method docstring for the expected request/response shape."
+
+        db_response = self._api_get("database")
+        databases = db_response.get("data", db_response) if isinstance(db_response, dict) else db_response
+
+        collections = self._api_get("collection")
+
+        containers: list[DiscoveredContainer] = []
+        for db in databases:
+            containers.append(DiscoveredContainer(
+                container_id=f"metabase://database/{db['id']}",
+                container_type="database",
+                display_name=db["name"],
+                metadata={
+                    "engine": db.get("engine") or "",
+                    "is_full_sync": db.get("is_full_sync", False),
+                    "is_sample": db.get("is_sample", False),
+                },
+            ))
+        for coll in collections:
+            if coll.get("archived"):
+                continue
+            containers.append(DiscoveredContainer(
+                container_id=f"metabase://collection/{coll['id']}",
+                container_type="collection",
+                display_name=coll["name"],
+                metadata={
+                    "slug": coll.get("slug") or "",
+                    "location": coll.get("location") or "/",
+                },
+            ))
+
+        duration_ms = (time.monotonic() - t0) * 1000
+        return DiscoverySnapshot(
+            meta=self._make_meta(adapter, AdapterCapability.DISCOVER, len(containers), duration_ms),
+            containers=tuple(containers),
         )
 
     # ------------------------------------------------------------------
@@ -345,49 +315,24 @@ class MetabaseAdapter:
         self,
         adapter: PersistedSourceAdapter,
     ) -> SchemaSnapshotV2:
-        """SCHEMA: table and field definitions for each connected database.
+        """SCHEMA: table and field definitions for each connected database."""
+        t0 = time.monotonic()
 
-        Metabase API endpoint:
-            GET /api/database/{db_id}/metadata?include_hidden=false
+        db_response = self._api_get("database")
+        databases = db_response.get("data", db_response) if isinstance(db_response, dict) else db_response
 
-        Response shape::
+        objects: list[SchemaObject] = []
+        for db in databases:
+            db_id = db["id"]
+            db_name = db["name"]
+            try:
+                meta = self._api_get(f"database/{db_id}/metadata", params={"include_hidden": "false"})
+            except Exception:
+                logger.warning("Failed to fetch metadata for database %s (%s)", db_id, db_name)
+                continue
 
-            {
-              "id": 1,
-              "name": "Production PostgreSQL",
-              "tables": [
-                {
-                  "id": 12,
-                  "name": "orders",
-                  "schema": "public",
-                  "display_name": "Orders",
-                  "entity_type": "entity/TransactionTable",
-                  "fields": [
-                    {
-                      "id": 101,
-                      "name": "id",
-                      "display_name": "ID",
-                      "base_type": "type/Integer",
-                      "semantic_type": "type/PK",
-                      "description": null
-                    },
-                    {
-                      "id": 102,
-                      "name": "user_id",
-                      "base_type": "type/Integer",
-                      "semantic_type": "type/FK"
-                    }
-                  ]
-                }
-              ]
-            }
-
-        TODO: For each database, fetch metadata and convert tables to SchemaObjects.
-        Use ``base_type`` for ``data_type``; strip the ``"type/"`` prefix for readability:
-
-            objects = []
-            for table in db_metadata["tables"]:
-                columns = []
+            for table in meta.get("tables", []):
+                columns: list[ColumnSchema] = []
                 for field in table.get("fields", []):
                     base_type = (field.get("base_type") or "unknown").replace("type/", "")
                     columns.append(ColumnSchema(
@@ -395,23 +340,21 @@ class MetabaseAdapter:
                         data_type=base_type,
                         description=field.get("description") or None,
                     ))
-                kind = SchemaObjectKind.VIEW if "view" in (table.get("entity_type") or "").lower() else SchemaObjectKind.TABLE
+                entity_type = (table.get("entity_type") or "").lower()
+                kind = SchemaObjectKind.VIEW if "view" in entity_type else SchemaObjectKind.TABLE
+                schema_name = table.get("schema") or db_name
                 objects.append(SchemaObject(
-                    schema_name=table.get("schema") or db_name,
+                    schema_name=schema_name,
                     object_name=table["name"],
                     kind=kind,
                     columns=tuple(columns),
                     description=table.get("description") or None,
                 ))
 
-        Returns:
-            SchemaSnapshotV2 with one SchemaObject per table across all databases.
-        """
-        t0 = time.monotonic()
-        raise NotImplementedError(
-            "MetabaseAdapter.extract_schema() is not implemented. "
-            "Fetch /api/database/{id}/metadata and map tables to SchemaObjects. "
-            "See method docstring for the expected request/response shape."
+        duration_ms = (time.monotonic() - t0) * 1000
+        return SchemaSnapshotV2(
+            meta=self._make_meta(adapter, AdapterCapability.SCHEMA, len(objects), duration_ms),
+            objects=tuple(objects),
         )
 
     # ------------------------------------------------------------------
@@ -444,73 +387,73 @@ class MetabaseAdapter:
     ) -> TrafficExtractionResult:
         """TRAFFIC: query execution history → ObservedQueryEvent records.
 
-        Metabase API endpoint (OSS, limited):
-            GET /api/activity?limit=1000
-
-        Metabase API endpoint (Pro/Enterprise — full audit log):
-            GET /api/ee/audit-app/query_execution?start_date={since}&limit=1000
-
-        OSS response shape (activity feed)::
-
-            [
-              {
-                "id": 1234,
-                "topic": "card-query",
-                "timestamp": "2024-01-15T10:23:45.123Z",
-                "user": {"id": 5, "email": "analyst@example.com"},
-                "model": "card",
-                "model_id": 77,
-                "details": {"running_time": 1250, "result_rows": 42}
-              }
-            ]
-
-        Enterprise query_execution response shape::
-
-            {
-              "data": [
-                {
-                  "query_hash": "abc...",
-                  "started_at": "2024-01-15T10:23:45.123Z",
-                  "running_time": 1250,
-                  "result_rows": 42,
-                  "native": "SELECT ...",
-                  "executor_id": 5,
-                  "card_name": "Revenue by Month",
-                  "database_id": 1
-                }
-              ]
-            }
-
-        TODO: Prefer the Enterprise endpoint when available; fall back to the
-        OSS activity feed.  Filter by ``since`` when provided:
-
-            events = []
-            for entry in activity_entries:
-                if since and datetime.fromisoformat(entry["timestamp"]) < since:
-                    continue
-                events.append(ObservedQueryEvent(
-                    event_id=str(entry["id"]),
-                    executed_at=datetime.fromisoformat(entry["timestamp"].replace("Z", "+00:00")),
-                    query_text=entry.get("details", {}).get("native") or "",
-                    duration_ms=entry.get("details", {}).get("running_time") or 0,
-                    user_name=entry.get("user", {}).get("email") or "unknown",
-                    database_name=str(entry.get("model_id") or ""),
-                    schema_name="",
-                    row_count=entry.get("details", {}).get("result_rows"),
-                ))
-
-        Args:
-            adapter: Persisted adapter record.
-            since: Only fetch events after this timestamp.
-
-        Returns:
-            TrafficExtractionResult with ObservedQueryEvent per query execution.
+        Tries the Enterprise audit endpoint first; falls back to the OSS
+        activity feed if unavailable.
         """
         t0 = time.monotonic()
-        raise NotImplementedError(
-            "MetabaseAdapter.extract_traffic() is not implemented. "
-            "Fetch query execution history from /api/activity or the enterprise audit endpoint. "
-            "See method docstring for the expected request/response shape."
+        events: list[ObservedQueryEvent] = []
+
+        # Try Enterprise audit endpoint first
+        enterprise_ok = False
+        try:
+            params: dict[str, Any] = {"limit": 1000}
+            if since:
+                params["start_date"] = since.isoformat()
+            ee_response = self._api_get("ee/audit-app/query_execution", params=params)
+            entries = ee_response.get("data", []) if isinstance(ee_response, dict) else ee_response
+            for entry in entries:
+                started_raw = entry.get("started_at") or ""
+                try:
+                    captured_at = datetime.fromisoformat(started_raw.replace("Z", "+00:00"))
+                except (ValueError, AttributeError):
+                    captured_at = datetime.now(UTC)
+                sql = entry.get("native") or ""
+                events.append(ObservedQueryEvent(
+                    captured_at=captured_at,
+                    sql=sql or "-- no native query",
+                    source_name=self._instance_url,
+                    query_type="card-query",
+                    event_id=entry.get("query_hash") or None,
+                    database_name=str(entry.get("database_id") or ""),
+                    database_user=str(entry.get("executor_id") or "unknown"),
+                    duration_ms=float(entry.get("running_time") or 0),
+                ))
+            enterprise_ok = True
+        except Exception:
+            pass
+
+        if not enterprise_ok:
+            # Fall back to OSS activity feed
+            activity = self._api_get("activity", params={"limit": 1000})
+            if isinstance(activity, dict):
+                activity = activity.get("data", [])
+            for entry in activity:
+                if entry.get("topic") not in ("card-query", "query"):
+                    continue
+                ts_raw = entry.get("timestamp") or ""
+                try:
+                    captured_at = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+                except (ValueError, AttributeError):
+                    captured_at = datetime.now(UTC)
+                if since and captured_at < since:
+                    continue
+                details = entry.get("details") or {}
+                sql = details.get("native") or ""
+                events.append(ObservedQueryEvent(
+                    captured_at=captured_at,
+                    sql=sql or "-- no native query",
+                    source_name=self._instance_url,
+                    query_type=entry.get("topic") or "card-query",
+                    event_id=str(entry["id"]) if entry.get("id") is not None else None,
+                    database_name=str(entry.get("model_id") or ""),
+                    database_user=(entry.get("user") or {}).get("email") or "unknown",
+                    duration_ms=float(details.get("running_time") or 0),
+                ))
+
+        duration_ms = (time.monotonic() - t0) * 1000
+        return TrafficExtractionResult(
+            meta=self._make_meta(adapter, AdapterCapability.TRAFFIC, len(events), duration_ms),
+            events=tuple(events),
         )
 
     # ------------------------------------------------------------------
@@ -521,7 +464,7 @@ class MetabaseAdapter:
         self,
         adapter: PersistedSourceAdapter,
     ) -> LineageSnapshot:
-        """Not supported in this stub — Metabase does not expose lineage natively.
+        """Not supported — Metabase does not expose lineage natively.
 
         Raises:
             NotImplementedError: Always.
@@ -564,9 +507,6 @@ class MetabaseAdapter:
     ) -> QueryResult:
         """Not supported in this stub.
 
-        Note: Metabase supports ad-hoc native queries via
-        ``POST /api/dataset`` — implementors may add this capability.
-
         Raises:
             NotImplementedError: Always.
         """
@@ -575,11 +515,7 @@ class MetabaseAdapter:
         )
 
     def get_setup_instructions(self) -> SetupInstructions:
-        """Return operator guidance for enabling the Metabase adapter.
-
-        Returns:
-            SetupInstructions describing how to configure Metabase API access.
-        """
+        """Return operator guidance for enabling the Metabase adapter."""
         return SetupInstructions(
             title="Metabase REST API Adapter",
             summary=(
