@@ -20,6 +20,7 @@ from alma_connectors import (
 from alma_connectors.adapters.bigquery import BigQueryAdapter
 from alma_connectors.source_adapter_v2 import (
     AdapterCapability,
+    DefinitionSnapshot,
     DiscoverySnapshot,
     ExtractionScope,
     SchemaSnapshotV2,
@@ -56,17 +57,25 @@ class _FakeBQClient:
         column_rows: list[dict[str, Any]] | None = None,
         job_rows: list[dict[str, Any]] | None = None,
         storage_rows: list[dict[str, Any]] | None = None,
+        view_rows: list[dict[str, Any]] | None = None,
+        routine_rows: list[dict[str, Any]] | None = None,
+        table_ddl_rows: list[dict[str, Any]] | None = None,
         raise_on_list_datasets: Exception | None = None,
         raise_on_schema_query: Exception | None = None,
         raise_on_jobs_query: Exception | None = None,
+        raise_on_definitions_query: Exception | None = None,
     ) -> None:
         self._datasets = [_FakeDataset(d) for d in (datasets if datasets is not None else ["ds_a", "ds_b"])]
         self._column_rows = column_rows or []
         self._job_rows = job_rows or []
         self._storage_rows = storage_rows or []
+        self._view_rows = view_rows or []
+        self._routine_rows = routine_rows or []
+        self._table_ddl_rows = table_ddl_rows or []
         self._raise_on_list_datasets = raise_on_list_datasets
         self._raise_on_schema_query = raise_on_schema_query
         self._raise_on_jobs_query = raise_on_jobs_query
+        self._raise_on_definitions_query = raise_on_definitions_query
         self.queries_issued: list[str] = []
 
     def list_datasets(self) -> list[_FakeDataset]:
@@ -86,6 +95,16 @@ class _FakeBQClient:
             if self._raise_on_schema_query is not None:
                 raise self._raise_on_schema_query
             return _FakeQueryJob(self._column_rows)
+        if "INFORMATION_SCHEMA.VIEWS" in sql:
+            if self._raise_on_definitions_query is not None:
+                raise self._raise_on_definitions_query
+            return _FakeQueryJob(self._view_rows)
+        if "INFORMATION_SCHEMA.ROUTINES" in sql:
+            if self._raise_on_definitions_query is not None:
+                raise self._raise_on_definitions_query
+            return _FakeQueryJob(self._routine_rows)
+        if "INFORMATION_SCHEMA.TABLES" in sql:
+            return _FakeQueryJob(self._table_ddl_rows)
         # probe SELECT 1, test_connection SELECT 1, etc.
         return _FakeQueryJob([])
 
@@ -131,18 +150,18 @@ def _make_bq_adapter(client: _FakeBQClient) -> BigQueryAdapter:
 # ---------------------------------------------------------------------------
 
 
-def test_declared_capabilities_includes_discover_schema_traffic() -> None:
+def test_declared_capabilities_includes_discover_schema_definitions_traffic() -> None:
     adapter = BigQueryAdapter(resolve_secret=lambda s: "", client_factory=lambda p, j: None)
     caps = adapter.declared_capabilities
     assert AdapterCapability.DISCOVER in caps
     assert AdapterCapability.SCHEMA in caps
+    assert AdapterCapability.DEFINITIONS in caps
     assert AdapterCapability.TRAFFIC in caps
 
 
-def test_declared_capabilities_excludes_definitions_lineage_orchestration() -> None:
+def test_declared_capabilities_excludes_lineage_orchestration() -> None:
     adapter = BigQueryAdapter(resolve_secret=lambda s: "", client_factory=lambda p, j: None)
     caps = adapter.declared_capabilities
-    assert AdapterCapability.DEFINITIONS not in caps
     assert AdapterCapability.LINEAGE not in caps
     assert AdapterCapability.ORCHESTRATION not in caps
 
@@ -160,6 +179,7 @@ def test_probe_returns_all_declared_capabilities() -> None:
     caps = {r.capability for r in results}
     assert AdapterCapability.DISCOVER in caps
     assert AdapterCapability.SCHEMA in caps
+    assert AdapterCapability.DEFINITIONS in caps
     assert AdapterCapability.TRAFFIC in caps
 
 
@@ -390,15 +410,175 @@ def test_extract_traffic_passes_observation_cursor() -> None:
 
 
 # ---------------------------------------------------------------------------
-# NotImplementedError methods
+# probe() — DEFINITIONS
 # ---------------------------------------------------------------------------
 
 
-def test_extract_definitions_raises() -> None:
-    adapter = BigQueryAdapter(resolve_secret=lambda s: "", client_factory=lambda p, j: None)
+def test_probe_definitions_available_when_no_errors() -> None:
+    client = _FakeBQClient()
+    bq = _make_bq_adapter(client)
     persisted = _make_adapter()
-    with pytest.raises(NotImplementedError, match="DEFINITIONS"):
-        asyncio.run(adapter.extract_definitions(persisted))
+    results = asyncio.run(bq.probe(persisted))
+    defs_result = next(r for r in results if r.capability == AdapterCapability.DEFINITIONS)
+    assert defs_result.available is True
+    assert defs_result.permissions_missing == ()
+
+
+def test_probe_definitions_unavailable_on_permission_error() -> None:
+    client = _FakeBQClient(
+        raise_on_definitions_query=PermissionError("403 PermissionDenied: bigquery.routines.list")
+    )
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    results = asyncio.run(bq.probe(persisted))
+    defs_result = next(r for r in results if r.capability == AdapterCapability.DEFINITIONS)
+    assert defs_result.available is False
+    assert len(defs_result.permissions_missing) > 0
+    assert defs_result.message is not None
+
+
+# ---------------------------------------------------------------------------
+# extract_definitions()
+# ---------------------------------------------------------------------------
+
+
+def test_extract_definitions_returns_definition_snapshot() -> None:
+    view_rows = [
+        {"table_schema": "analytics", "table_name": "v_users", "view_definition": "SELECT * FROM analytics.users"},
+    ]
+    client = _FakeBQClient(view_rows=view_rows)
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    snapshot = asyncio.run(bq.extract_definitions(persisted))
+    assert isinstance(snapshot, DefinitionSnapshot)
+    assert snapshot.meta.capability == AdapterCapability.DEFINITIONS
+
+
+def test_extract_definitions_returns_view_sql() -> None:
+    view_rows = [
+        {"table_schema": "ds", "table_name": "active_users", "view_definition": "SELECT id FROM ds.users WHERE active"},
+    ]
+    client = _FakeBQClient(view_rows=view_rows)
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    snapshot = asyncio.run(bq.extract_definitions(persisted))
+    views = [d for d in snapshot.definitions if d.object_kind.value == "view"]
+    assert len(views) == 1
+    assert views[0].schema_name == "ds"
+    assert views[0].object_name == "active_users"
+    assert views[0].definition_text == "SELECT id FROM ds.users WHERE active"
+    assert views[0].definition_language == "sql"
+
+
+def test_extract_definitions_returns_routine_ddl() -> None:
+    routine_rows = [
+        {
+            "routine_schema": "ds",
+            "routine_name": "my_func",
+            "routine_type": "FUNCTION",
+            "routine_definition": "SELECT x + 1",
+            "external_language": None,
+        },
+        {
+            "routine_schema": "ds",
+            "routine_name": "my_proc",
+            "routine_type": "PROCEDURE",
+            "routine_definition": "BEGIN SELECT 1; END",
+            "external_language": None,
+        },
+    ]
+    client = _FakeBQClient(routine_rows=routine_rows)
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    snapshot = asyncio.run(bq.extract_definitions(persisted))
+    routines = {d.object_name: d for d in snapshot.definitions}
+    assert "my_func" in routines
+    assert routines["my_func"].object_kind.value == "udf"
+    assert routines["my_func"].definition_language == "sql"
+    assert "my_proc" in routines
+    assert routines["my_proc"].object_kind.value == "procedure"
+
+
+def test_extract_definitions_returns_table_ddl() -> None:
+    table_ddl_rows = [
+        {"table_schema": "ds", "table_name": "orders", "ddl": "CREATE TABLE ds.orders (id INT64)"},
+    ]
+    client = _FakeBQClient(table_ddl_rows=table_ddl_rows)
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    snapshot = asyncio.run(bq.extract_definitions(persisted))
+    tables = [d for d in snapshot.definitions if d.object_kind.value == "table"]
+    assert len(tables) == 1
+    assert tables[0].object_name == "orders"
+    assert tables[0].definition_language == "ddl"
+    assert "CREATE TABLE" in tables[0].definition_text
+
+
+def test_extract_definitions_handles_null_view_definition() -> None:
+    view_rows = [
+        {"table_schema": "ds", "table_name": "restricted_view", "view_definition": None},
+        {"table_schema": "ds", "table_name": "ok_view", "view_definition": "SELECT 1"},
+    ]
+    client = _FakeBQClient(view_rows=view_rows)
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    snapshot = asyncio.run(bq.extract_definitions(persisted))
+    view_names = {d.object_name for d in snapshot.definitions}
+    assert "restricted_view" not in view_names
+    assert "ok_view" in view_names
+
+
+def test_extract_definitions_handles_null_routine_definition() -> None:
+    routine_rows = [
+        {
+            "routine_schema": "ds",
+            "routine_name": "restricted_fn",
+            "routine_type": "FUNCTION",
+            "routine_definition": None,
+            "external_language": None,
+        },
+        {
+            "routine_schema": "ds",
+            "routine_name": "visible_fn",
+            "routine_type": "FUNCTION",
+            "routine_definition": "SELECT x",
+            "external_language": None,
+        },
+    ]
+    client = _FakeBQClient(routine_rows=routine_rows)
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    snapshot = asyncio.run(bq.extract_definitions(persisted))
+    routine_names = {d.object_name for d in snapshot.definitions}
+    assert "restricted_fn" not in routine_names
+    assert "visible_fn" in routine_names
+
+
+def test_extract_definitions_meta_row_count() -> None:
+    view_rows = [
+        {"table_schema": "ds", "table_name": "v1", "view_definition": "SELECT 1"},
+        {"table_schema": "ds", "table_name": "v2", "view_definition": "SELECT 2"},
+    ]
+    client = _FakeBQClient(view_rows=view_rows)
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    snapshot = asyncio.run(bq.extract_definitions(persisted))
+    assert snapshot.meta.row_count == 2
+    assert snapshot.meta.adapter_key == "bq-test"
+
+
+def test_extract_definitions_empty_when_no_objects() -> None:
+    client = _FakeBQClient()
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    snapshot = asyncio.run(bq.extract_definitions(persisted))
+    assert snapshot.definitions == ()
+    assert snapshot.meta.row_count == 0
+
+
+# ---------------------------------------------------------------------------
+# NotImplementedError methods
+# ---------------------------------------------------------------------------
 
 
 def test_extract_lineage_raises() -> None:

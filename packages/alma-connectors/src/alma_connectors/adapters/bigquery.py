@@ -36,10 +36,12 @@ from alma_connectors.source_adapter_v2 import (
     AdapterCapability,
     CapabilityProbeResult,
     ColumnSchema as V2ColumnSchema,
+    DefinitionSnapshot,
     DiscoveredContainer,
     DiscoverySnapshot,
     ExtractionMeta,
     ExtractionScope,
+    ObjectDefinition,
     SchemaObject,
     SchemaObjectKind as V2SchemaObjectKind,
     SchemaSnapshotV2,
@@ -271,7 +273,9 @@ def _missing_permissions_from_exc(exc: Exception) -> tuple[str, ...]:
         return ()
     if "jobs" in lmsg:
         return ("bigquery.jobs.listAll",)
-    if "information_schema" in lmsg or "columns" in lmsg:
+    if "routines" in lmsg:
+        return ("bigquery.routines.list",)
+    if "information_schema" in lmsg or "columns" in lmsg or "views" in lmsg:
         return ("bigquery.tables.getData",)
     if "dataset" in lmsg:
         return ("bigquery.datasets.list",)
@@ -727,7 +731,12 @@ class BigQueryAdapter(SourceAdapter):
 
     @property
     def declared_capabilities(self) -> frozenset[AdapterCapability]:
-        return frozenset({AdapterCapability.DISCOVER, AdapterCapability.SCHEMA, AdapterCapability.TRAFFIC})
+        return frozenset({
+            AdapterCapability.DISCOVER,
+            AdapterCapability.SCHEMA,
+            AdapterCapability.DEFINITIONS,
+            AdapterCapability.TRAFFIC,
+        })
 
     async def probe(
         self,
@@ -817,6 +826,28 @@ class BigQueryAdapter(SourceAdapter):
                     permissions_missing=_missing_permissions_from_exc(exc),
                 ))
 
+        if AdapterCapability.DEFINITIONS in caps:
+            _region = f"`{project_id}`.`region-{config.location}`"
+            probe_errors: list[str] = []
+            missing_perms: list[str] = []
+            for probe_sql in (
+                f"SELECT 1 FROM {_region}.INFORMATION_SCHEMA.ROUTINES LIMIT 1",
+                f"SELECT 1 FROM {_region}.INFORMATION_SCHEMA.VIEWS LIMIT 1",
+            ):
+                try:
+                    client.query(probe_sql, job_config=bigquery.QueryJobConfig()).result()
+                except Exception as exc:
+                    probe_errors.append(str(exc))
+                    missing_perms.extend(_missing_permissions_from_exc(exc))
+            results.append(CapabilityProbeResult(
+                capability=AdapterCapability.DEFINITIONS,
+                available=len(probe_errors) == 0,
+                scope=ExtractionScope.REGION,
+                scope_context=scope_ctx,
+                message="; ".join(probe_errors) if probe_errors else None,
+                permissions_missing=tuple(dict.fromkeys(missing_perms)),
+            ))
+
         return tuple(results)
 
     async def discover(self, adapter: PersistedSourceAdapter) -> DiscoverySnapshot:
@@ -858,35 +889,271 @@ class BigQueryAdapter(SourceAdapter):
         return DiscoverySnapshot(meta=meta, containers=containers)
 
     async def extract_schema(self, adapter: PersistedSourceAdapter) -> SchemaSnapshotV2:
-        """SCHEMA: wrap introspect_schema() output into v2 SchemaSnapshotV2."""
+        """SCHEMA: tables/views with freshness + descriptions, routines, and ML models.
+
+        Queries (in order, with independent graceful fallback for optional views):
+          1. INFORMATION_SCHEMA.COLUMNS      — columns for all tables/views
+          2. INFORMATION_SCHEMA.TABLE_STORAGE — row_count, size_bytes, last_modified_time
+          3. INFORMATION_SCHEMA.TABLE_OPTIONS — table descriptions
+          4. INFORMATION_SCHEMA.PARAMETERS   — routine parameters (best-effort)
+          5. INFORMATION_SCHEMA.ROUTINES     — UDFs, procedures, table functions
+          6. INFORMATION_SCHEMA.MODELS       — BigQuery ML models
+        """
         started_at = time.perf_counter()
         captured_at = datetime.now(tz=UTC)
 
-        v1_snapshot = await self.introspect_schema(adapter)
-
-        objects = tuple(
-            SchemaObject(
-                schema_name=tbl.schema_name,
-                object_name=tbl.object_name,
-                kind=V2SchemaObjectKind(tbl.object_kind.value),
-                columns=tuple(
-                    V2ColumnSchema(
-                        name=col.name,
-                        data_type=col.data_type,
-                        is_nullable=col.is_nullable,
-                    )
-                    for col in tbl.columns
-                ),
-                row_count=tbl.row_count,
-                size_bytes=tbl.size_bytes,
-                partition_column=tbl.partition_column,
-                clustering_columns=tbl.clustering_columns,
-            )
-            for tbl in v1_snapshot.objects
-        )
-
         config = self._get_config(adapter)
-        project_id, _ = self._credentials(adapter)
+        project_id, sa_json = self._credentials(adapter)
+        client = self._get_client(project_id, sa_json)
+        bigquery = _get_bigquery_module()
+        region_prefix = f"`{project_id}`.`region-{config.location}`"
+
+        # ------------------------------------------------------------------
+        # 1. COLUMNS
+        # ------------------------------------------------------------------
+        columns_sql = f"""
+            SELECT
+              table_schema,
+              table_name,
+              column_name,
+              data_type,
+              is_nullable,
+              ordinal_position,
+              is_partitioning_column,
+              clustering_ordinal_position
+            FROM {region_prefix}.INFORMATION_SCHEMA.COLUMNS
+            WHERE table_schema <> 'INFORMATION_SCHEMA'
+            ORDER BY table_schema, table_name, ordinal_position
+            LIMIT @max_rows
+        """
+        column_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("max_rows", "INT64", config.max_column_rows),
+            ]
+        )
+        col_rows = [_row_to_dict(r) for r in client.query(columns_sql, job_config=column_config).result()]
+
+        grouped: dict[tuple[str, str], list[V2ColumnSchema]] = defaultdict(list)
+        table_partition: dict[tuple[str, str], str] = {}
+        table_clustering: dict[tuple[str, str], dict[int, str]] = defaultdict(dict)
+
+        for row in col_rows:
+            schema_name = str(row.get("table_schema", "")).strip()
+            table_name = str(row.get("table_name", "")).strip()
+            column_name = str(row.get("column_name", "")).strip()
+            data_type = str(row.get("data_type", "")).strip()
+            if not schema_name or not table_name or not column_name or not data_type:
+                continue
+
+            key = (schema_name, table_name)
+            grouped[key].append(
+                V2ColumnSchema(
+                    name=column_name,
+                    data_type=data_type,
+                    is_nullable=str(row.get("is_nullable", "YES")).upper() == "YES",
+                )
+            )
+            if str(row.get("is_partitioning_column", "")).upper() == "YES":
+                table_partition.setdefault(key, column_name)
+            clustering_pos = row.get("clustering_ordinal_position")
+            if clustering_pos is not None:
+                with contextlib.suppress(TypeError, ValueError):
+                    table_clustering[key][int(clustering_pos)] = column_name
+
+        # ------------------------------------------------------------------
+        # 2. TABLE_STORAGE (row counts, logical bytes, last_modified_time)
+        # ------------------------------------------------------------------
+        storage_lookup: dict[tuple[str, str], dict[str, Any]] = {}
+        try:
+            storage_sql = f"""
+                SELECT dataset_id, table_id, row_count, total_logical_bytes, last_modified_time
+                FROM {region_prefix}.INFORMATION_SCHEMA.TABLE_STORAGE
+                WHERE deleted = FALSE
+            """
+            for srow in client.query(storage_sql, job_config=bigquery.QueryJobConfig()).result():
+                sdict = _row_to_dict(srow)
+                ds = str(sdict.get("dataset_id", "")).strip()
+                tbl = str(sdict.get("table_id", "")).strip()
+                if not ds or not tbl:
+                    continue
+                rc = sdict.get("row_count")
+                sb = sdict.get("total_logical_bytes")
+                storage_lookup[(ds, tbl)] = {
+                    "row_count": int(rc) if rc is not None else 0,
+                    "size_bytes": int(sb) if sb is not None else 0,
+                    "last_modified": _normalize_timestamp(sdict.get("last_modified_time")),
+                }
+        except Exception as exc:
+            logger.warning(
+                "BigQueryAdapter.extract_schema: TABLE_STORAGE query failed, "
+                "row_count/size_bytes/last_modified will be omitted. adapter=%s error=%s",
+                adapter.key,
+                exc,
+            )
+
+        # ------------------------------------------------------------------
+        # 3. TABLE_OPTIONS (descriptions)
+        # ------------------------------------------------------------------
+        description_lookup: dict[tuple[str, str], str] = {}
+        try:
+            opts_sql = f"""
+                SELECT table_schema, table_name, option_value
+                FROM {region_prefix}.INFORMATION_SCHEMA.TABLE_OPTIONS
+                WHERE option_name = 'description'
+            """
+            for row in client.query(opts_sql, job_config=bigquery.QueryJobConfig()).result():
+                rdict = _row_to_dict(row)
+                ds = str(rdict.get("table_schema", "")).strip()
+                tbl = str(rdict.get("table_name", "")).strip()
+                val = str(rdict.get("option_value", "")).strip().strip('"')
+                if ds and tbl and val:
+                    description_lookup[(ds, tbl)] = val
+        except Exception as exc:
+            logger.warning(
+                "BigQueryAdapter.extract_schema: TABLE_OPTIONS query failed, "
+                "table descriptions will be omitted. adapter=%s error=%s",
+                adapter.key,
+                exc,
+            )
+
+        # ------------------------------------------------------------------
+        # Build table/view SchemaObjects
+        # ------------------------------------------------------------------
+        objects_list: list[SchemaObject] = []
+        for (schema_name, table_name), cols in grouped.items():
+            key = (schema_name, table_name)
+            st = storage_lookup.get(key, {})
+            objects_list.append(
+                SchemaObject(
+                    schema_name=schema_name,
+                    object_name=table_name,
+                    kind=V2SchemaObjectKind.TABLE,
+                    columns=tuple(cols),
+                    row_count=st.get("row_count"),
+                    size_bytes=st.get("size_bytes"),
+                    last_modified=st.get("last_modified"),
+                    description=description_lookup.get(key),
+                    partition_column=table_partition.get(key),
+                    clustering_columns=tuple(
+                        col for _, col in sorted(table_clustering.get(key, {}).items())
+                    ),
+                )
+            )
+
+        # ------------------------------------------------------------------
+        # 4. PARAMETERS (routine parameters — best-effort, non-fatal)
+        # ------------------------------------------------------------------
+        routine_params: dict[tuple[str, str], list[V2ColumnSchema]] = defaultdict(list)
+        try:
+            params_sql = f"""
+                SELECT specific_schema, specific_name, parameter_name, data_type, ordinal_position
+                FROM {region_prefix}.INFORMATION_SCHEMA.PARAMETERS
+                ORDER BY specific_schema, specific_name, ordinal_position
+            """
+            for row in client.query(params_sql, job_config=bigquery.QueryJobConfig()).result():
+                rdict = _row_to_dict(row)
+                schema = str(rdict.get("specific_schema", "")).strip()
+                name = str(rdict.get("specific_name", "")).strip()
+                param_name = str(rdict.get("parameter_name", "")).strip()
+                data_type = str(rdict.get("data_type", "")).strip() or "ANY TYPE"
+                if schema and name and param_name:
+                    routine_params[(schema, name)].append(
+                        V2ColumnSchema(name=param_name, data_type=data_type)
+                    )
+        except Exception as exc:
+            logger.warning(
+                "BigQueryAdapter.extract_schema: PARAMETERS query failed, "
+                "routine parameters will be omitted. adapter=%s error=%s",
+                adapter.key,
+                exc,
+            )
+
+        # ------------------------------------------------------------------
+        # 5. ROUTINES (UDFs, procedures, table functions)
+        # ------------------------------------------------------------------
+        try:
+            routines_sql = f"""
+                SELECT
+                  routine_schema,
+                  routine_name,
+                  routine_type,
+                  data_type,
+                  routine_definition,
+                  routine_body,
+                  external_language
+                FROM {region_prefix}.INFORMATION_SCHEMA.ROUTINES
+            """
+            for row in client.query(routines_sql, job_config=bigquery.QueryJobConfig()).result():
+                rdict = _row_to_dict(row)
+                schema = str(rdict.get("routine_schema", "")).strip()
+                name = str(rdict.get("routine_name", "")).strip()
+                if not schema or not name:
+                    continue
+                routine_type = str(rdict.get("routine_type", "")).strip().upper()
+                if "PROCEDURE" in routine_type:
+                    kind = V2SchemaObjectKind.PROCEDURE
+                elif "TABLE" in routine_type:
+                    kind = V2SchemaObjectKind.TABLE_FUNCTION
+                else:
+                    kind = V2SchemaObjectKind.UDF
+                body_type = str(rdict.get("routine_body", "")).strip().upper()
+                ext_lang = str(rdict.get("external_language", "")).strip()
+                language = ext_lang if (body_type == "EXTERNAL" and ext_lang) else (body_type or None)
+                return_type = str(rdict.get("data_type", "")).strip() or None
+                definition_body = str(rdict.get("routine_definition", "")).strip() or None
+                objects_list.append(
+                    SchemaObject(
+                        schema_name=schema,
+                        object_name=name,
+                        kind=kind,
+                        columns=tuple(routine_params.get((schema, name), [])),
+                        language=language,
+                        return_type=return_type,
+                        definition_body=definition_body,
+                    )
+                )
+        except Exception as exc:
+            logger.warning(
+                "BigQueryAdapter.extract_schema: ROUTINES query failed, "
+                "UDFs/procedures will be omitted. adapter=%s error=%s",
+                adapter.key,
+                exc,
+            )
+
+        # ------------------------------------------------------------------
+        # 6. MODELS (BigQuery ML)
+        # ------------------------------------------------------------------
+        try:
+            models_sql = f"""
+                SELECT model_schema, model_name, model_type, last_modified_time
+                FROM {region_prefix}.INFORMATION_SCHEMA.MODELS
+            """
+            for row in client.query(models_sql, job_config=bigquery.QueryJobConfig()).result():
+                rdict = _row_to_dict(row)
+                schema = str(rdict.get("model_schema", "")).strip()
+                name = str(rdict.get("model_name", "")).strip()
+                if not schema or not name:
+                    continue
+                model_type = str(rdict.get("model_type", "")).strip() or None
+                last_mod = _normalize_timestamp(rdict.get("last_modified_time"))
+                objects_list.append(
+                    SchemaObject(
+                        schema_name=schema,
+                        object_name=name,
+                        kind=V2SchemaObjectKind.ML_MODEL,
+                        model_type=model_type,
+                        last_modified=last_mod,
+                    )
+                )
+        except Exception as exc:
+            logger.warning(
+                "BigQueryAdapter.extract_schema: MODELS query failed, "
+                "ML models will be omitted. adapter=%s error=%s",
+                adapter.key,
+                exc,
+            )
+
+        objects = tuple(objects_list)
         duration_ms = (time.perf_counter() - started_at) * 1000.0
         scope_ctx = ScopeContext(
             scope=ExtractionScope.REGION,
@@ -937,11 +1204,140 @@ class BigQueryAdapter(SourceAdapter):
             observation_cursor=v1_result.observation_cursor,
         )
 
-    async def extract_definitions(self, adapter: PersistedSourceAdapter) -> None:  # type: ignore[override]
-        raise NotImplementedError(
-            "BigQueryAdapter does not support DEFINITIONS extraction. "
-            "DDL retrieval via INFORMATION_SCHEMA.TABLES.ddl is planned for Phase 2."
+    async def extract_definitions(self, adapter: PersistedSourceAdapter) -> DefinitionSnapshot:
+        """DEFINITIONS: extract view SQL, routine DDL, and table DDL from INFORMATION_SCHEMA."""
+        config = self._get_config(adapter)
+        project_id, sa_json = self._credentials(adapter)
+        client = self._get_client(project_id, sa_json)
+        bigquery = _get_bigquery_module()
+
+        started_at = time.perf_counter()
+        captured_at = datetime.now(tz=UTC)
+        region = f"`{project_id}`.`region-{config.location}`"
+        definitions: list[ObjectDefinition] = []
+
+        # --- Views ---
+        views_sql = f"""
+            SELECT table_schema, table_name, view_definition
+            FROM {region}.INFORMATION_SCHEMA.VIEWS
+            WHERE table_schema <> 'INFORMATION_SCHEMA'
+        """
+        try:
+            view_job = client.query(views_sql, job_config=bigquery.QueryJobConfig())
+            for row in view_job.result():
+                d = _row_to_dict(row)
+                schema_name = str(d.get("table_schema", "")).strip()
+                object_name = str(d.get("table_name", "")).strip()
+                view_def = d.get("view_definition")
+                if not schema_name or not object_name or view_def is None:
+                    continue
+                definition_text = str(view_def).strip()
+                if not definition_text:
+                    continue
+                definitions.append(ObjectDefinition(
+                    schema_name=schema_name,
+                    object_name=object_name,
+                    object_kind=V2SchemaObjectKind.VIEW,
+                    definition_text=definition_text,
+                    definition_language="sql",
+                ))
+        except Exception as exc:
+            logger.warning(
+                "BigQueryAdapter.extract_definitions: VIEWS query failed. adapter=%s error=%s",
+                adapter.key,
+                exc,
+            )
+
+        # --- Routines ---
+        routines_sql = f"""
+            SELECT routine_schema, routine_name, routine_type, routine_definition, external_language
+            FROM {region}.INFORMATION_SCHEMA.ROUTINES
+            WHERE routine_schema <> 'INFORMATION_SCHEMA'
+        """
+        try:
+            routine_job = client.query(routines_sql, job_config=bigquery.QueryJobConfig())
+            for row in routine_job.result():
+                d = _row_to_dict(row)
+                schema_name = str(d.get("routine_schema", "")).strip()
+                object_name = str(d.get("routine_name", "")).strip()
+                routine_def = d.get("routine_definition")
+                if not schema_name or not object_name or routine_def is None:
+                    continue
+                definition_text = str(routine_def).strip()
+                if not definition_text:
+                    continue
+                routine_type = str(d.get("routine_type", "")).upper()
+                ext_lang = d.get("external_language")
+                if routine_type == "PROCEDURE":
+                    kind = V2SchemaObjectKind.PROCEDURE
+                elif routine_type == "TABLE FUNCTION":
+                    kind = V2SchemaObjectKind.TABLE_FUNCTION
+                else:
+                    kind = V2SchemaObjectKind.UDF
+                definition_language = str(ext_lang).lower() if ext_lang else "sql"
+                definitions.append(ObjectDefinition(
+                    schema_name=schema_name,
+                    object_name=object_name,
+                    object_kind=kind,
+                    definition_text=definition_text,
+                    definition_language=definition_language,
+                    metadata={"routine_type": routine_type},
+                ))
+        except Exception as exc:
+            logger.warning(
+                "BigQueryAdapter.extract_definitions: ROUTINES query failed. adapter=%s error=%s",
+                adapter.key,
+                exc,
+            )
+
+        # --- Tables (DDL) ---
+        tables_sql = f"""
+            SELECT table_schema, table_name, ddl
+            FROM {region}.INFORMATION_SCHEMA.TABLES
+            WHERE table_type = 'BASE TABLE'
+              AND table_schema <> 'INFORMATION_SCHEMA'
+        """
+        try:
+            table_job = client.query(tables_sql, job_config=bigquery.QueryJobConfig())
+            for row in table_job.result():
+                d = _row_to_dict(row)
+                schema_name = str(d.get("table_schema", "")).strip()
+                object_name = str(d.get("table_name", "")).strip()
+                ddl = d.get("ddl")
+                if not schema_name or not object_name or ddl is None:
+                    continue
+                definition_text = str(ddl).strip()
+                if not definition_text:
+                    continue
+                definitions.append(ObjectDefinition(
+                    schema_name=schema_name,
+                    object_name=object_name,
+                    object_kind=V2SchemaObjectKind.TABLE,
+                    definition_text=definition_text,
+                    definition_language="ddl",
+                ))
+        except Exception as exc:
+            logger.warning(
+                "BigQueryAdapter.extract_definitions: TABLES DDL query failed. adapter=%s error=%s",
+                adapter.key,
+                exc,
+            )
+
+        scope_ctx = ScopeContext(
+            scope=ExtractionScope.REGION,
+            identifiers={"project": project_id, "location": config.location},
         )
+        duration_ms = (time.perf_counter() - started_at) * 1000.0
+        meta = ExtractionMeta(
+            adapter_key=adapter.key,
+            adapter_kind=SourceAdapterKindV2.BIGQUERY,
+            capability=AdapterCapability.DEFINITIONS,
+            scope_context=scope_ctx,
+            captured_at=captured_at,
+            duration_ms=duration_ms,
+            row_count=len(definitions),
+        )
+        return DefinitionSnapshot(meta=meta, definitions=tuple(definitions))
 
     async def extract_lineage(self, adapter: PersistedSourceAdapter) -> None:  # type: ignore[override]
         raise NotImplementedError(
