@@ -48,13 +48,15 @@ def connect_postgres(
     """Register a PostgreSQL data source."""
     cfg = get_config()
     db_name = dsn.rsplit("/", 1)[-1].split("?")[0]
+    # Include schema in ID to allow multiple schemas from same database
+    source_id = f"postgres:{db_name}" if schema == "public" else f"postgres:{db_name}:{schema}"
     source = SourceConfig(
-        id=f"postgres:{db_name}",
+        id=source_id,
         kind="postgres",
         params={"dsn": dsn, "schema": schema},
     )
     cfg.add_source(source)
-    rprint(f"[green]Connected:[/green] Postgres database [bold]{db_name}[/bold]")
+    rprint(f"[green]Connected:[/green] Postgres database [bold]{db_name}[/bold] (schema: {schema})")
 
 
 @app.command("snowflake")
