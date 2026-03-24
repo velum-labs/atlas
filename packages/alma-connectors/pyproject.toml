@@ -14,10 +14,12 @@ dependencies = [
 bigquery = ["google-cloud-bigquery>=3.27"]
 snowflake = ["snowflake-connector-python>=3.12"]
 postgres = ["psycopg[binary]>=3.2"]
+airflow = ["httpx>=0.27"]
 all = [
     "google-cloud-bigquery>=3.27",
     "snowflake-connector-python>=3.12",
     "psycopg[binary]>=3.2",
+    "httpx>=0.27",
 ]
 
 [build-system]

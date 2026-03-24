@@ -96,38 +96,6 @@ class TestAirflowAdapterStub:
         with pytest.raises(ValueError, match="base_url"):
             AirflowAdapter(base_url="", auth_token="tok")
 
-    def test_discover_raises_not_implemented(self) -> None:
-        adapter = AirflowAdapter(
-            base_url="https://airflow.example.com",
-            auth_token="tok",
-        )
-        with pytest.raises(NotImplementedError):
-            asyncio.run(adapter.discover(_fake_persisted("airflow-test")))
-
-    def test_extract_traffic_raises_not_implemented(self) -> None:
-        adapter = AirflowAdapter(
-            base_url="https://airflow.example.com",
-            auth_token="tok",
-        )
-        with pytest.raises(NotImplementedError):
-            asyncio.run(adapter.extract_traffic(_fake_persisted("airflow-test")))
-
-    def test_extract_lineage_raises_not_implemented(self) -> None:
-        adapter = AirflowAdapter(
-            base_url="https://airflow.example.com",
-            auth_token="tok",
-        )
-        with pytest.raises(NotImplementedError):
-            asyncio.run(adapter.extract_lineage(_fake_persisted("airflow-test")))
-
-    def test_extract_orchestration_raises_not_implemented(self) -> None:
-        adapter = AirflowAdapter(
-            base_url="https://airflow.example.com",
-            auth_token="tok",
-        )
-        with pytest.raises(NotImplementedError):
-            asyncio.run(adapter.extract_orchestration(_fake_persisted("airflow-test")))
-
     def test_extract_schema_raises_not_implemented(self) -> None:
         adapter = AirflowAdapter(
             base_url="https://airflow.example.com",

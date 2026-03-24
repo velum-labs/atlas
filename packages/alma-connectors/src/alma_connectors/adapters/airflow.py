@@ -1,9 +1,7 @@
-"""Apache Airflow source adapter stub — community contribution welcome.
+"""Apache Airflow source adapter — community contribution welcome.
 
 This adapter connects to the Airflow REST API to extract DAG metadata and
-orchestration task graphs.  All extraction methods are stubbed with clear
-TODO comments explaining the Airflow API endpoints and data shapes needed
-to complete each capability.
+orchestration task graphs.
 
 Airflow REST API reference:
     https://airflow.apache.org/docs/apache-airflow/stable/stable-rest-api-ref.html
@@ -30,10 +28,13 @@ Example usage::
 
 from __future__ import annotations
 
+import base64
 import logging
 import time
 from datetime import UTC, datetime
 from typing import Any
+
+import httpx
 
 from alma_connectors.source_adapter import (
     ConnectionTestResult,
@@ -50,6 +51,8 @@ from alma_connectors.source_adapter_v2 import (
     DefinitionSnapshot,
     ExtractionMeta,
     ExtractionScope,
+    LineageEdge,
+    LineageEdgeKind,
     LineageSnapshot,
     OrchestrationSnapshot,
     OrchestrationTask,
@@ -62,9 +65,11 @@ from alma_connectors.source_adapter_v2 import (
 
 logger = logging.getLogger(__name__)
 
+_PAGE_SIZE = 100
+
 
 class AirflowAdapter:
-    """Community stub — Apache Airflow source adapter.
+    """Apache Airflow source adapter.
 
     Implements the SourceAdapterV2 protocol against the Airflow stable REST API
     (v1, available since Airflow 2.0).
@@ -82,9 +87,8 @@ class AirflowAdapter:
 
     LINEAGE
         Infers cross-DAG data dependencies from ``ExternalTaskSensor``
-        configurations and manually declared upstream DAG IDs found in task
-        metadata.  Returns ``LineageEdge`` records with
-        ``edge_kind=CONNECTOR_API``.
+        configurations found in task metadata.  Returns ``LineageEdge`` records
+        with ``edge_kind=CONNECTOR_API``.
 
     ORCHESTRATION
         Fetches the full task graph for every DAG via
@@ -136,6 +140,52 @@ class AirflowAdapter:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _auth_headers(self) -> dict[str, str]:
+        """Return Authorization header dict for the configured auth method."""
+        if self._auth_token:
+            return {"Authorization": f"Bearer {self._auth_token}"}
+        # Basic auth
+        creds = base64.b64encode(
+            f"{self._username}:{self._password}".encode()
+        ).decode()
+        return {"Authorization": f"Basic {creds}"}
+
+    async def _api_get(
+        self, path: str, *, params: dict[str, Any] | None = None
+    ) -> Any:
+        """Execute a single GET request against ``/api/v1/{path}``."""
+        url = f"{self._base_url}/api/v1/{path}"
+        async with httpx.AsyncClient(
+            headers=self._auth_headers(),
+            timeout=self._timeout_seconds,
+        ) as client:
+            resp = await client.get(url, params=params)
+            resp.raise_for_status()
+            return resp.json()
+
+    async def _api_get_all(
+        self, path: str, list_key: str, *, extra_params: dict[str, Any] | None = None
+    ) -> list[Any]:
+        """Paginate through all results for a list endpoint.
+
+        Uses ``offset``/``limit`` pagination until ``total_entries`` is
+        exhausted.
+        """
+        results: list[Any] = []
+        offset = 0
+        while True:
+            params: dict[str, Any] = {"limit": _PAGE_SIZE, "offset": offset}
+            if extra_params:
+                params.update(extra_params)
+            data = await self._api_get(path, params=params)
+            page = data.get(list_key, [])
+            results.extend(page)
+            total = data.get("total_entries", len(results))
+            offset += len(page)
+            if offset >= total or not page:
+                break
+        return results
+
     def _make_meta(
         self,
         adapter: PersistedSourceAdapter,
@@ -156,46 +206,6 @@ class AirflowAdapter:
             row_count=row_count,
         )
 
-    def _get_http_session(self) -> Any:
-        """Build and return an authenticated HTTP session.
-
-        TODO: Import ``requests`` (or ``httpx`` for async) and construct a
-        session with the appropriate auth headers:
-
-            import requests
-            session = requests.Session()
-            if self._auth_token:
-                session.headers["Authorization"] = f"Bearer {self._auth_token}"
-            else:
-                session.auth = (self._username, self._password)
-            session.headers["Content-Type"] = "application/json"
-            return session
-        """
-        raise NotImplementedError(
-            "AirflowAdapter._get_http_session() is not implemented. "
-            "See the docstring for implementation guidance."
-        )
-
-    def _api_get(self, path: str, *, params: dict[str, Any] | None = None) -> Any:
-        """Execute a GET request against the Airflow REST API.
-
-        TODO: Use the session from ``_get_http_session()`` to call
-        ``{base_url}/api/v1/{path}``.  Handle pagination using the
-        ``offset`` / ``limit`` query parameters:
-
-            url = f"{self._base_url}/api/v1/{path}"
-            resp = session.get(url, params=params, timeout=self._timeout_seconds)
-            resp.raise_for_status()
-            return resp.json()
-
-        For paginated endpoints (e.g., ``/dags``, ``/dagRuns``), iterate
-        until ``total_entries`` is exhausted.
-        """
-        raise NotImplementedError(
-            "AirflowAdapter._api_get() is not implemented. "
-            "See the docstring for implementation guidance."
-        )
-
     # ------------------------------------------------------------------
     # v2 protocol — lifecycle
     # ------------------------------------------------------------------
@@ -204,43 +214,56 @@ class AirflowAdapter:
         self,
         adapter: PersistedSourceAdapter,
     ) -> ConnectionTestResult:
-        """Validate connectivity by calling ``GET /api/v1/health``.
-
-        TODO: Call ``self._api_get("health")`` and inspect the response:
-
-            data = self._api_get("health")
-            if data.get("metadatabase", {}).get("status") == "healthy":
-                return ConnectionTestResult(success=True, message="Airflow is healthy")
-            return ConnectionTestResult(success=False, message=str(data))
-
-        Returns:
-            ConnectionTestResult indicating success or failure.
-        """
-        raise NotImplementedError(
-            "AirflowAdapter.test_connection() is not implemented. "
-            "Call GET /api/v1/health and inspect the metadatabase.status field."
-        )
+        """Validate connectivity by calling ``GET /api/v1/health``."""
+        try:
+            data = await self._api_get("health")
+        except Exception as exc:
+            return ConnectionTestResult(success=False, message=str(exc))
+        if data.get("metadatabase", {}).get("status") == "healthy":
+            return ConnectionTestResult(success=True, message="Airflow is healthy")
+        return ConnectionTestResult(success=False, message=str(data))
 
     async def probe(
         self,
         adapter: PersistedSourceAdapter,
         capabilities: frozenset[AdapterCapability] | None = None,
     ) -> tuple[CapabilityProbeResult, ...]:
-        """Probe capability availability by attempting a lightweight API call.
-
-        TODO: Call ``GET /api/v1/config`` or ``GET /api/v1/health`` to confirm
-        connectivity, then mark all requested capabilities available/unavailable
-        based on the result.  TRAFFIC may additionally require checking that the
-        Airflow instance has ``[core] store_serialized_dags = True`` or the
-        Task Instances API is enabled.
-
-        Returns:
-            Tuple of CapabilityProbeResult — one per requested capability.
-        """
+        """Probe capability availability via ``GET /api/v1/health`` then ``/api/v1/dags``."""
         caps_to_probe = capabilities if capabilities is not None else self.declared_capabilities
-        raise NotImplementedError(
-            "AirflowAdapter.probe() is not implemented. "
-            f"Must return a CapabilityProbeResult for each of: {caps_to_probe}"
+
+        # Step 1: health check
+        available = True
+        message: str | None = None
+        try:
+            health = await self._api_get("health")
+            if health.get("metadatabase", {}).get("status") != "healthy":
+                available = False
+                message = f"Airflow metadatabase unhealthy: {health}"
+        except Exception as exc:
+            available = False
+            message = str(exc)
+
+        # Step 2: auth validation — attempt a minimal DAGs list call
+        if available:
+            try:
+                await self._api_get("dags", params={"limit": 1, "offset": 0})
+            except Exception as exc:
+                available = False
+                message = str(exc)
+
+        scope_ctx = ScopeContext(
+            scope=ExtractionScope.GLOBAL,
+            identifiers={"base_url": self._base_url},
+        )
+        return tuple(
+            CapabilityProbeResult(
+                capability=cap,
+                available=available,
+                scope=ExtractionScope.GLOBAL,
+                scope_context=scope_ctx,
+                message=message,
+            )
+            for cap in caps_to_probe
         )
 
     # ------------------------------------------------------------------
@@ -251,55 +274,30 @@ class AirflowAdapter:
         self,
         adapter: PersistedSourceAdapter,
     ) -> DiscoverySnapshot:
-        """DISCOVER: list all DAGs → one DiscoveredContainer per DAG.
-
-        Airflow API endpoint:
-            GET /api/v1/dags?limit=100&offset=0
-
-        Response shape::
-
-            {
-              "dags": [
-                {
-                  "dag_id": "my_pipeline",
-                  "description": "Loads raw events",
-                  "is_active": true,
-                  "is_paused": false,
-                  "schedule_interval": {"__type": "CronExpression", "value": "0 * * * *"},
-                  "tags": [{"name": "etl"}],
-                  "owners": ["data-eng"],
-                  "next_dagrun": "2024-01-02T00:00:00+00:00"
-                },
-                ...
-              ],
-              "total_entries": 42
-            }
-
-        TODO: Paginate through all DAGs and build a DiscoveredContainer for each:
-
-            containers = []
-            for dag in paginated_dags:
-                containers.append(DiscoveredContainer(
-                    container_id=f"airflow://{self._base_url}/{dag['dag_id']}",
-                    container_type="dag",
-                    display_name=dag["dag_id"],
-                    metadata={
-                        "description": dag.get("description") or "",
-                        "is_paused": dag.get("is_paused", False),
-                        "owners": dag.get("owners", []),
-                        "tags": [t["name"] for t in dag.get("tags", [])],
-                        "schedule": str(dag.get("schedule_interval") or ""),
-                    },
-                ))
-
-        Returns:
-            DiscoverySnapshot with one container per DAG.
-        """
+        """DISCOVER: list all DAGs → one DiscoveredContainer per DAG."""
         t0 = time.monotonic()
-        raise NotImplementedError(
-            "AirflowAdapter.discover() is not implemented. "
-            "Call GET /api/v1/dags (paginated) and convert each DAG to a DiscoveredContainer. "
-            "See method docstring for the expected request/response shape."
+        dags = await self._api_get_all("dags", "dags")
+        containers = tuple(
+            DiscoveredContainer(
+                container_id=f"airflow://{self._base_url}/{dag['dag_id']}",
+                container_type="dag",
+                display_name=dag["dag_id"],
+                metadata={
+                    "description": dag.get("description") or "",
+                    "is_paused": dag.get("is_paused", False),
+                    "owners": dag.get("owners", []),
+                    "tags": [t["name"] for t in dag.get("tags", [])],
+                    "schedule": str(dag.get("schedule_interval") or ""),
+                },
+            )
+            for dag in dags
+        )
+        duration_ms = (time.monotonic() - t0) * 1000
+        return DiscoverySnapshot(
+            meta=self._make_meta(
+                adapter, AdapterCapability.DISCOVER, len(containers), duration_ms
+            ),
+            containers=containers,
         )
 
     # ------------------------------------------------------------------
@@ -350,57 +348,61 @@ class AirflowAdapter:
     ) -> TrafficExtractionResult:
         """TRAFFIC: fetch task-instance execution logs → ObservedQueryEvent records.
 
-        Airflow API endpoints:
-            GET /api/v1/dags/{dag_id}/dagRuns?execution_date_gte={since}
-            GET /api/v1/dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances
-
-        Response shape (taskInstances)::
-
-            {
-              "task_instances": [
-                {
-                  "task_id": "load_users",
-                  "dag_id": "my_pipeline",
-                  "dag_run_id": "scheduled__2024-01-01T00:00:00+00:00",
-                  "start_date": "2024-01-01T00:01:03.123456+00:00",
-                  "end_date":   "2024-01-01T00:04:17.654321+00:00",
-                  "duration":   194.531,
-                  "state": "success",
-                  "operator": "BigQueryOperator",
-                  "rendered_fields": {"sql": "SELECT ..."}
-                }
-              ]
-            }
-
-        TODO: For each DAG run since *since*, collect task instances and convert
-        them to ObservedQueryEvent records.  Use rendered_fields.sql when present
-        to populate the query_text field:
-
-            events = []
-            for ti in task_instances:
-                events.append(ObservedQueryEvent(
-                    event_id=f"{ti['dag_id']}/{ti['dag_run_id']}/{ti['task_id']}",
-                    executed_at=datetime.fromisoformat(ti["start_date"]),
-                    query_text=ti.get("rendered_fields", {}).get("sql") or "",
-                    duration_ms=int((ti.get("duration") or 0) * 1000),
-                    user_name=ti.get("operator") or "unknown",
-                    database_name=ti["dag_id"],
-                    schema_name="",
-                    row_count=None,
-                ))
-
-        Args:
-            adapter: Persisted adapter record.
-            since: Only fetch runs executed after this timestamp.
-
-        Returns:
-            TrafficExtractionResult with ObservedQueryEvent per task instance.
+        For each DAG, fetches all DAG runs (optionally filtered by *since*), then
+        fetches task instances for every run and converts them to
+        ``ObservedQueryEvent`` records.
         """
         t0 = time.monotonic()
-        raise NotImplementedError(
-            "AirflowAdapter.extract_traffic() is not implemented. "
-            "Fetch DAG runs and task instances from the Airflow API. "
-            "See method docstring for the expected request/response shape."
+        dags = await self._api_get_all("dags", "dags")
+
+        events: list[ObservedQueryEvent] = []
+        for dag in dags:
+            dag_id = dag["dag_id"]
+            extra: dict[str, Any] = {}
+            if since is not None:
+                extra["execution_date_gte"] = since.isoformat()
+
+            runs = await self._api_get_all(
+                f"dags/{dag_id}/dagRuns", "dag_runs", extra_params=extra
+            )
+            for run in runs:
+                run_id = run["dag_run_id"]
+                task_instances = await self._api_get_all(
+                    f"dags/{dag_id}/dagRuns/{run_id}/taskInstances",
+                    "task_instances",
+                )
+                for ti in task_instances:
+                    start_date = ti.get("start_date")
+                    if start_date is None:
+                        continue
+                    sql = (ti.get("rendered_fields") or {}).get("sql") or ""
+                    # ObservedQueryEvent requires non-empty sql
+                    if not sql:
+                        sql = f"-- task: {ti.get('task_id', '')} operator: {ti.get('operator', '')}"
+                    events.append(
+                        ObservedQueryEvent(
+                            captured_at=datetime.fromisoformat(start_date),
+                            sql=sql,
+                            source_name=f"airflow/{dag_id}",
+                            query_type=ti.get("operator") or "unknown",
+                            event_id=f"{dag_id}/{run_id}/{ti['task_id']}",
+                            database_name=dag_id,
+                            database_user=ti.get("operator") or None,
+                            duration_ms=float((ti.get("duration") or 0) * 1000),
+                            metadata={
+                                "state": ti.get("state") or "",
+                                "dag_run_id": run_id,
+                                "task_id": ti.get("task_id") or "",
+                            },
+                        )
+                    )
+
+        duration_ms = (time.monotonic() - t0) * 1000
+        return TrafficExtractionResult(
+            meta=self._make_meta(
+                adapter, AdapterCapability.TRAFFIC, len(events), duration_ms
+            ),
+            events=tuple(events),
         )
 
     # ------------------------------------------------------------------
@@ -411,49 +413,37 @@ class AirflowAdapter:
         self,
         adapter: PersistedSourceAdapter,
     ) -> LineageSnapshot:
-        """LINEAGE: infer cross-DAG data flow from ExternalTaskSensor configs.
-
-        Airflow API endpoint:
-            GET /api/v1/dags/{dag_id}/tasks
-
-        Response shape (tasks)::
-
-            {
-              "tasks": [
-                {
-                  "task_id": "wait_for_upstream",
-                  "class_ref": {"module_path": "...", "class_name": "ExternalTaskSensor"},
-                  "extra_links": [],
-                  "template_fields": {"external_dag_id": "upstream_pipeline", ...}
-                }
-              ]
-            }
-
-        TODO: Iterate all DAG tasks and identify ExternalTaskSensor operators.
-        For each, emit a LineageEdge from the upstream DAG to this DAG:
-
-            from alma_connectors.source_adapter_v2 import LineageEdge, LineageEdgeKind
-            edges = []
-            for dag in dags:
-                for task in dag_tasks:
-                    if task["class_ref"]["class_name"] == "ExternalTaskSensor":
-                        upstream_dag = task["template_fields"]["external_dag_id"]
-                        edges.append(LineageEdge(
-                            source_object=f"airflow://{upstream_dag}",
-                            target_object=f"airflow://{dag['dag_id']}",
-                            edge_kind=LineageEdgeKind.CONNECTOR_API,
-                            confidence=0.9,
-                            metadata={"task_id": task["task_id"]},
-                        ))
-
-        Returns:
-            LineageSnapshot with one edge per detected cross-DAG dependency.
-        """
+        """LINEAGE: infer cross-DAG data flow from ExternalTaskSensor configs."""
         t0 = time.monotonic()
-        raise NotImplementedError(
-            "AirflowAdapter.extract_lineage() is not implemented. "
-            "Identify ExternalTaskSensor tasks and map them to LineageEdges. "
-            "See method docstring for the expected request/response shape."
+        dags = await self._api_get_all("dags", "dags")
+
+        edges: list[LineageEdge] = []
+        for dag in dags:
+            dag_id = dag["dag_id"]
+            tasks_data = await self._api_get(f"dags/{dag_id}/tasks")
+            for task in tasks_data.get("tasks", []):
+                class_name = (task.get("class_ref") or {}).get("class_name", "")
+                if class_name == "ExternalTaskSensor":
+                    upstream_dag = (task.get("template_fields") or {}).get(
+                        "external_dag_id"
+                    )
+                    if upstream_dag:
+                        edges.append(
+                            LineageEdge(
+                                source_object=f"airflow://{upstream_dag}",
+                                target_object=f"airflow://{dag_id}",
+                                edge_kind=LineageEdgeKind.CONNECTOR_API,
+                                confidence=0.9,
+                                metadata={"task_id": task.get("task_id", "")},
+                            )
+                        )
+
+        duration_ms = (time.monotonic() - t0) * 1000
+        return LineageSnapshot(
+            meta=self._make_meta(
+                adapter, AdapterCapability.LINEAGE, len(edges), duration_ms
+            ),
+            edges=tuple(edges),
         )
 
     # ------------------------------------------------------------------
@@ -464,69 +454,78 @@ class AirflowAdapter:
         self,
         adapter: PersistedSourceAdapter,
     ) -> OrchestrationSnapshot:
-        """ORCHESTRATION: full task graph for every DAG → OrchestrationSnapshot.
+        """ORCHESTRATION: full task graph for every DAG → OrchestrationSnapshot."""
+        t0 = time.monotonic()
+        dags = await self._api_get_all("dags", "dags")
 
-        Airflow API endpoints:
-            GET /api/v1/dags                       — all DAGs (paginated)
-            GET /api/v1/dags/{dag_id}/tasks        — tasks for one DAG
-            GET /api/v1/dags/{dag_id}/dagRuns?limit=1&order_by=-execution_date
-                                                   — last run (for status)
+        units: list[OrchestrationUnit] = []
+        for dag in dags:
+            dag_id = dag["dag_id"]
 
-        Response shape (tasks for one DAG)::
+            tasks_data = await self._api_get(f"dags/{dag_id}/tasks")
+            tasks = tasks_data.get("tasks", [])
 
-            {
-              "tasks": [
-                {
-                  "task_id": "extract_users",
-                  "downstream_task_ids": ["transform_users"],
-                  "depends_on_past": false,
-                  "operator": "PythonOperator",
-                  "trigger_rule": "all_success"
-                },
-                {
-                  "task_id": "transform_users",
-                  "downstream_task_ids": ["load_users"],
-                  ...
-                }
-              ]
-            }
-
-        TODO: Build an OrchestrationUnit per DAG, then an OrchestrationTask per
-        task.  Derive ``upstream_task_ids`` by inverting ``downstream_task_ids``:
-
-            # Build reverse mapping: task_id → [upstream task_ids]
+            # Build upstream map by inverting downstream_task_ids
             upstream_map: dict[str, list[str]] = {t["task_id"]: [] for t in tasks}
             for task in tasks:
                 for downstream_id in task.get("downstream_task_ids", []):
-                    upstream_map[downstream_id].append(task["task_id"])
+                    if downstream_id in upstream_map:
+                        upstream_map[downstream_id].append(task["task_id"])
 
             orch_tasks = tuple(
                 OrchestrationTask(
                     task_id=task["task_id"],
                     task_type=task.get("operator") or "unknown",
                     upstream_task_ids=tuple(upstream_map.get(task["task_id"], [])),
-                    metadata={"trigger_rule": task.get("trigger_rule", "")},
+                    metadata={"trigger_rule": task.get("trigger_rule") or ""},
                 )
                 for task in tasks
             )
-            unit = OrchestrationUnit(
-                unit_id=f"airflow://{self._base_url}/{dag['dag_id']}",
-                unit_type="dag",
-                display_name=dag["dag_id"],
-                schedule=str(dag.get("schedule_interval") or ""),
-                tasks=orch_tasks,
-                last_run_at=last_run_at,
-                last_run_status=last_run_status,
+
+            # Fetch last run for status
+            last_run_at: datetime | None = None
+            last_run_status: str | None = None
+            try:
+                runs_data = await self._api_get(
+                    f"dags/{dag_id}/dagRuns",
+                    params={"limit": 1, "offset": 0, "order_by": "-execution_date"},
+                )
+                last_runs = runs_data.get("dag_runs", [])
+                if last_runs:
+                    run = last_runs[0]
+                    exec_date = run.get("execution_date")
+                    if exec_date:
+                        last_run_at = datetime.fromisoformat(exec_date)
+                    last_run_status = run.get("state")
+            except Exception:
+                logger.debug("Could not fetch last run for DAG %s", dag_id)
+
+            schedule_raw = dag.get("schedule_interval")
+            schedule: str | None = None
+            if schedule_raw:
+                if isinstance(schedule_raw, dict):
+                    schedule = schedule_raw.get("value") or str(schedule_raw)
+                else:
+                    schedule = str(schedule_raw)
+
+            units.append(
+                OrchestrationUnit(
+                    unit_id=f"airflow://{self._base_url}/{dag_id}",
+                    unit_type="dag",
+                    display_name=dag_id,
+                    schedule=schedule,
+                    tasks=orch_tasks,
+                    last_run_at=last_run_at,
+                    last_run_status=last_run_status,
+                )
             )
 
-        Returns:
-            OrchestrationSnapshot with one OrchestrationUnit per DAG.
-        """
-        t0 = time.monotonic()
-        raise NotImplementedError(
-            "AirflowAdapter.extract_orchestration() is not implemented. "
-            "Fetch tasks per DAG and build OrchestrationUnit/OrchestrationTask objects. "
-            "See method docstring for the expected request/response shape."
+        duration_ms = (time.monotonic() - t0) * 1000
+        return OrchestrationSnapshot(
+            meta=self._make_meta(
+                adapter, AdapterCapability.ORCHESTRATION, len(units), duration_ms
+            ),
+            units=tuple(units),
         )
 
     # ------------------------------------------------------------------
@@ -552,11 +551,7 @@ class AirflowAdapter:
         )
 
     def get_setup_instructions(self) -> SetupInstructions:
-        """Return operator guidance for enabling the Airflow adapter.
-
-        Returns:
-            SetupInstructions describing how to configure Airflow API access.
-        """
+        """Return operator guidance for enabling the Airflow adapter."""
         return SetupInstructions(
             title="Apache Airflow REST API Adapter",
             summary=(
