@@ -816,8 +816,9 @@ def test_parse_postgres_log_timestamp_four_digit_offset() -> None:
 
 def test_parse_postgres_log_timestamp_unknown_abbreviation_falls_back_to_utc(caplog) -> None:
     import logging
-    from alma_connectors.adapters.postgres import _parse_postgres_log_timestamp
     from datetime import UTC, datetime
+
+    from alma_connectors.adapters.postgres import _parse_postgres_log_timestamp
 
     with caplog.at_level(logging.WARNING, logger="alma_connectors.adapters.postgres"):
         result = _parse_postgres_log_timestamp("2026-03-01 10:00:00 XYZTZ")

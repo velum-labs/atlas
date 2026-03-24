@@ -160,114 +160,94 @@ class TestLookerAdapterStub:
 
     def test_discover_is_implemented(self) -> None:
         """DISCOVER is declared and implemented — verify it returns a snapshot."""
-        from unittest.mock import MagicMock, patch
+        import time
+        from unittest.mock import AsyncMock, MagicMock
 
         adapter = LookerAdapter(
             instance_url="https://myco.looker.com",
             client_id="cid",
             client_secret="csec",
         )
+        mock_client = AsyncMock()
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = []
+        mock_client.get.return_value = resp
+        adapter._client = mock_client
+        adapter._access_token = "test-token"
+        adapter._token_expires_at = time.time() + 3600
 
-        def _mock_post(url, **kwargs):
-            resp = MagicMock()
-            resp.raise_for_status = MagicMock()
-            resp.json.return_value = {"access_token": "tok", "expires_in": 3600}
-            return resp
-
-        def _mock_get(url, **kwargs):
-            resp = MagicMock()
-            resp.status_code = 200
-            resp.raise_for_status = MagicMock()
-            resp.json.return_value = []
-            return resp
-
-        with patch("alma_connectors.adapters.looker.httpx.post", side_effect=_mock_post), \
-             patch("alma_connectors.adapters.looker.httpx.get", side_effect=_mock_get):
-            snapshot = asyncio.run(adapter.discover(_fake_persisted("looker-test")))
+        snapshot = asyncio.run(adapter.discover(_fake_persisted("looker-test")))
         assert snapshot is not None
 
     def test_extract_schema_is_implemented(self) -> None:
         """SCHEMA is declared and implemented — verify it returns a snapshot."""
-        from unittest.mock import MagicMock, patch
+        import time
+        from unittest.mock import AsyncMock, MagicMock
 
         adapter = LookerAdapter(
             instance_url="https://myco.looker.com",
             client_id="cid",
             client_secret="csec",
         )
+        mock_client = AsyncMock()
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = []
+        mock_client.get.return_value = resp
+        adapter._client = mock_client
+        adapter._access_token = "test-token"
+        adapter._token_expires_at = time.time() + 3600
 
-        def _mock_post(url, **kwargs):
-            resp = MagicMock()
-            resp.raise_for_status = MagicMock()
-            resp.json.return_value = {"access_token": "tok", "expires_in": 3600}
-            return resp
-
-        def _mock_get(url, **kwargs):
-            resp = MagicMock()
-            resp.status_code = 200
-            resp.raise_for_status = MagicMock()
-            resp.json.return_value = []
-            return resp
-
-        with patch("alma_connectors.adapters.looker.httpx.post", side_effect=_mock_post), \
-             patch("alma_connectors.adapters.looker.httpx.get", side_effect=_mock_get):
-            snapshot = asyncio.run(adapter.extract_schema(_fake_persisted("looker-test")))
+        snapshot = asyncio.run(adapter.extract_schema(_fake_persisted("looker-test")))
         assert snapshot is not None
 
     def test_extract_definitions_is_implemented(self) -> None:
         """DEFINITIONS is declared and implemented — verify it returns a snapshot."""
-        from unittest.mock import MagicMock, patch
+        import time
+        from unittest.mock import AsyncMock, MagicMock
 
         adapter = LookerAdapter(
             instance_url="https://myco.looker.com",
             client_id="cid",
             client_secret="csec",
         )
+        mock_client = AsyncMock()
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = []
+        mock_client.get.return_value = resp
+        adapter._client = mock_client
+        adapter._access_token = "test-token"
+        adapter._token_expires_at = time.time() + 3600
 
-        def _mock_post(url, **kwargs):
-            resp = MagicMock()
-            resp.raise_for_status = MagicMock()
-            resp.json.return_value = {"access_token": "tok", "expires_in": 3600}
-            return resp
-
-        def _mock_get(url, **kwargs):
-            resp = MagicMock()
-            resp.status_code = 200
-            resp.raise_for_status = MagicMock()
-            resp.json.return_value = []
-            return resp
-
-        with patch("alma_connectors.adapters.looker.httpx.post", side_effect=_mock_post), \
-             patch("alma_connectors.adapters.looker.httpx.get", side_effect=_mock_get):
-            snapshot = asyncio.run(adapter.extract_definitions(_fake_persisted("looker-test")))
+        snapshot = asyncio.run(adapter.extract_definitions(_fake_persisted("looker-test")))
         assert snapshot is not None
 
     def test_extract_lineage_is_implemented(self) -> None:
         """LINEAGE is declared and implemented — verify it returns a snapshot."""
-        from unittest.mock import MagicMock, patch
+        import time
+        from unittest.mock import AsyncMock, MagicMock
 
         adapter = LookerAdapter(
             instance_url="https://myco.looker.com",
             client_id="cid",
             client_secret="csec",
         )
+        mock_client = AsyncMock()
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = []
+        mock_client.get.return_value = resp
+        adapter._client = mock_client
+        adapter._access_token = "test-token"
+        adapter._token_expires_at = time.time() + 3600
 
-        def _mock_post(url, **kwargs):
-            resp = MagicMock()
-            resp.raise_for_status = MagicMock()
-            resp.json.return_value = {"access_token": "tok", "expires_in": 3600}
-            return resp
-
-        def _mock_get(url, **kwargs):
-            resp = MagicMock()
-            resp.status_code = 200
-            resp.raise_for_status = MagicMock()
-            resp.json.return_value = []
-            return resp
-
-        with patch("alma_connectors.adapters.looker.httpx.post", side_effect=_mock_post), \
-             patch("alma_connectors.adapters.looker.httpx.get", side_effect=_mock_get):
-            snapshot = asyncio.run(adapter.extract_lineage(_fake_persisted("looker-test")))
+        snapshot = asyncio.run(adapter.extract_lineage(_fake_persisted("looker-test")))
         assert snapshot is not None
 
     def test_extract_traffic_raises_not_implemented(self) -> None:
@@ -339,14 +319,14 @@ class TestMetabaseAdapterStub:
 
     def test_discover_is_implemented(self) -> None:
         """DISCOVER is declared and implemented — verify it returns a snapshot."""
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import AsyncMock, MagicMock
 
         adapter = MetabaseAdapter(
             instance_url="https://metabase.example.com",
             api_key="mb_abc",
         )
 
-        def _mock_get(url, **kwargs):
+        def _get_side_effect(url, **kwargs):
             resp = MagicMock()
             resp.raise_for_status = MagicMock()
             if "/api/database" in url:
@@ -355,41 +335,43 @@ class TestMetabaseAdapterStub:
                 resp.json.return_value = []
             return resp
 
-        with patch("alma_connectors.adapters.metabase.httpx") as mock_httpx:
-            mock_httpx.get.side_effect = _mock_get
-            snapshot = asyncio.run(adapter.discover(_fake_persisted("metabase-test")))
+        mock_client = AsyncMock()
+        mock_client.get.side_effect = _get_side_effect
+        adapter._client = mock_client
+        adapter._session_token = "test-session"
+
+        snapshot = asyncio.run(adapter.discover(_fake_persisted("metabase-test")))
         assert snapshot is not None
 
     def test_extract_schema_is_implemented(self) -> None:
         """SCHEMA is declared and implemented — verify it returns a snapshot."""
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import AsyncMock, MagicMock
 
         adapter = MetabaseAdapter(
             instance_url="https://metabase.example.com",
             api_key="mb_abc",
         )
+        mock_client = AsyncMock()
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = {"data": []}
+        mock_client.get.return_value = resp
+        adapter._client = mock_client
+        adapter._session_token = "test-session"
 
-        def _mock_get(url, **kwargs):
-            resp = MagicMock()
-            resp.raise_for_status = MagicMock()
-            resp.json.return_value = {"data": []}
-            return resp
-
-        with patch("alma_connectors.adapters.metabase.httpx") as mock_httpx:
-            mock_httpx.get.side_effect = _mock_get
-            snapshot = asyncio.run(adapter.extract_schema(_fake_persisted("metabase-test")))
+        snapshot = asyncio.run(adapter.extract_schema(_fake_persisted("metabase-test")))
         assert snapshot is not None
 
     def test_extract_traffic_is_implemented(self) -> None:
         """TRAFFIC is declared and implemented — verify it returns a result."""
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import AsyncMock, MagicMock
 
         adapter = MetabaseAdapter(
             instance_url="https://metabase.example.com",
             api_key="mb_abc",
         )
 
-        def _mock_get(url, **kwargs):
+        def _get_side_effect(url, **kwargs):
             resp = MagicMock()
             resp.raise_for_status = MagicMock()
             if "ee/audit" in url:
@@ -397,9 +379,12 @@ class TestMetabaseAdapterStub:
             resp.json.return_value = []
             return resp
 
-        with patch("alma_connectors.adapters.metabase.httpx") as mock_httpx:
-            mock_httpx.get.side_effect = _mock_get
-            result = asyncio.run(adapter.extract_traffic(_fake_persisted("metabase-test")))
+        mock_client = AsyncMock()
+        mock_client.get.side_effect = _get_side_effect
+        adapter._client = mock_client
+        adapter._session_token = "test-session"
+
+        result = asyncio.run(adapter.extract_traffic(_fake_persisted("metabase-test")))
         assert result is not None
 
     def test_extract_lineage_raises_not_implemented(self) -> None:
