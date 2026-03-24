@@ -52,6 +52,9 @@ def scan(
 
     from alma_atlas.pipeline.scan import run_scan_all
 
+    failed_sources: list[str] = []
+    scan_error: str | None = None
+
     with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=console) as progress:
         task = progress.add_task(f"Scanning {len(sources)} source(s)...", total=None)
         try:
@@ -59,6 +62,7 @@ def scan(
             for result in all_result.results:
                 if result.error:
                     rprint(f"  [red]Failed:[/red] {result.source_id} — {result.error}")
+                    failed_sources.append(result.source_id)
                 else:
                     rprint(
                         f"  [green]Done:[/green] {result.source_id} — "
@@ -72,6 +76,7 @@ def scan(
                 ),
             )
         except Exception as e:
+            scan_error = str(e)
             progress.update(task, description=f"[red]Scan failed:[/red] {e}")
         finally:
             progress.stop_task(task)
@@ -94,3 +99,9 @@ def scan(
                 rprint("[dim]Team sync complete.[/dim]")
             except Exception as exc:
                 rprint(f"[yellow]Team sync failed (continuing):[/yellow] {exc}")
+
+    # Exit codes: 0 = all succeeded, 1 = partial (some sources failed), 3 = complete failure
+    if scan_error is not None:
+        raise typer.Exit(3)
+    if failed_sources:
+        raise typer.Exit(1)

@@ -11,10 +11,14 @@ Returns the number of new or updated edges written.
 
 from __future__ import annotations
 
+import logging
+
 from alma_atlas_store.db import Database
 from alma_atlas_store.edge_repository import Edge, EdgeRepository
 from alma_atlas_store.query_repository import QueryObservation, QueryRepository
 from alma_connectors.source_adapter import TrafficObservationResult
+
+logger = logging.getLogger(__name__)
 
 
 def stitch(
@@ -58,7 +62,8 @@ def stitch(
                 consumer_id=consumer_id,
                 dialect=dialect,
             )
-        except Exception:
+        except Exception as exc:
+            logger.debug("Skipping query edge extraction for %s: %s", consumer_id, exc)
             continue
 
         for ae in derived:

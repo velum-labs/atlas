@@ -803,3 +803,205 @@ def test_v1_observe_traffic_still_works() -> None:
     result = asyncio.run(bq.observe_traffic(persisted))
     assert isinstance(result, TrafficObservationResult)
     assert len(result.events) == 1
+
+
+# ---------------------------------------------------------------------------
+# Hardening tests: input validation
+# ---------------------------------------------------------------------------
+
+
+def test_validate_project_id_format() -> None:
+    """Invalid project_id raises ValueError."""
+    from alma_connectors.adapters.bigquery import _validate_bq_project_id
+
+    with pytest.raises(ValueError, match="project_id"):
+        _validate_bq_project_id("UPPERCASE-IS-BAD")
+    with pytest.raises(ValueError, match="project_id"):
+        _validate_bq_project_id("ab")  # too short
+    with pytest.raises(ValueError, match="project_id"):
+        _validate_bq_project_id("a-project!")  # invalid char
+    # valid project ids should not raise
+    _validate_bq_project_id("my-valid-project-id")
+    _validate_bq_project_id("acme-project")
+
+
+def test_validate_location_format() -> None:
+    """Invalid location raises ValueError."""
+    from alma_connectors.adapters.bigquery import _validate_bq_location
+
+    with pytest.raises(ValueError, match="location"):
+        _validate_bq_location("US_EAST1")  # underscore not allowed
+    with pytest.raises(ValueError, match="location"):
+        _validate_bq_location("US")  # must start with lowercase and be > 1 char
+    # valid locations should not raise
+    _validate_bq_location("us")
+    _validate_bq_location("us-central1")
+    _validate_bq_location("eu-west1")
+
+
+def test_validate_malicious_project_id() -> None:
+    """project_id with SQL injection chars raises ValueError from _assert_safe_identifier."""
+    from alma_connectors.adapters.bigquery import _assert_safe_identifier
+
+    with pytest.raises(ValueError, match="project_id"):
+        _assert_safe_identifier("project`DROP TABLE foo;--", "project_id")
+    with pytest.raises(ValueError, match="project_id"):
+        _assert_safe_identifier("project'; DROP TABLE foo;--", "project_id")
+    # safe value passes
+    _assert_safe_identifier("my-project-123", "project_id")
+
+
+# ---------------------------------------------------------------------------
+# Hardening tests: extract_schema edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_extract_schema_empty_result_set() -> None:
+    """COLUMNS query returns empty list → empty SchemaSnapshotV2."""
+    client = _FakeBQClient(column_rows=[])
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    snapshot = asyncio.run(bq.extract_schema(persisted))
+    assert isinstance(snapshot, SchemaSnapshotV2)
+    assert snapshot.objects == ()
+
+
+def test_extract_schema_unicode_names() -> None:
+    """Column/table names with unicode chars are passed through without error."""
+    column_rows = [
+        {
+            "table_schema": "tëst_schema",
+            "table_name": "tëst_tàble",
+            "column_name": "cölumn_ñame",
+            "data_type": "STRING",
+            "is_nullable": "YES",
+            "ordinal_position": 1,
+            "is_partitioning_column": "NO",
+            "clustering_ordinal_position": None,
+        }
+    ]
+    client = _FakeBQClient(column_rows=column_rows)
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    snapshot = asyncio.run(bq.extract_schema(persisted))
+    assert len(snapshot.objects) == 1
+    obj = snapshot.objects[0]
+    assert obj.schema_name == "tëst_schema"
+    assert obj.object_name == "tëst_tàble"
+    assert obj.columns[0].name == "cölumn_ñame"
+
+
+def test_extract_schema_very_long_table_name() -> None:
+    """Table name of 129 chars is passed through without truncation."""
+    long_name = "t" * 129
+    column_rows = [
+        {
+            "table_schema": "myschema",
+            "table_name": long_name,
+            "column_name": "id",
+            "data_type": "INT64",
+            "is_nullable": "NO",
+            "ordinal_position": 1,
+            "is_partitioning_column": "NO",
+            "clustering_ordinal_position": None,
+        }
+    ]
+    client = _FakeBQClient(column_rows=column_rows)
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    snapshot = asyncio.run(bq.extract_schema(persisted))
+    assert snapshot.objects[0].object_name == long_name
+
+
+def test_extract_schema_null_values() -> None:
+    """NULL values in optional columns (e.g., clustering_ordinal_position=None) are handled."""
+    column_rows = [
+        {
+            "table_schema": "myschema",
+            "table_name": "mytable",
+            "column_name": "id",
+            "data_type": "INT64",
+            "is_nullable": "NO",
+            "ordinal_position": 1,
+            "is_partitioning_column": None,  # NULL
+            "clustering_ordinal_position": None,  # NULL
+        }
+    ]
+    client = _FakeBQClient(column_rows=column_rows)
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    snapshot = asyncio.run(bq.extract_schema(persisted))
+    assert len(snapshot.objects) == 1
+    assert snapshot.objects[0].partition_column is None
+    assert snapshot.objects[0].clustering_columns == ()
+
+
+def test_extract_schema_connection_error() -> None:
+    """BQ client raises RuntimeError on query → propagated."""
+    client = _FakeBQClient(raise_on_schema_query=RuntimeError("connection failed"))
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    with pytest.raises(RuntimeError, match="connection failed"):
+        asyncio.run(bq.extract_schema(persisted))
+
+
+def test_extract_schema_partial_failure() -> None:
+    """TABLE_STORAGE failing gracefully still returns objects without row_count."""
+
+    class _StorageFailClient(_FakeBQClient):
+        def query(self, sql: str, job_config: Any = None) -> Any:
+            if "TABLE_STORAGE" in sql:
+                raise RuntimeError("storage permission denied")
+            return super().query(sql, job_config)
+
+    column_rows = [
+        {
+            "table_schema": "myschema",
+            "table_name": "mytable",
+            "column_name": "id",
+            "data_type": "INT64",
+            "is_nullable": "NO",
+            "ordinal_position": 1,
+            "is_partitioning_column": "NO",
+            "clustering_ordinal_position": None,
+        }
+    ]
+    client = _StorageFailClient(column_rows=column_rows)
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    # Should not raise; TABLE_STORAGE failure is non-fatal
+    snapshot = asyncio.run(bq.extract_schema(persisted))
+    assert len(snapshot.objects) == 1
+    assert snapshot.objects[0].row_count is None
+
+
+# ---------------------------------------------------------------------------
+# Hardening tests: context manager
+# ---------------------------------------------------------------------------
+
+
+def test_bigquery_context_manager() -> None:
+    """BigQueryAdapter can be used as an async context manager."""
+    client = _FakeBQClient()
+    bq = _make_bq_adapter(client)
+
+    async def _run() -> None:
+        async with bq as adapter:
+            assert adapter is bq
+
+    asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# Hardening tests: extract_traffic edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_extract_traffic_empty() -> None:
+    """No job rows → empty events tuple."""
+    client = _FakeBQClient(job_rows=[])
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    result = asyncio.run(bq.extract_traffic(persisted))
+    assert isinstance(result, TrafficExtractionResult)
+    assert result.events == ()

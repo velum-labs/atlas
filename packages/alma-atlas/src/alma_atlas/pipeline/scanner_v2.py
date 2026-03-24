@@ -233,11 +233,12 @@ class ScannerV2:
             ScanResultV2 summarising what was extracted.
         """
         from alma_atlas.pipeline.scan import _build_adapter, run_scan
+        from alma_ports.errors import ConfigurationError
 
         try:
             adapter, persisted = _build_adapter(source)
         except (ValueError, ImportError) as exc:
-            return ScanResultV2(source_id=source.id, error=str(exc))
+            raise ConfigurationError(str(exc)) from exc
 
         if isinstance(adapter, SourceAdapterV2):
             return self._scan_v2(adapter, persisted, source)
@@ -263,14 +264,13 @@ class ScannerV2:
         router = CapabilityRouter()
         pipeline = ExtractionPipeline(adapter, persisted)
 
+        from alma_ports.errors import ExtractionError
+
         # --- probe ---
         try:
             probe_results = asyncio.run(adapter.probe(persisted))
         except Exception as exc:
-            return ScanResultV2(
-                source_id=source.id,
-                error=f"Capability probing failed: {exc}",
-            )
+            raise ExtractionError(f"Capability probing failed: {exc}") from exc
 
         plan = router.build_plan(probe_results)
 
@@ -285,11 +285,7 @@ class ScannerV2:
         try:
             results, extraction_warnings = asyncio.run(pipeline.execute(plan))
         except Exception as exc:
-            return ScanResultV2(
-                source_id=source.id,
-                capabilities_skipped=plan.skipped,
-                error=f"Extraction pipeline failed: {exc}",
-            )
+            raise ExtractionError(f"Extraction pipeline failed: {exc}") from exc
 
         # --- store ---
         store_warnings: list[str] = []
@@ -300,7 +296,8 @@ class ScannerV2:
                 results, persisted, source, self._cfg
             )
         except Exception as exc:
-            store_warnings.append(f"Failed to store extraction results: {exc}")
+            logger.warning("Failed to store extraction results for source %s: %s", source.id, exc)
+            store_warnings.append(f"ExtractionError: Failed to store extraction results: {exc}")
 
         return ScanResultV2(
             source_id=source.id,
@@ -472,7 +469,10 @@ def run_scan_v2(source: SourceConfig, cfg: AtlasConfig) -> ScanResultV2:
     """Run a capability-aware v2 scan for a single registered source.
 
     Mirrors the signature of :func:`~alma_atlas.pipeline.scan.run_scan` so
-    callers can swap implementations without interface changes.
+    callers can swap implementations without interface changes.  Catches
+    :class:`~alma_ports.errors.ConfigurationError` and unexpected exceptions,
+    returning a :class:`ScanResultV2` with a structured ``error`` field of
+    the form ``"ExceptionType: message"`` rather than propagating.
 
     Args:
         source: The source configuration (kind, id, params).
@@ -481,4 +481,13 @@ def run_scan_v2(source: SourceConfig, cfg: AtlasConfig) -> ScanResultV2:
     Returns:
         A ScanResultV2 summarising capabilities run, assets written, and edges derived.
     """
-    return ScannerV2(cfg).scan(source)
+    from alma_ports.errors import AtlasError
+
+    try:
+        return ScannerV2(cfg).scan(source)
+    except AtlasError as exc:
+        logger.exception("Scan failed for source %s", source.id)
+        return ScanResultV2(source_id=source.id, error=f"{type(exc).__name__}: {exc}")
+    except Exception as exc:
+        logger.exception("Unexpected error scanning source %s", source.id)
+        return ScanResultV2(source_id=source.id, error=f"{type(exc).__name__}: {exc}")

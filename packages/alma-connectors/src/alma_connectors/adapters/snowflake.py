@@ -5,11 +5,12 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import re
 import time
 from collections import defaultdict
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, TypeVar
 
 from alma_connectors.source_adapter import (
     ConnectionTestResult,
@@ -55,7 +56,105 @@ from alma_connectors.source_adapter_v2 import (
 
 logger = logging.getLogger(__name__)
 
+# Sequences that must not appear in SQL identifiers used in f-string queries.
+# Single hyphens are allowed (valid in cloud warehouse identifiers like project-id).
+_IDENTIFIER_INJECTION_RE = re.compile(r"""['";\n\r]|--|/\*|\*/""")
+
+
+def _validate_identifier(value: str, name: str = "identifier") -> str:
+    """Reject SQL identifier values that contain injection-risk characters.
+
+    Applies to database/schema/table names interpolated directly into SQL
+    f-strings.  Raises ``ValueError`` if the value contains quotes, semicolons,
+    SQL comment markers (-- or /* */), or newlines.
+
+    Args:
+        value: The identifier string to validate.
+        name:  Human-readable name used in the error message.
+
+    Returns:
+        The original *value* if it passes validation.
+
+    Raises:
+        ValueError: If *value* contains disallowed characters.
+    """
+    if _IDENTIFIER_INJECTION_RE.search(value):
+        raise ValueError(
+            f"SQL identifier {name!r} contains disallowed characters: {value!r}. "
+            "Quotes, semicolons, comment markers, and newlines are not allowed."
+        )
+    return value
+
 _SNOWFLAKE_SYSTEM_SCHEMAS = frozenset({"INFORMATION_SCHEMA"})
+
+# ---------------------------------------------------------------------------
+# Input validation helpers
+# ---------------------------------------------------------------------------
+
+_SF_ACCOUNT_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_\-\.]+$")
+_SF_SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9_$]+$")
+
+
+def _validate_sf_account(account: str) -> None:
+    if not _SF_ACCOUNT_RE.fullmatch(account):
+        raise ValueError(
+            f"Invalid Snowflake account identifier {account!r}: must be alphanumeric "
+            "with hyphens/dots/underscores"
+        )
+
+
+def _validate_sf_name(value: str, field_name: str) -> None:
+    if value and not _SF_SAFE_NAME_RE.fullmatch(value):
+        raise ValueError(
+            f"Snowflake {field_name} {value!r} contains invalid characters"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Retry with exponential backoff
+# ---------------------------------------------------------------------------
+
+_T = TypeVar("_T")
+
+
+def _retry_with_backoff(  # noqa: UP047
+    fn: Callable[[], _T],
+    *,
+    max_attempts: int = 3,
+    base_delay: float = 1.0,
+    max_delay: float = 30.0,
+    retryable: Callable[[Exception], bool],
+) -> _T:
+    last_exc: Exception | None = None
+    for attempt in range(max_attempts):
+        try:
+            return fn()
+        except Exception as exc:
+            if not retryable(exc):
+                raise
+            last_exc = exc
+            if attempt < max_attempts - 1:
+                delay = min(base_delay * (2 ** attempt), max_delay)
+                logger.warning(
+                    "Retryable SF error (attempt %d/%d): %s. Retrying in %.1fs",
+                    attempt + 1,
+                    max_attempts,
+                    exc,
+                    delay,
+                )
+                time.sleep(delay)
+    raise last_exc  # type: ignore[misc]
+
+
+def _is_sf_retryable(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(k in msg for k in (
+        "connection reset",
+        "timeout",
+        "connection refused",
+        "warehouse suspended",
+        "resuming warehouse",
+    ))
 
 
 def _get_snowflake_module() -> Any:
@@ -158,6 +257,26 @@ class SnowflakeAdapter:
             raise ValueError(f"adapter '{adapter.key}' is not configured as snowflake")
         return adapter.config
 
+    def _validate_config(self, config: SnowflakeAdapterConfig) -> None:
+        """Validate Snowflake account, warehouse, database, and schema names."""
+        _validate_sf_account(config.account)
+        if config.warehouse:
+            _validate_sf_name(config.warehouse, "warehouse")
+        if config.database:
+            _validate_sf_name(config.database, "database")
+        for schema in list(config.include_schemas) + list(config.exclude_schemas):
+            _validate_sf_name(schema, "schema")
+
+    # ------------------------------------------------------------------
+    # Async context manager support
+    # ------------------------------------------------------------------
+
+    async def __aenter__(self) -> SnowflakeAdapter:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        pass  # connections are closed per-request
+
     def _connect(self, config: SnowflakeAdapterConfig) -> Any:
         """Open a Snowflake connection using config + secret credentials."""
         connector = _get_snowflake_module()
@@ -179,6 +298,9 @@ class SnowflakeAdapter:
         if role:
             connect_kwargs["role"] = role
 
+        connect_kwargs["login_timeout"] = 30  # seconds
+        connect_kwargs["network_timeout"] = 30  # seconds
+
         return connector.connect(**connect_kwargs)
 
     # ------------------------------------------------------------------
@@ -190,8 +312,14 @@ class SnowflakeAdapter:
         adapter: PersistedSourceAdapter,
     ) -> ConnectionTestResult:
         config = self._get_config(adapter)
+        self._validate_config(config)
         try:
-            conn = self._connect(config)
+            conn = _retry_with_backoff(
+                lambda: self._connect(config),
+                retryable=_is_sf_retryable,
+                max_attempts=3,
+                base_delay=2.0,
+            )
             try:
                 cur = conn.cursor()
                 cur.execute("SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA != 'INFORMATION_SCHEMA'")
@@ -219,8 +347,9 @@ class SnowflakeAdapter:
         adapter: PersistedSourceAdapter,
     ) -> SchemaSnapshot:
         config = self._get_config(adapter)
+        self._validate_config(config)
         database = config.database
-        db_prefix = f"{database}." if database else ""
+        db_prefix = f"{_validate_identifier(database, 'database')}." if database else ""
 
         columns_sql = f"""\
 SELECT
@@ -248,7 +377,12 @@ WHERE TABLE_SCHEMA NOT IN ('INFORMATION_SCHEMA')
         exclude_upper = frozenset(s.upper() for s in config.exclude_schemas)
         include_upper = frozenset(s.upper() for s in config.include_schemas) if config.include_schemas else None
 
-        conn = self._connect(config)
+        conn = _retry_with_backoff(
+            lambda: self._connect(config),
+            retryable=_is_sf_retryable,
+            max_attempts=3,
+            base_delay=2.0,
+        )
         try:
             cur = conn.cursor()
             cur.execute(columns_sql)
@@ -326,6 +460,7 @@ WHERE TABLE_SCHEMA NOT IN ('INFORMATION_SCHEMA')
         since: datetime | None = None,
     ) -> TrafficObservationResult:
         config = self._get_config(adapter)
+        self._validate_config(config)
         if since is not None:
             hours_since = max(1, int((datetime.now(UTC) - since).total_seconds() / 3600) + 1)
         else:
@@ -352,7 +487,12 @@ ORDER BY START_TIME DESC
 LIMIT {max_rows}
 """
 
-        conn = self._connect(config)
+        conn = _retry_with_backoff(
+            lambda: self._connect(config),
+            retryable=_is_sf_retryable,
+            max_attempts=3,
+            base_delay=2.0,
+        )
         try:
             cur = conn.cursor()
             cur.execute(traffic_sql)
@@ -421,9 +561,15 @@ LIMIT {max_rows}
         probe_target: str | None = None,
     ) -> QueryResult:
         config = self._get_config(adapter)
+        self._validate_config(config)
         start = time.monotonic()
         try:
-            conn = self._connect(config)
+            conn = _retry_with_backoff(
+                lambda: self._connect(config),
+                retryable=_is_sf_retryable,
+                max_attempts=3,
+                base_delay=2.0,
+            )
             try:
                 cur = conn.cursor()
                 cur.execute(sql)
@@ -515,7 +661,8 @@ LIMIT {max_rows}
         """
         caps = capabilities if capabilities is not None else self.declared_capabilities
         config = self._get_config(adapter)
-        db_prefix = f"{config.database}." if config.database else ""
+        self._validate_config(config)
+        db_prefix = f"{_validate_identifier(config.database, 'database')}." if config.database else ""
 
         scope_ctx = ScopeContext(
             scope=ExtractionScope.GLOBAL,
@@ -523,7 +670,12 @@ LIMIT {max_rows}
         )
         results: list[CapabilityProbeResult] = []
 
-        conn = self._connect(config)
+        conn = _retry_with_backoff(
+            lambda: self._connect(config),
+            retryable=_is_sf_retryable,
+            max_attempts=3,
+            base_delay=2.0,
+        )
         try:
             cur = conn.cursor()
 
@@ -634,10 +786,17 @@ LIMIT {max_rows}
     async def discover(self, adapter: PersistedSourceAdapter) -> DiscoverySnapshot:
         """DISCOVER: enumerate databases and schemas via SHOW DATABASES / SHOW SCHEMAS."""
         config = self._get_config(adapter)
+        self._validate_config(config)
         started_at = time.monotonic()
         captured_at = datetime.now(UTC)
+        logger.debug("Snowflake discover started: adapter=%s account=%s", adapter.key, config.account)
 
-        conn = self._connect(config)
+        conn = _retry_with_backoff(
+            lambda: self._connect(config),
+            retryable=_is_sf_retryable,
+            max_attempts=3,
+            base_delay=2.0,
+        )
         try:
             cur = conn.cursor()
 
@@ -709,13 +868,20 @@ LIMIT {max_rows}
           4. INFORMATION_SCHEMA.PROCEDURES — stored procedures (best-effort)
         """
         config = self._get_config(adapter)
+        self._validate_config(config)
         database = config.database
-        db_prefix = f"{database}." if database else ""
+        db_prefix = f"{_validate_identifier(database, 'database')}." if database else ""
         exclude_upper = frozenset(s.upper() for s in config.exclude_schemas)
         include_upper = frozenset(s.upper() for s in config.include_schemas) if config.include_schemas else None
 
         started_at = time.monotonic()
         captured_at = datetime.now(UTC)
+        logger.debug(
+            "Snowflake extract_schema started: adapter=%s account=%s database=%s",
+            adapter.key,
+            config.account,
+            database or "(none)",
+        )
 
         columns_sql = f"""\
 SELECT
@@ -769,7 +935,12 @@ FROM {db_prefix}INFORMATION_SCHEMA.PROCEDURES
 WHERE PROCEDURE_SCHEMA NOT IN ('INFORMATION_SCHEMA')
 """
 
-        conn = self._connect(config)
+        conn = _retry_with_backoff(
+            lambda: self._connect(config),
+            retryable=_is_sf_retryable,
+            max_attempts=3,
+            base_delay=2.0,
+        )
         try:
             cur = conn.cursor()
 
@@ -939,8 +1110,9 @@ WHERE PROCEDURE_SCHEMA NOT IN ('INFORMATION_SCHEMA')
     async def extract_definitions(self, adapter: PersistedSourceAdapter) -> DefinitionSnapshot:
         """DEFINITIONS: view SQL from INFORMATION_SCHEMA.VIEWS; function bodies from INFORMATION_SCHEMA.FUNCTIONS."""
         config = self._get_config(adapter)
+        self._validate_config(config)
         database = config.database
-        db_prefix = f"{database}." if database else ""
+        db_prefix = f"{_validate_identifier(database, 'database')}." if database else ""
 
         started_at = time.monotonic()
         captured_at = datetime.now(UTC)
@@ -966,7 +1138,12 @@ WHERE FUNCTION_SCHEMA NOT IN ('INFORMATION_SCHEMA')
 
         definitions: list[ObjectDefinition] = []
 
-        conn = self._connect(config)
+        conn = _retry_with_backoff(
+            lambda: self._connect(config),
+            retryable=_is_sf_retryable,
+            max_attempts=3,
+            base_delay=2.0,
+        )
         try:
             cur = conn.cursor()
 

@@ -252,10 +252,16 @@ class TestViolationStorage:
         from alma_atlas_store.violation_repository import ViolationRepository
 
         engine = EnforcementEngine(db)
-        v = DriftViolation("b::t", "added_column", "info", {"message": "added"})
-        report = DriftReport(violations=[v])
+        # Use a distinct violation type per mode so each gets a unique deterministic ID.
+        modes_and_types = [
+            ("shadow", "added_column"),
+            ("warn", "removed_column"),
+            ("enforce", "type_changed"),
+        ]
 
-        for mode in ("shadow", "warn", "enforce"):
+        for mode, vtype in modes_and_types:
+            v = DriftViolation("b::t", vtype, "info", {"message": vtype})
+            report = DriftReport(violations=[v])
             engine.enforce(report, mode)  # type: ignore[arg-type]
 
         repo = ViolationRepository(db)

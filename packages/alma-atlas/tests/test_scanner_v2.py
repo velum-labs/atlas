@@ -410,10 +410,11 @@ class TestScannerV2:
     def test_build_adapter_error_returns_error_result(self, tmp_path: Path) -> None:
         cfg = _cfg(tmp_path)
         source = SourceConfig(id="bad", kind="unsupported", params={})
-        scanner = ScannerV2(cfg)
-        result = scanner.scan(source)
+        # run_scan_v2 is the public API that converts exceptions to ScanResultV2
+        result = run_scan_v2(source, cfg)
         assert result.error is not None
         assert result.source_id == "bad"
+        assert "ConfigurationError" in result.error
 
     def test_probe_failure_returns_error_result(self, tmp_path: Path) -> None:
         cfg = _cfg(tmp_path)
@@ -423,8 +424,7 @@ class TestScannerV2:
         adapter.probe = AsyncMock(side_effect=RuntimeError("connection refused"))
 
         with patch("alma_atlas.pipeline.scan._build_adapter", return_value=(adapter, _make_persisted())):
-            scanner = ScannerV2(cfg)
-            result = scanner.scan(source)
+            result = run_scan_v2(source, cfg)
 
         assert result.error is not None
         assert "probing" in result.error.lower()

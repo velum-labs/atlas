@@ -12,7 +12,7 @@ import warnings
 from collections import defaultdict
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, TypeVar
 from uuid import NAMESPACE_URL, uuid5
 
 from alma_connectors.source_adapter import (
@@ -57,8 +57,108 @@ from alma_connectors.source_adapter_v2 import (
 
 logger = logging.getLogger(__name__)
 
+# Sequences that must not appear in SQL identifiers used in f-string queries.
+# Single hyphens are allowed (valid in BigQuery project IDs like my-project).
+_IDENTIFIER_INJECTION_RE = re.compile(r"""['";\n\r]|--|/\*|\*/""")
+
+
+def _validate_identifier(value: str, name: str = "identifier") -> str:
+    """Reject SQL identifier values that contain injection-risk characters.
+
+    Args:
+        value: The identifier string to validate.
+        name:  Human-readable name used in the error message.
+
+    Returns:
+        The original *value* if it passes validation.
+
+    Raises:
+        ValueError: If *value* contains disallowed characters.
+    """
+    if _IDENTIFIER_INJECTION_RE.search(value):
+        raise ValueError(
+            f"SQL identifier {name!r} contains disallowed characters: {value!r}. "
+            "Quotes, semicolons, comment markers, and newlines are not allowed."
+        )
+    return value
+
+
 # INFORMATION_SCHEMA.JOBS_BY_PROJECT retains at most 180 days of history.
 _BQ_JOBS_RETENTION_DAYS = 180
+
+# ---------------------------------------------------------------------------
+# Input validation helpers
+# ---------------------------------------------------------------------------
+
+_BQ_PROJECT_ID_RE = re.compile(r"^[a-z][a-z0-9\-]{4,28}[a-z0-9]$")
+_BQ_VALID_LOCATION_RE = re.compile(r"^[a-z][a-z0-9\-]{1,}$")
+_SAFE_IDENTIFIER_RE = re.compile(r"^[a-zA-Z0-9_\-\.]+$")
+
+
+def _validate_bq_project_id(project_id: str) -> None:
+    if not _BQ_PROJECT_ID_RE.fullmatch(project_id):
+        raise ValueError(
+            f"Invalid BigQuery project_id {project_id!r}: must match "
+            r"'^[a-z][a-z0-9-]{4,28}[a-z0-9]$'"
+        )
+
+
+def _validate_bq_location(location: str) -> None:
+    if not _BQ_VALID_LOCATION_RE.fullmatch(location):
+        raise ValueError(
+            f"Invalid BigQuery location {location!r}: must be lowercase alphanumeric with hyphens"
+        )
+
+
+def _assert_safe_identifier(value: str, field_name: str) -> None:
+    """Reject values that could break out of SQL f-string interpolation."""
+    if not _SAFE_IDENTIFIER_RE.fullmatch(value):
+        raise ValueError(
+            f"Config field {field_name!r} contains characters that are not allowed "
+            f"in SQL identifiers: {value!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Retry with exponential backoff
+# ---------------------------------------------------------------------------
+
+_T = TypeVar("_T")
+
+
+def _retry_with_backoff(  # noqa: UP047
+    fn: Callable[[], _T],
+    *,
+    max_attempts: int = 3,
+    base_delay: float = 1.0,
+    max_delay: float = 30.0,
+    retryable: Callable[[Exception], bool],
+) -> _T:
+    last_exc: Exception | None = None
+    for attempt in range(max_attempts):
+        try:
+            return fn()
+        except Exception as exc:
+            if not retryable(exc):
+                raise
+            last_exc = exc
+            if attempt < max_attempts - 1:
+                delay = min(base_delay * (2 ** attempt), max_delay)
+                logger.warning(
+                    "Retryable BQ error (attempt %d/%d): %s. Retrying in %.1fs",
+                    attempt + 1,
+                    max_attempts,
+                    exc,
+                    delay,
+                )
+                time.sleep(delay)
+    raise last_exc  # type: ignore[misc]
+
+
+def _is_bq_retryable(exc: Exception) -> bool:
+    msg = str(exc)
+    codes = ("429", "503", "rateLimitExceeded", "backendError", "serviceUnavailable")
+    return any(c in msg for c in codes)
 
 
 def _get_bigquery_module() -> Any:
@@ -363,6 +463,23 @@ class BigQueryAdapter(SourceAdapter):
             sa_json = None
         return config.project_id, sa_json
 
+    def _validate_config(self, config: BigQueryAdapterConfig) -> None:
+        """Validate project_id and location format to prevent SQL injection and misconfiguration."""
+        _validate_bq_project_id(config.project_id)
+        _validate_bq_location(config.location)
+        _assert_safe_identifier(config.project_id, "project_id")
+        _assert_safe_identifier(config.location, "location")
+
+    # ------------------------------------------------------------------
+    # Async context manager support
+    # ------------------------------------------------------------------
+
+    async def __aenter__(self) -> BigQueryAdapter:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        pass  # BQ client is stateless (per-call); nothing to close
+
     # ------------------------------------------------------------------
     # Protocol methods
     # ------------------------------------------------------------------
@@ -380,6 +497,7 @@ class BigQueryAdapter(SourceAdapter):
             stacklevel=2,
         )
         config = self._get_config(adapter)  # raises ValueError for wrong kind — intentional
+        self._validate_config(config)
         try:
             project_id, sa_json = self._credentials(adapter)
             client = self._get_client(project_id, sa_json)
@@ -440,6 +558,7 @@ class BigQueryAdapter(SourceAdapter):
             stacklevel=2,
         )
         config = self._get_config(adapter)
+        self._validate_config(config)
         project_id, sa_json = self._credentials(adapter)
         client = self._get_client(project_id, sa_json)
         bigquery = _get_bigquery_module()
@@ -568,6 +687,7 @@ class BigQueryAdapter(SourceAdapter):
             stacklevel=2,
         )
         config = self._get_config(adapter)
+        self._validate_config(config)
         project_id, sa_json = self._credentials(adapter)
         client = self._get_client(project_id, sa_json)
         bigquery = _get_bigquery_module()
@@ -621,9 +741,26 @@ class BigQueryAdapter(SourceAdapter):
                 bigquery.ScalarQueryParameter("max_rows", "INT64", config.max_job_rows),
             ]
 
-        job_config = bigquery.QueryJobConfig(query_parameters=query_parameters)
-        query_job = client.query(jobs_sql, job_config=job_config)
-        rows = [_row_to_dict(row) for row in query_job.result()]
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=query_parameters,
+            job_timeout_ms=300_000,  # 5-minute hard cap
+        )
+        logger.debug(
+            "BigQuery query started: capability=traffic adapter=%s", adapter.key
+        )
+        _t0 = time.perf_counter()
+        rows = _retry_with_backoff(
+            lambda: [_row_to_dict(row) for row in client.query(jobs_sql, job_config=job_config).result()],
+            retryable=_is_bq_retryable,
+            max_attempts=3,
+            base_delay=2.0,
+        )
+        logger.debug(
+            "BigQuery query finished: capability=traffic adapter=%s duration_ms=%.1f rows=%d",
+            adapter.key,
+            (time.perf_counter() - _t0) * 1000.0,
+            len(rows),
+        )
 
         events: list[ObservedQueryEvent] = []
         latest_creation_time: datetime | None = None
@@ -712,6 +849,8 @@ class BigQueryAdapter(SourceAdapter):
         When dry_run=True the query is not executed; BQ returns the estimated bytes
         processed, which is useful for cost estimation before running expensive queries.
         """
+        config = self._get_config(adapter)
+        self._validate_config(config)
         project_id, sa_json = self._credentials(adapter)
         client = self._get_client(project_id, sa_json)
         bigquery = _get_bigquery_module()
@@ -784,6 +923,7 @@ class BigQueryAdapter(SourceAdapter):
         """
         caps = capabilities if capabilities is not None else self.declared_capabilities
         config = self._get_config(adapter)
+        self._validate_config(config)
         project_id, sa_json = self._credentials(adapter)
         client = self._get_client(project_id, sa_json)
         bigquery = _get_bigquery_module()
@@ -814,6 +954,8 @@ class BigQueryAdapter(SourceAdapter):
                 ))
 
         if AdapterCapability.SCHEMA in caps:
+            _validate_identifier(project_id, "project_id")
+            _validate_identifier(config.location, "location")
             probe_sql = (
                 f"SELECT 1 FROM `{project_id}`.`region-{config.location}`"
                 f".INFORMATION_SCHEMA.COLUMNS LIMIT 1"
@@ -837,6 +979,8 @@ class BigQueryAdapter(SourceAdapter):
                 ))
 
         if AdapterCapability.TRAFFIC in caps:
+            _validate_identifier(project_id, "project_id")
+            _validate_identifier(config.location, "location")
             jobs_view = (
                 f"`{project_id}`.`region-{config.location}`.INFORMATION_SCHEMA.JOBS_BY_PROJECT"
             )
@@ -886,8 +1030,15 @@ class BigQueryAdapter(SourceAdapter):
     async def discover(self, adapter: PersistedSourceAdapter) -> DiscoverySnapshot:
         """DISCOVER: list all datasets in the project as DiscoveredContainers."""
         config = self._get_config(adapter)
+        self._validate_config(config)
         project_id, sa_json = self._credentials(adapter)
         client = self._get_client(project_id, sa_json)
+        logger.debug(
+            "BigQuery connection established: project=%s location=%s adapter=%s",
+            project_id,
+            config.location,
+            adapter.key,
+        )
 
         started_at = time.perf_counter()
         captured_at = datetime.now(tz=UTC)
@@ -936,6 +1087,7 @@ class BigQueryAdapter(SourceAdapter):
         captured_at = datetime.now(tz=UTC)
 
         config = self._get_config(adapter)
+        self._validate_config(config)
         project_id, sa_json = self._credentials(adapter)
         client = self._get_client(project_id, sa_json)
         bigquery = _get_bigquery_module()
@@ -962,9 +1114,33 @@ class BigQueryAdapter(SourceAdapter):
         column_config = bigquery.QueryJobConfig(
             query_parameters=[
                 bigquery.ScalarQueryParameter("max_rows", "INT64", config.max_column_rows),
-            ]
+            ],
+            job_timeout_ms=300_000,  # 5-minute hard cap
         )
-        col_rows = [_row_to_dict(r) for r in client.query(columns_sql, job_config=column_config).result()]
+        logger.debug(
+            "BigQuery query started: capability=schema adapter=%s", adapter.key
+        )
+        _t0_col = time.perf_counter()
+        try:
+            col_rows = _retry_with_backoff(
+                lambda: [_row_to_dict(r) for r in client.query(columns_sql, job_config=column_config).result()],
+                retryable=_is_bq_retryable,
+                max_attempts=3,
+                base_delay=2.0,
+            )
+        except Exception as _col_exc:
+            logger.error(
+                "BigQuery query failed: capability=schema adapter=%s error=%s",
+                adapter.key,
+                _col_exc,
+            )
+            raise
+        logger.debug(
+            "BigQuery query finished: capability=schema adapter=%s duration_ms=%.1f rows=%d",
+            adapter.key,
+            (time.perf_counter() - _t0_col) * 1000.0,
+            len(col_rows),
+        )
 
         grouped: dict[tuple[str, str], list[V2ColumnSchema]] = defaultdict(list)
         table_partition: dict[tuple[str, str], str] = {}
@@ -1003,7 +1179,7 @@ class BigQueryAdapter(SourceAdapter):
                 FROM {region_prefix}.INFORMATION_SCHEMA.TABLE_STORAGE
                 WHERE deleted = FALSE
             """
-            for srow in client.query(storage_sql, job_config=bigquery.QueryJobConfig()).result():
+            for srow in client.query(storage_sql, job_config=bigquery.QueryJobConfig(job_timeout_ms=300_000)).result():
                 sdict = _row_to_dict(srow)
                 ds = str(sdict.get("dataset_id", "")).strip()
                 tbl = str(sdict.get("table_id", "")).strip()
@@ -1242,6 +1418,7 @@ class BigQueryAdapter(SourceAdapter):
     async def extract_definitions(self, adapter: PersistedSourceAdapter) -> DefinitionSnapshot:
         """DEFINITIONS: extract view SQL, routine DDL, and table DDL from INFORMATION_SCHEMA."""
         config = self._get_config(adapter)
+        self._validate_config(config)
         project_id, sa_json = self._credentials(adapter)
         client = self._get_client(project_id, sa_json)
         bigquery = _get_bigquery_module()

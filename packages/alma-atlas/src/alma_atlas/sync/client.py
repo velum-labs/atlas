@@ -11,7 +11,9 @@ Responsibilities:
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import uuid as _uuid_mod
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -28,6 +30,11 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 _NULL_CURSOR = "1970-01-01T00:00:00Z"
+
+# Retry configuration
+_RETRY_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+_MAX_RETRIES = 3
+_BACKOFF_BASE = 1.0  # seconds
 
 
 def _parse_ts(ts: str | None) -> datetime:
@@ -66,6 +73,13 @@ def _violation_to_dict(v: Any) -> dict:
     return dataclasses.asdict(v) if dataclasses.is_dataclass(v) else dict(v)
 
 
+def _validate_response(data: Any) -> dict:
+    """Validate that a server response is a non-null dict. Returns the dict."""
+    if not isinstance(data, dict):
+        raise ValueError(f"Server returned unexpected response type: {type(data).__name__}")
+    return data
+
+
 class SyncClient:
     """Async HTTP client for syncing Atlas graphs with a team server."""
 
@@ -86,7 +100,9 @@ class SyncClient:
         import httpx
 
         if self._http_client is None:
-            self._http_client = httpx.AsyncClient(timeout=30)
+            self._http_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(connect=30.0, read=120.0)
+            )
             self._owns_client = True
         return self
 
@@ -100,25 +116,129 @@ class SyncClient:
         import httpx
 
         if self._http_client is None:
-            self._http_client = httpx.AsyncClient(timeout=30)
+            self._http_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(connect=30.0, read=120.0)
+            )
             self._owns_client = True
         return self._http_client
 
     async def _post(self, path: str, body: dict) -> dict:
+        import httpx
+
         client = self._get_client()
-        headers = {**self._auth.headers(), "Content-Type": "application/json"}
+        request_id = str(_uuid_mod.uuid4())
+        headers = {
+            **self._auth.headers(),
+            "Content-Type": "application/json",
+            "X-Request-ID": request_id,
+        }
         url = f"{self._server_url}{path}"
-        response = await client.post(url, json=body, headers=headers)
-        response.raise_for_status()
-        return response.json()
+
+        last_exc: Exception | None = None
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                response = await client.post(url, json=body, headers=headers)
+            except Exception as exc:
+                last_exc = exc
+                if attempt < _MAX_RETRIES:
+                    wait = _BACKOFF_BASE * (2 ** attempt)
+                    log.warning(
+                        "[sync] POST %s network error (attempt %d/%d), retrying in %.1fs: %s",
+                        path, attempt + 1, _MAX_RETRIES, wait, exc,
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                raise
+
+            if response.status_code == 429:
+                retry_after = float(response.headers.get("Retry-After", _BACKOFF_BASE * (2 ** attempt)))
+                log.warning(
+                    "[sync] POST %s rate limited (attempt %d/%d), retrying in %.1fs",
+                    path, attempt + 1, _MAX_RETRIES, retry_after,
+                )
+                await asyncio.sleep(retry_after)
+                continue
+
+            if response.status_code in _RETRY_STATUS_CODES and attempt < _MAX_RETRIES:
+                wait = _BACKOFF_BASE * (2 ** attempt)
+                log.warning(
+                    "[sync] POST %s HTTP %d (attempt %d/%d), retrying in %.1fs",
+                    path, response.status_code, attempt + 1, _MAX_RETRIES, wait,
+                )
+                await asyncio.sleep(wait)
+                continue
+
+            response.raise_for_status()
+            try:
+                data = response.json()
+            except Exception as exc:
+                raise ValueError(f"Server returned non-JSON response for POST {path}") from exc
+            return _validate_response(data)
+
+        if last_exc is not None:
+            raise last_exc
+        raise httpx.HTTPStatusError(  # type: ignore[call-arg]
+            message=f"Max retries exceeded for POST {path}",
+            request=None,  # type: ignore[arg-type]
+            response=None,  # type: ignore[arg-type]
+        )
 
     async def _get(self, path: str, params: dict | None = None) -> dict:
+        import httpx
+
         client = self._get_client()
-        headers = self._auth.headers()
+        request_id = str(_uuid_mod.uuid4())
+        headers = {**self._auth.headers(), "X-Request-ID": request_id}
         url = f"{self._server_url}{path}"
-        response = await client.get(url, params=params or {}, headers=headers)
-        response.raise_for_status()
-        return response.json()
+
+        last_exc: Exception | None = None
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                response = await client.get(url, params=params or {}, headers=headers)
+            except Exception as exc:
+                last_exc = exc
+                if attempt < _MAX_RETRIES:
+                    wait = _BACKOFF_BASE * (2 ** attempt)
+                    log.warning(
+                        "[sync] GET %s network error (attempt %d/%d), retrying in %.1fs: %s",
+                        path, attempt + 1, _MAX_RETRIES, wait, exc,
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                raise
+
+            if response.status_code == 429:
+                retry_after = float(response.headers.get("Retry-After", _BACKOFF_BASE * (2 ** attempt)))
+                log.warning(
+                    "[sync] GET %s rate limited (attempt %d/%d), retrying in %.1fs",
+                    path, attempt + 1, _MAX_RETRIES, retry_after,
+                )
+                await asyncio.sleep(retry_after)
+                continue
+
+            if response.status_code in _RETRY_STATUS_CODES and attempt < _MAX_RETRIES:
+                wait = _BACKOFF_BASE * (2 ** attempt)
+                log.warning(
+                    "[sync] GET %s HTTP %d (attempt %d/%d), retrying in %.1fs",
+                    path, response.status_code, attempt + 1, _MAX_RETRIES, wait,
+                )
+                await asyncio.sleep(wait)
+                continue
+
+            response.raise_for_status()
+            try:
+                data = response.json()
+            except Exception as exc:
+                raise ValueError(f"Server returned non-JSON response for GET {path}") from exc
+            return _validate_response(data)
+
+        if last_exc is not None:
+            raise last_exc
+        raise httpx.HTTPStatusError(  # type: ignore[call-arg]
+            message=f"Max retries exceeded for GET {path}",
+            request=None,  # type: ignore[arg-type]
+            response=None,  # type: ignore[arg-type]
+        )
 
     # ------------------------------------------------------------------ push
 
@@ -170,7 +290,9 @@ class SyncClient:
         """Push all local changes and pull team contracts/assets.
 
         Uses the stored sync cursor so only records changed since the last
-        sync are transmitted.  Saves the new cursor on success.
+        sync are transmitted.  Saves the new cursor only after all pushes
+        succeed (atomicity — a partial failure leaves the cursor unchanged
+        so the next sync retries).
         """
         from alma_atlas_store.asset_repository import AssetRepository
         from alma_atlas_store.contract_repository import ContractRepository
@@ -199,7 +321,8 @@ class SyncClient:
             cursor,
         )
 
-        # Push all record types; log warnings for any rejected items
+        # Push all record types atomically — if any push fails the exception
+        # propagates and the cursor is NOT updated, so the next sync retries.
         asset_resp = await self.push_assets([_asset_to_dict(a) for a in assets], cursor)
         if asset_resp.rejected:
             log.warning("[sync] server rejected %d asset(s)", len(asset_resp.rejected))
@@ -234,6 +357,7 @@ class SyncClient:
             asset_repo.upsert(_dict_to_asset(resolved))
         log.info("[sync] pulled %d asset(s) from team", len(pulled_assets))
 
+        # Save cursor only after all pushes and pulls succeeded.
         if new_cursor:
             cfg.save_sync_cursor(new_cursor)
 

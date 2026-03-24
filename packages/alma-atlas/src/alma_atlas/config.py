@@ -17,6 +17,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+# Known top-level keys for atlas.yml.  Unknown keys are rejected (fail-closed).
+_KNOWN_ATLAS_YML_KEYS = frozenset({"version", "sources", "team", "scan"})
+
+# Keys whose values must be redacted in __repr__ output.
+_SECRET_PARAM_KEYS = frozenset({"dsn", "password", "api_key", "api_secret", "client_secret", "auth_token"})
+
 
 def default_config_dir() -> Path:
     """Return the default Alma Atlas config directory.
@@ -38,6 +44,13 @@ class SourceConfig:
     kind: str  # bigquery, snowflake, postgres, dbt
     params: dict[str, Any] = field(default_factory=dict)
 
+    def __repr__(self) -> str:
+        redacted = {
+            k: "***" if k in _SECRET_PARAM_KEYS else v
+            for k, v in self.params.items()
+        }
+        return f"SourceConfig(id={self.id!r}, kind={self.kind!r}, params={redacted})"
+
 
 @dataclass
 class AtlasConfig:
@@ -53,6 +66,17 @@ class AtlasConfig:
     def __post_init__(self) -> None:
         if self.db_path is None:
             self.db_path = self.config_dir / "atlas.db"
+
+    def __repr__(self) -> str:
+        api_key_repr = "***" if self.team_api_key else None
+        return (
+            f"AtlasConfig("
+            f"config_dir={self.config_dir!r}, "
+            f"db_path={self.db_path!r}, "
+            f"team_server_url={self.team_server_url!r}, "
+            f"team_api_key={api_key_repr!r}, "
+            f"team_id={self.team_id!r})"
+        )
 
     @property
     def sources_file(self) -> Path:
@@ -145,3 +169,64 @@ def get_config() -> AtlasConfig:
     if _config is None:
         _config = AtlasConfig()
     return _config
+
+
+def load_atlas_yml(path: Path | str) -> AtlasConfig:
+    """Load Atlas configuration from an ``atlas.yml`` file.
+
+    Unknown top-level keys are rejected (fail-closed) to prevent silent
+    misconfiguration caused by typos or unsupported options.
+
+    Args:
+        path: Path to the ``atlas.yml`` file.
+
+    Returns:
+        An :class:`AtlasConfig` populated from the YAML file.
+
+    Raises:
+        ValueError:  If the file contains unknown top-level keys.
+        FileNotFoundError: If the file does not exist.
+    """
+    try:
+        import yaml  # type: ignore[import-untyped]
+    except ImportError as exc:
+        raise ImportError(
+            "PyYAML is required to load atlas.yml files. "
+            "Install it with: pip install pyyaml"
+        ) from exc
+
+    path = Path(path)
+    data: dict = yaml.safe_load(path.read_text()) or {}
+
+    unknown = set(data) - _KNOWN_ATLAS_YML_KEYS
+    if unknown:
+        raise ValueError(
+            f"Unknown top-level key(s) in {path.name}: {sorted(unknown)}. "
+            f"Allowed keys: {sorted(_KNOWN_ATLAS_YML_KEYS)}"
+        )
+
+    cfg = AtlasConfig()
+
+    # Parse sources list.
+    for raw_source in data.get("sources", []):
+        cfg.sources.append(
+            SourceConfig(
+                id=raw_source["id"],
+                kind=raw_source["kind"],
+                params=raw_source.get("params", {}),
+            )
+        )
+
+    # Parse team settings.
+    team = data.get("team", {})
+    if team:
+        cfg.team_server_url = team.get("server_url")
+        cfg.team_id = team.get("team_id")
+        # Support api_key directly or via env-var indirection.
+        api_key_env = team.get("api_key_env")
+        if api_key_env:
+            cfg.team_api_key = os.environ.get(api_key_env)
+        else:
+            cfg.team_api_key = team.get("api_key")
+
+    return cfg

@@ -81,8 +81,11 @@ def team_sync() -> None:
                 for r in response.rejected:
                     rprint(f"  [yellow]rejected[/yellow] {r.id}: {r.reason}")
         except Exception as exc:
-            rprint(f"[red]Sync failed:[/red] {exc}")
-            raise typer.Exit(1) from None
+            from alma_ports.errors import SyncError
+
+            sync_err = SyncError(str(exc))
+            rprint(f"[red]Sync failed:[/red] {sync_err}")
+            raise typer.Exit(1) from sync_err
 
 
 @app.command("status")

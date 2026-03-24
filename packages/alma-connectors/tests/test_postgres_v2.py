@@ -431,3 +431,164 @@ def test_v1_introspect_schema_still_works(monkeypatch: pytest.MonkeyPatch) -> No
     assert obj.object_name == "users"
     assert len(obj.columns) == 1
     assert obj.columns[0].name == "id"
+
+
+# ---------------------------------------------------------------------------
+# Hardening tests: input validation
+# ---------------------------------------------------------------------------
+
+
+def test_validate_schema_names_injection() -> None:
+    """Schema name with SQL injection chars raises ValueError."""
+    from alma_connectors.adapters.postgres import _assert_safe_identifier
+
+    with pytest.raises(ValueError, match="schema name"):
+        _assert_safe_identifier("public'; DROP TABLE foo;--", "schema name")
+    with pytest.raises(ValueError, match="schema name"):
+        _assert_safe_identifier('public"', "schema name")
+    # valid schema name passes
+    _assert_safe_identifier("public", "schema name")
+    _assert_safe_identifier("my_schema", "schema name")
+
+
+# ---------------------------------------------------------------------------
+# Hardening tests: extract_schema edge cases
+# ---------------------------------------------------------------------------
+
+
+def _schema_conn_empty() -> MagicMock:
+    """psycopg connection mock that returns empty rows for all queries."""
+    conn = MagicMock()
+    conn.__enter__ = MagicMock(return_value=conn)
+    conn.__exit__ = MagicMock(return_value=False)
+    cur = MagicMock()
+    cur.fetchall.return_value = []
+    conn.execute.return_value = cur
+    return conn
+
+
+def test_extract_schema_empty() -> None:
+    """Empty result from DB → empty SchemaSnapshotV2 objects."""
+    from alma_connectors.source_adapter_v2 import SchemaSnapshotV2
+
+    pg = _make_pg_adapter()
+    adapter = _make_persisted()
+
+    with patch(_PSYCOPG_CONNECT, return_value=_schema_conn_empty()):
+        snapshot = asyncio.run(pg.extract_schema(adapter))
+
+    assert isinstance(snapshot, SchemaSnapshotV2)
+    assert snapshot.objects == ()
+
+
+def test_extract_definitions_empty() -> None:
+    """No views/routines → empty DefinitionSnapshot."""
+    from alma_connectors.source_adapter_v2 import DefinitionSnapshot
+
+    pg = _make_pg_adapter()
+    adapter = _make_persisted()
+
+    with patch(_PSYCOPG_CONNECT, return_value=_schema_conn_empty()):
+        defns = asyncio.run(pg.extract_definitions(adapter))
+
+    assert isinstance(defns, DefinitionSnapshot)
+    assert defns.definitions == ()
+
+
+# ---------------------------------------------------------------------------
+# Hardening tests: connection retry
+# ---------------------------------------------------------------------------
+
+
+def test_connection_refused_does_not_retry_by_default() -> None:
+    """psycopg raises OperationalError with 'Connection refused'.
+    The is_pg_retryable helper should classify it as retryable."""
+    import psycopg
+
+    from alma_connectors.adapters.postgres import _is_pg_retryable
+
+    exc = psycopg.OperationalError("connection refused to 127.0.0.1:5432")
+    assert _is_pg_retryable(exc) is True
+
+
+def test_is_pg_retryable_non_connection_error() -> None:
+    """Non-connection errors are not retryable."""
+    import psycopg
+
+    from alma_connectors.adapters.postgres import _is_pg_retryable
+
+    exc = psycopg.ProgrammingError("syntax error at position 5")
+    assert _is_pg_retryable(exc) is False
+
+
+# ---------------------------------------------------------------------------
+# Hardening tests: context manager
+# ---------------------------------------------------------------------------
+
+
+def test_postgres_context_manager() -> None:
+    """PostgresAdapter can be used as an async context manager."""
+    pg = _make_pg_adapter()
+
+    async def _run() -> None:
+        async with pg as adapter:
+            assert adapter is pg
+
+    asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# Hardening tests: edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_discover_unicode_schema() -> None:
+    """Schema names with unicode chars pass through correctly."""
+    from alma_connectors.source_adapter_v2 import DiscoverySnapshot
+
+    pg = _make_pg_adapter()
+    adapter = _make_persisted()
+
+    conn = MagicMock()
+    conn.__enter__ = MagicMock(return_value=conn)
+    conn.__exit__ = MagicMock(return_value=False)
+    cur = MagicMock()
+    cur.fetchall.return_value = [{"nspname": "schéma_unicode"}]
+    conn.execute.return_value = cur
+
+    with patch(_PSYCOPG_CONNECT, return_value=conn):
+        snapshot = asyncio.run(pg.discover(adapter))
+
+    assert isinstance(snapshot, DiscoverySnapshot)
+    assert len(snapshot.containers) == 1
+    assert snapshot.containers[0].display_name == "schéma_unicode"
+
+
+def test_extract_schema_null_row_count() -> None:
+    """Freshness row with NULL n_live_tup row_count is handled gracefully."""
+    from alma_connectors.source_adapter_v2 import SchemaSnapshotV2
+
+    pg = _make_pg_adapter()
+    adapter = _make_persisted()
+
+    conn = MagicMock()
+    conn.__enter__ = MagicMock(return_value=conn)
+    conn.__exit__ = MagicMock(return_value=False)
+
+    def _execute(sql: str, *args, **kwargs):
+        cur = MagicMock()
+        sql_lower = sql.strip().lower()
+        if "pg_stat_user_tables" in sql_lower:
+            cur.fetchall.return_value = [
+                {"schemaname": "public", "relname": "users", "last_autovacuum": None, "n_live_tup": None}
+            ]
+        else:
+            cur.fetchall.return_value = []
+        return cur
+
+    conn.execute.side_effect = _execute
+
+    with patch(_PSYCOPG_CONNECT, return_value=conn):
+        snapshot = asyncio.run(pg.extract_schema(adapter))
+
+    assert isinstance(snapshot, SchemaSnapshotV2)

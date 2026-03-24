@@ -14,14 +14,25 @@ Returns a ``ScanResult`` summarising what was written.
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from alma_atlas.config import AtlasConfig, SourceConfig
+from alma_ports.errors import ConfigurationError, ExtractionError
 
 if TYPE_CHECKING:
     from alma_connectors.source_adapter import SchemaSnapshot
+
+logger = logging.getLogger(__name__)
+
+# Default per-source scan timeout in seconds.
+_DEFAULT_SCAN_TIMEOUT = 300
+
+# Default maximum number of sources scanned concurrently.
+_DEFAULT_MAX_CONCURRENT = 4
 
 
 @dataclass
@@ -44,29 +55,91 @@ class ScanAllResult:
     cross_system_edge_count: int = 0
 
 
-async def run_scan_async(source: SourceConfig, cfg: AtlasConfig) -> ScanResult:
+async def run_scan_async(
+    source: SourceConfig,
+    cfg: AtlasConfig,
+    *,
+    timeout: float = _DEFAULT_SCAN_TIMEOUT,
+    dry_run: bool = False,
+) -> ScanResult:
     """Run a full scan for a single registered source (async implementation).
 
     Args:
-        source: The source configuration (kind, id, params).
-        cfg:    Atlas configuration (used to open the SQLite store).
+        source:  The source configuration (kind, id, params).
+        cfg:     Atlas configuration (used to open the SQLite store).
+        timeout: Per-source scan timeout in seconds (default 300).  If the
+                 scan exceeds this limit it is cancelled and a timed-out
+                 ScanResult is returned.
+        dry_run: When True, validate config and build the adapter without
+                 extracting or writing any data.
 
     Returns:
         A ScanResult summarising assets written and edges derived.
     """
+    from alma_ports.errors import AtlasError
+
+    try:
+        result = await asyncio.wait_for(
+            _run_scan_impl(source, cfg, dry_run=dry_run),
+            timeout=timeout,
+        )
+    except TimeoutError:
+        logger.error(
+            "[scan/%s] Scan timed out after %.0fs — returning partial result.",
+            source.id,
+            timeout,
+        )
+        return ScanResult(
+            source_id=source.id,
+            error=f"TimeoutError: Scan timed out after {timeout:.0f}s",
+        )
+    except AtlasError as exc:
+        logger.exception("Scan failed for source %s", source.id)
+        return ScanResult(source_id=source.id, error=f"{type(exc).__name__}: {exc}")
+    except Exception as exc:
+        logger.exception("Unexpected error scanning source %s", source.id)
+        return ScanResult(source_id=source.id, error=f"{type(exc).__name__}: {exc}")
+    return result
+
+
+async def _run_scan_impl(
+    source: SourceConfig,
+    cfg: AtlasConfig,
+    *,
+    dry_run: bool = False,
+) -> ScanResult:
+    """Inner implementation of run_scan_async (no timeout wrapper)."""
     from alma_atlas.pipeline.stitch import stitch
     from alma_atlas_store.asset_repository import Asset, AssetRepository
     from alma_atlas_store.db import Database
 
+    t0 = time.monotonic()
+    logger.info("[scan/%s] Starting scan (kind=%s, dry_run=%s)", source.id, source.kind, dry_run)
+
+    # Phase: adapter construction — bad config skips this source, not the whole pipeline.
     try:
         adapter, persisted = _build_adapter(source)
     except (ValueError, ImportError) as exc:
-        return ScanResult(source_id=source.id, error=str(exc))
+        raise ConfigurationError(str(exc)) from exc
 
+    # Dry-run: validate config and build the adapter without extracting data.
+    if dry_run:
+        logger.info("[scan/%s] Dry-run complete — adapter constructed successfully.", source.id)
+        return ScanResult(source_id=source.id)
+
+    # Phase: schema introspection.
+    t_schema = time.monotonic()
+    logger.info("[scan/%s] Phase: schema introspection", source.id)
     try:
         snapshot = await adapter.introspect_schema(persisted)
     except Exception as exc:
-        return ScanResult(source_id=source.id, error=f"Schema introspection failed: {exc}")
+        raise ExtractionError(f"Schema introspection failed: {exc}") from exc
+    logger.info(
+        "[scan/%s] Schema introspection complete: %d object(s) in %.2fs",
+        source.id,
+        len(snapshot.objects),
+        time.monotonic() - t_schema,
+    )
 
     with Database(cfg.db_path) as db:  # type: ignore[arg-type]
         repo = AssetRepository(db)
@@ -103,21 +176,58 @@ async def run_scan_async(source: SourceConfig, cfg: AtlasConfig) -> ScanResult:
                     )
                     dep_edge_count += 1
 
+        # Phase: traffic observation.
+        t_traffic = time.monotonic()
+        logger.info("[scan/%s] Phase: traffic observation", source.id)
         try:
             traffic = await adapter.observe_traffic(persisted)
         except Exception as exc:
+            logger.warning("Traffic observation failed for source %s: %s", source.id, exc)
             return ScanResult(
                 source_id=source.id,
                 asset_count=len(snapshot.objects),
                 edge_count=dep_edge_count,
-                warnings=[f"Traffic observation failed: {exc}"],
+                warnings=[f"ExtractionError: Traffic observation failed: {exc}"],
                 snapshot=snapshot,
             )
+        logger.info(
+            "[scan/%s] Traffic observation complete: %d event(s) in %.2fs",
+            source.id,
+            getattr(traffic, "scanned_records", 0),
+            time.monotonic() - t_traffic,
+        )
 
+        # Phase: stitch (lineage edge derivation).
+        t_stitch = time.monotonic()
+        logger.info("[scan/%s] Phase: stitch", source.id)
         edge_count = stitch(traffic, db, source_id=source.id, source_kind=source.kind) + dep_edge_count
+        logger.info(
+            "[scan/%s] Stitch complete: %d edge(s) in %.2fs",
+            source.id,
+            edge_count,
+            time.monotonic() - t_stitch,
+        )
 
-        _run_enforcement(snapshot, source.id, db)
+        # Phase: enforcement.
+        t_enforce = time.monotonic()
+        logger.info("[scan/%s] Phase: enforcement", source.id)
+        try:
+            _run_enforcement(snapshot, source.id, db)
+        except Exception as exc:
+            logger.exception("Enforcement check failed for source %s: %s", source.id, exc)
+        logger.info(
+            "[scan/%s] Enforcement complete in %.2fs",
+            source.id,
+            time.monotonic() - t_enforce,
+        )
 
+    logger.info(
+        "[scan/%s] Scan finished: %d asset(s), %d edge(s) in %.2fs",
+        source.id,
+        len(snapshot.objects),
+        edge_count,
+        time.monotonic() - t0,
+    )
     return ScanResult(
         source_id=source.id,
         asset_count=len(snapshot.objects),
@@ -126,17 +236,23 @@ async def run_scan_async(source: SourceConfig, cfg: AtlasConfig) -> ScanResult:
     )
 
 
-def run_scan(source: SourceConfig, cfg: AtlasConfig) -> ScanResult:
+def run_scan(
+    source: SourceConfig,
+    cfg: AtlasConfig,
+    *,
+    timeout: float = _DEFAULT_SCAN_TIMEOUT,
+) -> ScanResult:
     """Sync entry point for a full scan — safe from both sync and async contexts.
 
     Args:
-        source: The source configuration (kind, id, params).
-        cfg:    Atlas configuration (used to open the SQLite store).
+        source:  The source configuration (kind, id, params).
+        cfg:     Atlas configuration (used to open the SQLite store).
+        timeout: Per-source scan timeout in seconds (default 300).
 
     Returns:
         A ScanResult summarising assets written and edges derived.
     """
-    return asyncio.run(run_scan_async(source, cfg))
+    return asyncio.run(run_scan_async(source, cfg, timeout=timeout))
 
 
 def _run_enforcement(snapshot: SchemaSnapshot, source_id: str, db: object) -> None:
@@ -201,33 +317,39 @@ def _run_enforcement(snapshot: SchemaSnapshot, source_id: str, db: object) -> No
                 )
 
 
-def run_scan_all(sources: list[SourceConfig], cfg: AtlasConfig) -> ScanAllResult:
-    """Run scans for all sources, then discover cross-system edges.
-
-    Calls :func:`run_scan` for each source in order, collects the resulting
-    :class:`ScanResult` objects and their schema snapshots, then hands all
-    snapshots to :func:`~alma_atlas.pipeline.cross_system_edges.discover_cross_system_edges`
-    to find edges that span system boundaries.
-
-    Args:
-        sources: List of source configurations to scan.
-        cfg:     Atlas configuration (used to open the SQLite store).
-
-    Returns:
-        A :class:`ScanAllResult` aggregating per-source results and the total
-        number of cross-system edges discovered.
-    """
+async def _run_scan_all_async(
+    sources: list[SourceConfig],
+    cfg: AtlasConfig,
+    *,
+    max_concurrent: int = _DEFAULT_MAX_CONCURRENT,
+    timeout: float = _DEFAULT_SCAN_TIMEOUT,
+) -> ScanAllResult:
+    """Async implementation of run_scan_all with concurrency control."""
     from alma_atlas.pipeline.cross_system_edges import discover_cross_system_edges
     from alma_atlas_store.db import Database
+
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    async def _scan_with_sem(source: SourceConfig) -> ScanResult:
+        async with semaphore:
+            return await run_scan_async(source, cfg, timeout=timeout)
+
+    raw_results = await asyncio.gather(
+        *[_scan_with_sem(s) for s in sources],
+        return_exceptions=True,
+    )
 
     results: list[ScanResult] = []
     snapshots: dict[str, SchemaSnapshot] = {}
 
-    for source in sources:
-        result = run_scan(source, cfg)
-        results.append(result)
-        if result.snapshot is not None:
-            snapshots[source.id] = result.snapshot
+    for source, raw in zip(sources, raw_results, strict=False):
+        if isinstance(raw, BaseException):
+            logger.error("[scan] Unexpected error scanning %s: %s", source.id, raw)
+            results.append(ScanResult(source_id=source.id, error=str(raw)))
+        else:
+            results.append(raw)
+            if raw.snapshot is not None:
+                snapshots[source.id] = raw.snapshot
 
     cross_system_edge_count = 0
     if len(snapshots) >= 2:
@@ -235,6 +357,34 @@ def run_scan_all(sources: list[SourceConfig], cfg: AtlasConfig) -> ScanAllResult
             cross_system_edge_count = discover_cross_system_edges(snapshots, db)
 
     return ScanAllResult(results=results, cross_system_edge_count=cross_system_edge_count)
+
+
+def run_scan_all(
+    sources: list[SourceConfig],
+    cfg: AtlasConfig,
+    *,
+    max_concurrent: int = _DEFAULT_MAX_CONCURRENT,
+    timeout: float = _DEFAULT_SCAN_TIMEOUT,
+) -> ScanAllResult:
+    """Run scans for all sources concurrently, then discover cross-system edges.
+
+    Sources are scanned concurrently up to *max_concurrent* at a time using
+    ``asyncio.Semaphore``.  Each source scan is bounded by *timeout* seconds.
+    Results for all sources are collected even if individual scans fail.
+
+    Args:
+        sources:        List of source configurations to scan.
+        cfg:            Atlas configuration (used to open the SQLite store).
+        max_concurrent: Maximum number of concurrent source scans (default 4).
+        timeout:        Per-source scan timeout in seconds (default 300).
+
+    Returns:
+        A :class:`ScanAllResult` aggregating per-source results and the total
+        number of cross-system edges discovered.
+    """
+    return asyncio.run(
+        _run_scan_all_async(sources, cfg, max_concurrent=max_concurrent, timeout=timeout)
+    )
 
 
 def _build_adapter(source: SourceConfig):  # type: ignore[return]

@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
 import time
 import warnings
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 from uuid import NAMESPACE_URL, uuid5
 
 import psycopg
@@ -64,6 +65,79 @@ from alma_connectors.source_adapter_v2 import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Input validation helpers
+# ---------------------------------------------------------------------------
+
+_SAFE_IDENTIFIER_RE = re.compile(r"^[a-zA-Z0-9_\-\.]+$")
+
+
+def _assert_safe_identifier(value: str, field_name: str) -> None:
+    """Reject values that could break out of SQL f-string interpolation."""
+    if not _SAFE_IDENTIFIER_RE.fullmatch(value):
+        raise ValueError(
+            f"Config field {field_name!r} contains characters that are not allowed "
+            f"in SQL identifiers: {value!r}"
+        )
+
+
+def _validate_postgres_dsn(dsn: str, field_name: str = "DSN") -> None:
+    """Validate that dsn looks like a PostgreSQL connection string."""
+    stripped = dsn.strip()
+    if not stripped:
+        raise ValueError(f"{field_name} must be a non-empty string")
+    lower = stripped.lower()
+    if lower.startswith("postgresql://") or lower.startswith("postgres://"):
+        return
+    if "=" in stripped:
+        return
+    raise ValueError(
+        f"{field_name} does not look like a valid PostgreSQL DSN (expected "
+        f"'postgresql://...' or key=value conninfo)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Retry helpers
+# ---------------------------------------------------------------------------
+
+_T = TypeVar("_T")
+
+
+def _is_pg_retryable(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "connection" in msg and any(k in msg for k in ("refused", "reset", "timeout", "pool"))
+
+
+async def _async_retry_with_backoff(  # noqa: UP047
+    fn: Callable[[], Awaitable[_T]],
+    *,
+    max_attempts: int = 3,
+    base_delay: float = 1.0,
+    max_delay: float = 30.0,
+    retryable: Callable[[Exception], bool],
+) -> _T:
+    last_exc: Exception | None = None
+    for attempt in range(max_attempts):
+        try:
+            return await fn()
+        except Exception as exc:
+            if not retryable(exc):
+                raise
+            last_exc = exc
+            if attempt < max_attempts - 1:
+                delay = min(base_delay * (2 ** attempt), max_delay)
+                logger.warning(
+                    "Retryable PG error (attempt %d/%d): %s. Retrying in %.1fs",
+                    attempt + 1,
+                    max_attempts,
+                    exc,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+    raise last_exc  # type: ignore[misc]
+
 
 _DEFAULT_POSTGRES_INCLUDE_SCHEMAS = ("public",)
 _DEFAULT_POSTGRES_EXCLUDE_SCHEMAS = ("pg_catalog", "information_schema")
@@ -200,6 +274,21 @@ class PostgresAdapter(SourceAdapter):
             raise ValueError(f"adapter '{adapter.key}' is not configured as postgres")
         return adapter.config
 
+    def _validate_config(self, config: PostgresAdapterConfig) -> None:
+        """Validate schema names to prevent SQL injection."""
+        for schema in list(config.include_schemas) + list(config.exclude_schemas):
+            _assert_safe_identifier(schema, "schema name")
+
+    # ------------------------------------------------------------------
+    # Async context manager support
+    # ------------------------------------------------------------------
+
+    async def __aenter__(self) -> PostgresAdapter:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        pass  # connections are closed per-request
+
     def _get_dsn(
         self,
         adapter: PersistedSourceAdapter,
@@ -245,6 +334,7 @@ class PostgresAdapter(SourceAdapter):
             stacklevel=2,
         )
         config = self._get_config(adapter)
+        self._validate_config(config)
         include_schemas = list(config.include_schemas)
         exclude_schemas = list(config.exclude_schemas)
         dsn = self._get_dsn(adapter)
@@ -261,6 +351,7 @@ class PostgresAdapter(SourceAdapter):
             dsn,
             row_factory=dict_row,
             options="-c default_transaction_read_only=on",
+            connect_timeout=10,
         ) as conn:
             table_row = conn.execute(
                 f"""
@@ -305,6 +396,7 @@ class PostgresAdapter(SourceAdapter):
             stacklevel=2,
         )
         config = self._get_config(adapter)
+        self._validate_config(config)
         dsn = self._get_dsn(adapter)
         include_schemas = list(config.include_schemas)
         exclude_schemas = list(config.exclude_schemas)
@@ -407,7 +499,7 @@ class PostgresAdapter(SourceAdapter):
               AND {stats_where_clause}
         """
 
-        with psycopg.connect(dsn, row_factory=dict_row) as conn:
+        with psycopg.connect(dsn, row_factory=dict_row, connect_timeout=10) as conn:
             rows = list(conn.execute(schema_sql, params + params).fetchall())
             dependency_rows = list(conn.execute(dependency_sql, include_schemas).fetchall()) if include_schemas else []
             stats_rows = list(conn.execute(stats_sql, stats_params).fetchall())
@@ -683,6 +775,7 @@ class PostgresAdapter(SourceAdapter):
                 dsn,
                 row_factory=dict_row,
                 options="-c default_transaction_read_only=on",
+                connect_timeout=10,
             ) as conn:
                 rows = list(conn.execute(_PG_STAT_STATEMENTS_SQL).fetchall())
         except psycopg.Error as exc:
@@ -758,6 +851,7 @@ class PostgresAdapter(SourceAdapter):
             dsn,
             row_factory=dict_row,
             options="-c default_transaction_read_only=on -c statement_timeout=30000",
+            connect_timeout=10,
         ) as conn:
             result = conn.execute(sql)
             rows = list(result.fetchmany(row_limit + 1))
@@ -784,6 +878,7 @@ class PostgresAdapter(SourceAdapter):
         """Probe which v2 capabilities are actually available at runtime."""
         caps_to_probe = capabilities if capabilities is not None else self.declared_capabilities
         config = self._get_config(adapter)
+        self._validate_config(config)
         dsn = self._get_dsn(adapter)
 
         info_schema_ok = False
@@ -801,6 +896,7 @@ class PostgresAdapter(SourceAdapter):
                 row_factory=dict_row,
                 autocommit=True,
                 options="-c default_transaction_read_only=on",
+                connect_timeout=10,
             ) as conn:
                 try:
                     conn.execute("SELECT 1 FROM information_schema.schemata LIMIT 1")
@@ -894,13 +990,17 @@ class PostgresAdapter(SourceAdapter):
         adapter: PersistedSourceAdapter,
     ) -> DiscoverySnapshot:
         """DISCOVER: enumerate PostgreSQL schemas as containers."""
+        config = self._get_config(adapter)
+        self._validate_config(config)
         dsn = self._get_dsn(adapter)
         started_at = time.perf_counter()
+        logger.debug("PostgreSQL discover started: adapter=%s", adapter.key)
 
         with psycopg.connect(
             dsn,
             row_factory=dict_row,
             options="-c default_transaction_read_only=on",
+            connect_timeout=10,
         ) as conn:
             rows = list(conn.execute("""
                 SELECT nspname
@@ -991,6 +1091,7 @@ class PostgresAdapter(SourceAdapter):
             dsn,
             row_factory=dict_row,
             options="-c default_transaction_read_only=on",
+            connect_timeout=10,
         ) as conn:
             routine_rows = list(conn.execute(routine_sql, routine_params).fetchall())
             freshness_rows = list(conn.execute(freshness_sql, freshness_params).fetchall())
@@ -1000,12 +1101,16 @@ class PostgresAdapter(SourceAdapter):
             for row in freshness_rows
         }
 
-        _v1_to_v2_kind = {
+        _v1_to_v2_kind: dict[SchemaObjectKind, SchemaObjectKindV2] = {
             SchemaObjectKind.TABLE: SchemaObjectKindV2.TABLE,
             SchemaObjectKind.VIEW: SchemaObjectKindV2.VIEW,
             SchemaObjectKind.MATERIALIZED_VIEW: SchemaObjectKindV2.MATERIALIZED_VIEW,
-            SchemaObjectKind.EXTERNAL_TABLE: SchemaObjectKindV2.EXTERNAL_TABLE,
         }
+        # EXTERNAL_TABLE may not exist in all versions of the v1 enum
+        _ext = getattr(SchemaObjectKind, "EXTERNAL_TABLE", None)
+        _ext_v2 = getattr(SchemaObjectKindV2, "EXTERNAL_TABLE", None)
+        if _ext is not None and _ext_v2 is not None:
+            _v1_to_v2_kind[_ext] = _ext_v2
 
         objects: list[SchemaObject] = []
 
@@ -1080,6 +1185,7 @@ class PostgresAdapter(SourceAdapter):
     ) -> DefinitionSnapshot:
         """DEFINITIONS: view SQL via pg_get_viewdef + routine source via pg_get_functiondef."""
         config = self._get_config(adapter)
+        self._validate_config(config)
         dsn = self._get_dsn(adapter)
         include_schemas = list(config.include_schemas)
         exclude_schemas = list(config.exclude_schemas)
@@ -1138,6 +1244,7 @@ class PostgresAdapter(SourceAdapter):
         with psycopg.connect(
             dsn,
             row_factory=dict_row,
+            connect_timeout=10,
             options="-c default_transaction_read_only=on",
         ) as conn:
             view_rows = list(conn.execute(view_sql, view_params).fetchall())
