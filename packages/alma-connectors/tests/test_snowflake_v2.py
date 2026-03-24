@@ -722,3 +722,182 @@ def test_v1_observe_traffic_still_works() -> None:
     assert result.scanned_records == 1
     assert len(result.events) == 1
     assert result.events[0].event_id == "q1"
+
+
+# ---------------------------------------------------------------------------
+# Hardening tests: input validation
+# ---------------------------------------------------------------------------
+
+
+def test_validate_account_format() -> None:
+    """Invalid account raises ValueError."""
+    from alma_connectors.adapters.snowflake import _validate_sf_account
+
+    with pytest.raises(ValueError, match="account"):
+        _validate_sf_account("!")  # invalid char
+    with pytest.raises(ValueError, match="account"):
+        _validate_sf_account("")  # empty - length too short
+    # valid accounts should not raise
+    _validate_sf_account("xy12345.us-east-1")
+    _validate_sf_account("myaccount")
+    _validate_sf_account("org-name-account123")
+
+
+def test_validate_warehouse_name_injection() -> None:
+    """Warehouse with SQL injection chars raises ValueError."""
+    from alma_connectors.adapters.snowflake import _validate_sf_name
+
+    with pytest.raises(ValueError, match="warehouse"):
+        _validate_sf_name("COMPUTE_WH'; DROP TABLE users;--", "warehouse")
+    with pytest.raises(ValueError, match="warehouse"):
+        _validate_sf_name("COMPUTE WH", "warehouse")  # space not allowed
+    # valid name passes
+    _validate_sf_name("COMPUTE_WH", "warehouse")
+    _validate_sf_name("MY_WAREHOUSE_1", "warehouse")
+
+
+# ---------------------------------------------------------------------------
+# Hardening tests: extract_schema edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_extract_schema_empty() -> None:
+    """COLUMNS returns empty → empty SchemaSnapshotV2."""
+    from alma_connectors.source_adapter_v2 import SchemaSnapshotV2
+
+    persisted = _make_adapter()
+    sf_adapter = _make_snowflake_adapter(_DEFAULT_SECRET)
+
+    dispatch: dict[str, tuple[list[str], list[tuple[Any, ...]]]] = {
+        "INFORMATION_SCHEMA.COLUMNS": (
+            ["TABLE_SCHEMA", "TABLE_NAME", "COLUMN_NAME", "DATA_TYPE", "IS_NULLABLE", "ORDINAL_POSITION"],
+            [],
+        ),
+        "INFORMATION_SCHEMA.TABLES": (
+            ["TABLE_SCHEMA", "TABLE_NAME", "TABLE_TYPE", "ROW_COUNT", "BYTES", "LAST_ALTERED"],
+            [],
+        ),
+    }
+    cur = _make_dispatch_cursor(dispatch)
+    with patch(_SNOWFLAKE_MODULE, return_value=_mock_module(cur)):
+        snapshot = asyncio.run(sf_adapter.extract_schema(persisted))
+
+    assert isinstance(snapshot, SchemaSnapshotV2)
+    assert snapshot.objects == ()
+
+
+def test_extract_schema_null_freshness() -> None:
+    """ROW_COUNT=None in TABLES query is handled gracefully (row_count stays None)."""
+    from alma_connectors.source_adapter_v2 import SchemaSnapshotV2
+
+    persisted = _make_adapter()
+    sf_adapter = _make_snowflake_adapter(_DEFAULT_SECRET)
+
+    dispatch: dict[str, tuple[list[str], list[tuple[Any, ...]]]] = {
+        "INFORMATION_SCHEMA.COLUMNS": (
+            ["TABLE_SCHEMA", "TABLE_NAME", "COLUMN_NAME", "DATA_TYPE", "IS_NULLABLE", "ORDINAL_POSITION"],
+            [("PUBLIC", "ORDERS", "ID", "NUMBER", "NO", 1)],
+        ),
+        "INFORMATION_SCHEMA.TABLES": (
+            ["TABLE_SCHEMA", "TABLE_NAME", "TABLE_TYPE", "ROW_COUNT", "BYTES", "LAST_ALTERED"],
+            [("PUBLIC", "ORDERS", "BASE TABLE", None, None, None)],
+        ),
+    }
+    cur = _make_dispatch_cursor(dispatch)
+    with patch(_SNOWFLAKE_MODULE, return_value=_mock_module(cur)):
+        snapshot = asyncio.run(sf_adapter.extract_schema(persisted))
+
+    assert isinstance(snapshot, SchemaSnapshotV2)
+    assert len(snapshot.objects) == 1
+    assert snapshot.objects[0].row_count is None
+
+
+# ---------------------------------------------------------------------------
+# Hardening tests: retry behavior
+# ---------------------------------------------------------------------------
+
+
+def test_connection_retry_on_warehouse_suspended() -> None:
+    """_is_sf_retryable returns True for warehouse suspended errors."""
+    from alma_connectors.adapters.snowflake import _is_sf_retryable
+
+    exc = Exception("Warehouse COMPUTE_WH is suspended. Resuming warehouse...")
+    assert _is_sf_retryable(exc) is True
+
+
+def test_is_sf_retryable_non_transient() -> None:
+    """Non-transient errors are not retryable."""
+    from alma_connectors.adapters.snowflake import _is_sf_retryable
+
+    exc = Exception("SQL compilation error: Table MY_TABLE does not exist.")
+    assert _is_sf_retryable(exc) is False
+
+
+# ---------------------------------------------------------------------------
+# Hardening tests: context manager
+# ---------------------------------------------------------------------------
+
+
+def test_snowflake_context_manager() -> None:
+    """SnowflakeAdapter can be used as an async context manager."""
+    sf_adapter = _make_snowflake_adapter(_DEFAULT_SECRET)
+
+    async def _run() -> None:
+        async with sf_adapter as adapter:
+            assert adapter is sf_adapter
+
+    asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# Hardening tests: lineage edge case
+# ---------------------------------------------------------------------------
+
+
+def test_extract_lineage_empty_on_permission_error() -> None:
+    """ACCESS_HISTORY permission error returns graceful empty LineageSnapshot."""
+    from alma_connectors.source_adapter_v2 import LineageSnapshot
+
+    persisted = _make_adapter()
+    sf_adapter = _make_snowflake_adapter(_DEFAULT_SECRET)
+
+    mock_module = MagicMock()
+    mock_module.connect.side_effect = Exception("SQL compilation error: Object 'ACCESS_HISTORY' does not exist")
+
+    with patch(_SNOWFLAKE_MODULE, return_value=mock_module):
+        result = asyncio.run(sf_adapter.extract_lineage(persisted))
+
+    assert isinstance(result, LineageSnapshot)
+    assert result.edges == ()
+
+
+# ---------------------------------------------------------------------------
+# Hardening tests: very long table name
+# ---------------------------------------------------------------------------
+
+
+def test_very_long_table_name() -> None:
+    """Table name of 200 chars passes through without truncation."""
+    from alma_connectors.source_adapter_v2 import SchemaSnapshotV2
+
+    long_name = "T" * 200
+    persisted = _make_adapter()
+    sf_adapter = _make_snowflake_adapter(_DEFAULT_SECRET)
+
+    dispatch: dict[str, tuple[list[str], list[tuple[Any, ...]]]] = {
+        "INFORMATION_SCHEMA.COLUMNS": (
+            ["TABLE_SCHEMA", "TABLE_NAME", "COLUMN_NAME", "DATA_TYPE", "IS_NULLABLE", "ORDINAL_POSITION"],
+            [("PUBLIC", long_name, "ID", "NUMBER", "NO", 1)],
+        ),
+        "INFORMATION_SCHEMA.TABLES": (
+            ["TABLE_SCHEMA", "TABLE_NAME", "TABLE_TYPE", "ROW_COUNT", "BYTES", "LAST_ALTERED"],
+            [("PUBLIC", long_name, "BASE TABLE", 5, 1024, None)],
+        ),
+    }
+    cur = _make_dispatch_cursor(dispatch)
+    with patch(_SNOWFLAKE_MODULE, return_value=_mock_module(cur)):
+        snapshot = asyncio.run(sf_adapter.extract_schema(persisted))
+
+    assert isinstance(snapshot, SchemaSnapshotV2)
+    assert len(snapshot.objects) == 1
+    assert snapshot.objects[0].object_name == long_name
