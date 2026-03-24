@@ -268,4 +268,29 @@ def _build_adapter(source: SourceConfig):  # type: ignore[return]
             project_name=project_name,
         ), persisted
 
-    raise ValueError(f"Unknown source kind: {kind!r}. Supported: bigquery, dbt, postgres")
+    if kind == "snowflake":
+        from alma_connectors.adapters.snowflake import SnowflakeAdapter
+        from alma_connectors.source_adapter import SnowflakeAdapterConfig, SourceAdapterKind
+
+        config = SnowflakeAdapterConfig(
+            account_secret=ExternalSecretRef(
+                provider="env",
+                reference=source.params.get("account_secret_env", "SNOWFLAKE_CONNECTION_JSON"),
+            ),
+            account=source.params.get("account", ""),
+            warehouse=source.params.get("warehouse", "COMPUTE_WH"),
+            database=source.params.get("database", ""),
+            role=source.params.get("role", ""),
+        )
+        persisted = PersistedSourceAdapter(
+            id=adapter_id,
+            key=adapter_key,
+            display_name=source.id,
+            kind=SourceAdapterKind.SNOWFLAKE,
+            target_id=source.id,
+            status=SourceAdapterStatus.READY,
+            config=config,
+        )
+        return SnowflakeAdapter(resolve_secret=_resolve_env), persisted
+
+    raise ValueError(f"Unknown source kind: {kind!r}. Supported: bigquery, dbt, postgres, snowflake")

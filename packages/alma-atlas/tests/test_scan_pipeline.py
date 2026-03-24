@@ -37,7 +37,7 @@ def test_scan_result_with_values() -> None:
 
 
 def test_build_adapter_unknown_kind_raises() -> None:
-    source = SourceConfig(id="x", kind="snowflake", params={})
+    source = SourceConfig(id="x", kind="mysql", params={})
     with pytest.raises(ValueError, match="Unknown source kind"):
         _build_adapter(source)
 

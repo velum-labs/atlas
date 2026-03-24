@@ -74,6 +74,7 @@ class SourceAdapterKind(StrEnum):
     POSTGRES = "postgres"
     BIGQUERY = "bigquery"
     DBT = "dbt"
+    SNOWFLAKE = "snowflake"
 
 
 class SourceAdapterStatus(StrEnum):
@@ -276,7 +277,55 @@ class DbtAdapterConfig:
     project_name: str | None = None
 
 
-type SourceAdapterConfig = PostgresAdapterConfig | BigQueryAdapterConfig | DbtAdapterConfig
+@dataclass(frozen=True)
+class SnowflakeAdapterConfig:
+    """Canonical persisted config for Snowflake adapters."""
+
+    account_secret: SourceAdapterSecret
+    account: str
+    warehouse: str = "COMPUTE_WH"
+    database: str = ""
+    role: str = ""
+    include_schemas: tuple[str, ...] = ()
+    exclude_schemas: tuple[str, ...] = ("INFORMATION_SCHEMA",)
+    lookback_hours: int = 168
+    max_query_rows: int = 10_000
+    probe_target: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "account",
+            _normalize_required_string(self.account, field_name="account"),
+        )
+        object.__setattr__(
+            self,
+            "warehouse",
+            _normalize_required_string(self.warehouse, field_name="warehouse"),
+        )
+        normalized_exclude = _normalize_schema_names(
+            self.exclude_schemas,
+            field_name="exclude_schemas",
+        )
+        object.__setattr__(self, "exclude_schemas", normalized_exclude)
+        if self.include_schemas:
+            normalized_include = _normalize_schema_names(
+                self.include_schemas,
+                field_name="include_schemas",
+            )
+            object.__setattr__(self, "include_schemas", normalized_include)
+        for field_name in ("lookback_hours", "max_query_rows"):
+            raw_value = getattr(self, field_name)
+            if raw_value < 1:
+                raise ValueError(f"{field_name} must be >= 1")
+        object.__setattr__(
+            self,
+            "probe_target",
+            _normalize_optional_probe_target(self.probe_target, field_name="probe_target"),
+        )
+
+
+type SourceAdapterConfig = PostgresAdapterConfig | BigQueryAdapterConfig | DbtAdapterConfig | SnowflakeAdapterConfig
 
 
 @dataclass(frozen=True)

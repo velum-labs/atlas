@@ -3,6 +3,7 @@
 from alma_connectors.adapters.bigquery import BigQueryAdapter
 from alma_connectors.adapters.dbt import DbtAdapter
 from alma_connectors.adapters.postgres import PostgresAdapter
+from alma_connectors.adapters.snowflake import SnowflakeAdapter
 from alma_connectors.credentials import decrypt_credential, encrypt_credential
 from alma_connectors.edge_model import (
     ColumnParity,
@@ -66,6 +67,7 @@ from alma_connectors.source_adapter import (
     SchemaObjectKind,
     SchemaSnapshot,
     SetupInstructions,
+    SnowflakeAdapterConfig,
     SourceAdapter,
     SourceAdapterCapabilities,
     SourceAdapterDefinition,
@@ -87,6 +89,8 @@ __all__ = [
     "BigQueryAdapterConfig",
     "DbtAdapter",
     "PostgresAdapter",
+    "SnowflakeAdapter",
+    "SnowflakeAdapterConfig",
     "ConnectionTestResult",
     "ColumnParity",
     "CopyStrategy",
