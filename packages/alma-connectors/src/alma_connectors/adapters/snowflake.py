@@ -1264,6 +1264,7 @@ WHERE FUNCTION_SCHEMA NOT IN ('INFORMATION_SCHEMA')
         if ACCESS_HISTORY is unavailable (non-Enterprise or missing privileges).
         """
         config = self._get_config(adapter)
+        self._validate_config(config)
         lookback_hours = config.lookback_hours
         max_rows = config.max_query_rows
 
@@ -1288,7 +1289,12 @@ LIMIT {max_rows}
         )
 
         try:
-            conn = self._connect(config)
+            conn = _retry_with_backoff(
+                lambda: self._connect(config),
+                retryable=_is_sf_retryable,
+                max_attempts=3,
+                base_delay=2.0,
+            )
             try:
                 cur = conn.cursor()
                 cur.execute(lineage_sql)
