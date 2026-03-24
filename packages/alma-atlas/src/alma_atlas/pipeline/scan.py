@@ -189,7 +189,10 @@ def _build_adapter(source: SourceConfig):  # type: ignore[return]
     adapter_key = source.id.replace(":", "-")
 
     def _resolve_env(secret: object) -> str:
+        provider = getattr(secret, "provider", "env")
         ref = getattr(secret, "reference", None)
+        if provider == "literal":
+            return ref or ""
         return os.environ.get(ref, "") if ref else ""
 
     kind = source.kind
@@ -203,7 +206,7 @@ def _build_adapter(source: SourceConfig):  # type: ignore[return]
                 provider="env",
                 reference=source.params.get("service_account_env", "BQ_SERVICE_ACCOUNT_JSON"),
             ),
-            project_id=source.params["project_id"],
+            project_id=source.params.get("project_id") or source.params["project"],
             location=source.params.get("location", "us"),
         )
         persisted = PersistedSourceAdapter(
@@ -221,11 +224,26 @@ def _build_adapter(source: SourceConfig):  # type: ignore[return]
         from alma_connectors.adapters.postgres import PostgresAdapter
         from alma_connectors.source_adapter import PostgresAdapterConfig, SourceAdapterKind
 
-        config = PostgresAdapterConfig(
-            database_secret=ExternalSecretRef(
+        # Support direct DSN from params or env-var reference
+        if "dsn" in source.params:
+            db_secret: SourceAdapterSecret = ExternalSecretRef(
+                provider="literal",
+                reference=source.params["dsn"],
+            )
+        else:
+            db_secret = ExternalSecretRef(
                 provider="env",
                 reference=source.params.get("dsn_env", "PG_DATABASE_URL"),
-            ),
+            )
+
+        # Pass through schema filter if provided
+        include_schemas = (
+            (source.params["schema"],) if "schema" in source.params else ("public",)
+        )
+
+        config = PostgresAdapterConfig(
+            database_secret=db_secret,
+            include_schemas=include_schemas,
         )
         persisted = PersistedSourceAdapter(
             id=adapter_id,
