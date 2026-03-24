@@ -1,0 +1,479 @@
+"""Tests for BigQueryAdapter v2 protocol (probe, discover, extract_schema, extract_traffic)."""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import UTC, datetime
+from typing import Any
+from unittest.mock import MagicMock
+
+import pytest
+
+from alma_connectors import (
+    BigQueryAdapterConfig,
+    ExternalSecretRef,
+    ManagedSecret,
+    PersistedSourceAdapter,
+    SourceAdapterKind,
+    SourceAdapterStatus,
+)
+from alma_connectors.adapters.bigquery import BigQueryAdapter
+from alma_connectors.source_adapter_v2 import (
+    AdapterCapability,
+    DiscoverySnapshot,
+    ExtractionScope,
+    SchemaSnapshotV2,
+    TrafficExtractionResult,
+)
+
+# ---------------------------------------------------------------------------
+# Fake BQ infrastructure (v2-aware)
+# ---------------------------------------------------------------------------
+
+
+class _FakeDataset:
+    """Minimal stand-in for google.cloud.bigquery.DatasetListItem."""
+
+    def __init__(self, dataset_id: str) -> None:
+        self.dataset_id = dataset_id
+
+
+class _FakeQueryJob:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self._rows = rows
+
+    def result(self) -> list[dict[str, Any]]:
+        return self._rows
+
+
+class _FakeBQClient:
+    """Fake BQ client for v2 tests with configurable datasets and error injection."""
+
+    def __init__(
+        self,
+        *,
+        datasets: list[str] | None = None,
+        column_rows: list[dict[str, Any]] | None = None,
+        job_rows: list[dict[str, Any]] | None = None,
+        storage_rows: list[dict[str, Any]] | None = None,
+        raise_on_list_datasets: Exception | None = None,
+        raise_on_schema_query: Exception | None = None,
+        raise_on_jobs_query: Exception | None = None,
+    ) -> None:
+        self._datasets = [_FakeDataset(d) for d in (datasets if datasets is not None else ["ds_a", "ds_b"])]
+        self._column_rows = column_rows or []
+        self._job_rows = job_rows or []
+        self._storage_rows = storage_rows or []
+        self._raise_on_list_datasets = raise_on_list_datasets
+        self._raise_on_schema_query = raise_on_schema_query
+        self._raise_on_jobs_query = raise_on_jobs_query
+        self.queries_issued: list[str] = []
+
+    def list_datasets(self) -> list[_FakeDataset]:
+        if self._raise_on_list_datasets is not None:
+            raise self._raise_on_list_datasets
+        return list(self._datasets)
+
+    def query(self, sql: str, job_config: Any = None) -> Any:
+        self.queries_issued.append(sql)
+        if "TABLE_STORAGE" in sql:
+            return _FakeQueryJob(self._storage_rows)
+        if "JOBS_BY_PROJECT" in sql:
+            if self._raise_on_jobs_query is not None:
+                raise self._raise_on_jobs_query
+            return _FakeQueryJob(self._job_rows)
+        if "INFORMATION_SCHEMA.COLUMNS" in sql:
+            if self._raise_on_schema_query is not None:
+                raise self._raise_on_schema_query
+            return _FakeQueryJob(self._column_rows)
+        # probe SELECT 1, test_connection SELECT 1, etc.
+        return _FakeQueryJob([])
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _make_adapter(
+    *,
+    project_id: str = "acme-project",
+    location: str = "us",
+    observation_cursor: dict[str, object] | None = None,
+) -> PersistedSourceAdapter:
+    return PersistedSourceAdapter(
+        id="00000000-0000-0000-0000-000000000002",
+        key="bq-test",
+        display_name="BQ Test",
+        kind=SourceAdapterKind.BIGQUERY,
+        target_id="prod",
+        status=SourceAdapterStatus.READY,
+        config=BigQueryAdapterConfig(
+            service_account_secret=ExternalSecretRef(provider="env", reference="BQ_SA_JSON"),
+            project_id=project_id,
+            location=location,
+        ),
+        observation_cursor=observation_cursor,
+    )
+
+
+def _make_bq_adapter(client: _FakeBQClient) -> BigQueryAdapter:
+    def resolve_secret(secret: Any) -> str:
+        return '{"type":"service_account"}'
+
+    def client_factory(project_id: str, sa_json: str | None) -> _FakeBQClient:
+        return client
+
+    return BigQueryAdapter(resolve_secret=resolve_secret, client_factory=client_factory)
+
+
+# ---------------------------------------------------------------------------
+# declared_capabilities
+# ---------------------------------------------------------------------------
+
+
+def test_declared_capabilities_includes_discover_schema_traffic() -> None:
+    adapter = BigQueryAdapter(resolve_secret=lambda s: "", client_factory=lambda p, j: None)
+    caps = adapter.declared_capabilities
+    assert AdapterCapability.DISCOVER in caps
+    assert AdapterCapability.SCHEMA in caps
+    assert AdapterCapability.TRAFFIC in caps
+
+
+def test_declared_capabilities_excludes_definitions_lineage_orchestration() -> None:
+    adapter = BigQueryAdapter(resolve_secret=lambda s: "", client_factory=lambda p, j: None)
+    caps = adapter.declared_capabilities
+    assert AdapterCapability.DEFINITIONS not in caps
+    assert AdapterCapability.LINEAGE not in caps
+    assert AdapterCapability.ORCHESTRATION not in caps
+
+
+# ---------------------------------------------------------------------------
+# probe() — happy path
+# ---------------------------------------------------------------------------
+
+
+def test_probe_returns_all_declared_capabilities() -> None:
+    client = _FakeBQClient()
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    results = asyncio.run(bq.probe(persisted))
+    caps = {r.capability for r in results}
+    assert AdapterCapability.DISCOVER in caps
+    assert AdapterCapability.SCHEMA in caps
+    assert AdapterCapability.TRAFFIC in caps
+
+
+def test_probe_all_available_when_no_errors() -> None:
+    client = _FakeBQClient()
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    results = asyncio.run(bq.probe(persisted))
+    for r in results:
+        assert r.available is True
+        assert r.permissions_missing == ()
+
+
+def test_probe_scope_is_region() -> None:
+    client = _FakeBQClient()
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    results = asyncio.run(bq.probe(persisted))
+    for r in results:
+        assert r.scope == ExtractionScope.REGION
+        assert r.scope_context is not None
+        assert r.scope_context.identifiers["project"] == "acme-project"
+        assert r.scope_context.identifiers["location"] == "us"
+
+
+# ---------------------------------------------------------------------------
+# probe() — permission failure detection
+# ---------------------------------------------------------------------------
+
+
+def test_probe_discover_unavailable_on_permission_error() -> None:
+    client = _FakeBQClient(
+        raise_on_list_datasets=PermissionError("403 PermissionDenied: bigquery.datasets.list")
+    )
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    results = asyncio.run(bq.probe(persisted))
+    discover_result = next(r for r in results if r.capability == AdapterCapability.DISCOVER)
+    assert discover_result.available is False
+    assert len(discover_result.permissions_missing) > 0
+    assert discover_result.message is not None
+
+
+def test_probe_schema_unavailable_on_permission_error() -> None:
+    client = _FakeBQClient(
+        raise_on_schema_query=PermissionError("403 PermissionDenied: bigquery.tables.getData")
+    )
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    results = asyncio.run(bq.probe(persisted))
+    schema_result = next(r for r in results if r.capability == AdapterCapability.SCHEMA)
+    assert schema_result.available is False
+    assert len(schema_result.permissions_missing) > 0
+
+
+def test_probe_traffic_unavailable_on_permission_error() -> None:
+    client = _FakeBQClient(
+        raise_on_jobs_query=PermissionError("403 PermissionDenied: bigquery.jobs.listAll")
+    )
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    results = asyncio.run(bq.probe(persisted))
+    traffic_result = next(r for r in results if r.capability == AdapterCapability.TRAFFIC)
+    assert traffic_result.available is False
+    assert "bigquery.jobs.listAll" in traffic_result.permissions_missing
+
+
+def test_probe_subset_capabilities() -> None:
+    """When capabilities arg is provided, only probe those capabilities."""
+    client = _FakeBQClient()
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    results = asyncio.run(
+        bq.probe(persisted, capabilities=frozenset({AdapterCapability.DISCOVER}))
+    )
+    assert len(results) == 1
+    assert results[0].capability == AdapterCapability.DISCOVER
+
+
+# ---------------------------------------------------------------------------
+# discover()
+# ---------------------------------------------------------------------------
+
+
+def test_discover_returns_discovery_snapshot() -> None:
+    client = _FakeBQClient(datasets=["analytics", "raw", "staging"])
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    snapshot = asyncio.run(bq.discover(persisted))
+    assert isinstance(snapshot, DiscoverySnapshot)
+
+
+def test_discover_returns_datasets_as_containers() -> None:
+    client = _FakeBQClient(datasets=["analytics", "raw", "staging"])
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    snapshot = asyncio.run(bq.discover(persisted))
+    assert len(snapshot.containers) == 3
+    container_ids = {c.container_id for c in snapshot.containers}
+    assert "acme-project.analytics" in container_ids
+    assert "acme-project.raw" in container_ids
+    assert "acme-project.staging" in container_ids
+
+
+def test_discover_container_type_is_dataset() -> None:
+    client = _FakeBQClient(datasets=["my_dataset"])
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    snapshot = asyncio.run(bq.discover(persisted))
+    assert snapshot.containers[0].container_type == "dataset"
+
+
+def test_discover_container_location_matches_config() -> None:
+    client = _FakeBQClient(datasets=["ds"])
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter(location="eu")
+    snapshot = asyncio.run(bq.discover(persisted))
+    assert snapshot.containers[0].location == "eu"
+
+
+def test_discover_meta_capability_is_discover() -> None:
+    client = _FakeBQClient(datasets=["ds"])
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    snapshot = asyncio.run(bq.discover(persisted))
+    assert snapshot.meta.capability == AdapterCapability.DISCOVER
+    assert snapshot.meta.adapter_key == "bq-test"
+    assert snapshot.meta.row_count == 1
+
+
+def test_discover_empty_project() -> None:
+    client = _FakeBQClient(datasets=[])
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    snapshot = asyncio.run(bq.discover(persisted))
+    assert snapshot.containers == ()
+    assert snapshot.meta.row_count == 0
+
+
+# ---------------------------------------------------------------------------
+# extract_schema()
+# ---------------------------------------------------------------------------
+
+
+def test_extract_schema_returns_schema_snapshot_v2() -> None:
+    column_rows = [
+        {
+            "table_schema": "analytics",
+            "table_name": "events",
+            "column_name": "id",
+            "data_type": "INT64",
+            "is_nullable": "NO",
+            "ordinal_position": 1,
+            "is_partitioning_column": "NO",
+            "clustering_ordinal_position": None,
+        },
+    ]
+    client = _FakeBQClient(column_rows=column_rows)
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    snapshot = asyncio.run(bq.extract_schema(persisted))
+    assert isinstance(snapshot, SchemaSnapshotV2)
+    assert snapshot.meta.capability == AdapterCapability.SCHEMA
+
+
+def test_extract_schema_converts_columns() -> None:
+    column_rows = [
+        {
+            "table_schema": "ds",
+            "table_name": "users",
+            "column_name": "email",
+            "data_type": "STRING",
+            "is_nullable": "YES",
+            "ordinal_position": 1,
+            "is_partitioning_column": "NO",
+            "clustering_ordinal_position": None,
+        },
+    ]
+    client = _FakeBQClient(column_rows=column_rows)
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    snapshot = asyncio.run(bq.extract_schema(persisted))
+    assert len(snapshot.objects) == 1
+    obj = snapshot.objects[0]
+    assert obj.schema_name == "ds"
+    assert obj.object_name == "users"
+    assert len(obj.columns) == 1
+    assert obj.columns[0].name == "email"
+    assert obj.columns[0].data_type == "STRING"
+    assert obj.columns[0].is_nullable is True
+
+
+# ---------------------------------------------------------------------------
+# extract_traffic()
+# ---------------------------------------------------------------------------
+
+
+def test_extract_traffic_returns_traffic_extraction_result() -> None:
+    now = datetime.now(tz=UTC)
+    job_rows = [
+        {
+            "job_id": "job-1",
+            "creation_time": now,
+            "end_time": now,
+            "user_email": "alice@example.com",
+            "labels": {},
+            "query": "SELECT * FROM ds.users",
+            "referenced_tables": [],
+        }
+    ]
+    client = _FakeBQClient(job_rows=job_rows)
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    result = asyncio.run(bq.extract_traffic(persisted))
+    assert isinstance(result, TrafficExtractionResult)
+    assert result.meta.capability == AdapterCapability.TRAFFIC
+    assert len(result.events) == 1
+
+
+def test_extract_traffic_passes_observation_cursor() -> None:
+    """observation_cursor from v1 is forwarded to v2 TrafficExtractionResult."""
+    client = _FakeBQClient(job_rows=[])
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    result = asyncio.run(bq.extract_traffic(persisted))
+    # No events → no cursor
+    assert result.observation_cursor is None
+
+
+# ---------------------------------------------------------------------------
+# NotImplementedError methods
+# ---------------------------------------------------------------------------
+
+
+def test_extract_definitions_raises() -> None:
+    adapter = BigQueryAdapter(resolve_secret=lambda s: "", client_factory=lambda p, j: None)
+    persisted = _make_adapter()
+    with pytest.raises(NotImplementedError, match="DEFINITIONS"):
+        asyncio.run(adapter.extract_definitions(persisted))
+
+
+def test_extract_lineage_raises() -> None:
+    adapter = BigQueryAdapter(resolve_secret=lambda s: "", client_factory=lambda p, j: None)
+    persisted = _make_adapter()
+    with pytest.raises(NotImplementedError, match="LINEAGE"):
+        asyncio.run(adapter.extract_lineage(persisted))
+
+
+def test_extract_orchestration_raises() -> None:
+    adapter = BigQueryAdapter(resolve_secret=lambda s: "", client_factory=lambda p, j: None)
+    persisted = _make_adapter()
+    with pytest.raises(NotImplementedError, match="ORCHESTRATION"):
+        asyncio.run(adapter.extract_orchestration(persisted))
+
+
+# ---------------------------------------------------------------------------
+# v1 backward compatibility
+# ---------------------------------------------------------------------------
+
+
+def test_v1_test_connection_still_works() -> None:
+    """v1 test_connection must continue to work unchanged."""
+    client = _FakeBQClient(datasets=["ds1", "ds2"])
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    result = asyncio.run(bq.test_connection(persisted))
+    assert result.success is True
+    assert "acme-project" in result.message
+
+
+def test_v1_introspect_schema_still_works() -> None:
+    """v1 introspect_schema must return a v1 SchemaSnapshot."""
+    from alma_connectors.source_adapter import SchemaSnapshot
+
+    column_rows = [
+        {
+            "table_schema": "raw",
+            "table_name": "orders",
+            "column_name": "order_id",
+            "data_type": "INT64",
+            "is_nullable": "NO",
+            "ordinal_position": 1,
+            "is_partitioning_column": "NO",
+            "clustering_ordinal_position": None,
+        },
+    ]
+    client = _FakeBQClient(column_rows=column_rows)
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    snapshot = asyncio.run(bq.introspect_schema(persisted))
+    assert isinstance(snapshot, SchemaSnapshot)
+    assert len(snapshot.objects) == 1
+    assert snapshot.objects[0].object_name == "orders"
+
+
+def test_v1_observe_traffic_still_works() -> None:
+    """v1 observe_traffic must return a v1 TrafficObservationResult."""
+    from alma_connectors.source_adapter import TrafficObservationResult
+
+    now = datetime.now(tz=UTC)
+    job_rows = [
+        {
+            "job_id": "job-99",
+            "creation_time": now,
+            "end_time": now,
+            "user_email": "bob@example.com",
+            "labels": {},
+            "query": "SELECT 1",
+            "referenced_tables": [],
+        }
+    ]
+    client = _FakeBQClient(job_rows=job_rows)
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    result = asyncio.run(bq.observe_traffic(persisted))
+    assert isinstance(result, TrafficObservationResult)
+    assert len(result.events) == 1

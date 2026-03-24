@@ -32,6 +32,21 @@ from alma_connectors.source_adapter import (
     SourceTableSchema,
     TrafficObservationResult,
 )
+from alma_connectors.source_adapter_v2 import (
+    AdapterCapability,
+    CapabilityProbeResult,
+    ColumnSchema as V2ColumnSchema,
+    DiscoveredContainer,
+    DiscoverySnapshot,
+    ExtractionMeta,
+    ExtractionScope,
+    SchemaObject,
+    SchemaObjectKind as V2SchemaObjectKind,
+    SchemaSnapshotV2,
+    ScopeContext,
+    SourceAdapterKindV2,
+    TrafficExtractionResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -238,6 +253,29 @@ def _extract_tables_from_sql(sql: str) -> list[dict[str, str]]:
             _add(ref)
 
     return tables
+
+
+def _get_dataset_id(ds: Any) -> str:
+    """Extract dataset_id string from a BQ DatasetListItem (or any object with .dataset_id)."""
+    val = getattr(ds, "dataset_id", None)
+    if isinstance(val, str):
+        return val.strip()
+    return ""
+
+
+def _missing_permissions_from_exc(exc: Exception) -> tuple[str, ...]:
+    """Infer missing BigQuery IAM permissions from an exception message."""
+    msg = str(exc)
+    lmsg = msg.lower()
+    if "403" not in msg and "permissiondenied" not in lmsg and "permission" not in lmsg:
+        return ()
+    if "jobs" in lmsg:
+        return ("bigquery.jobs.listAll",)
+    if "information_schema" in lmsg or "columns" in lmsg:
+        return ("bigquery.tables.getData",)
+    if "dataset" in lmsg:
+        return ("bigquery.datasets.list",)
+    return ("bigquery.dataViewer",)
 
 
 class BigQueryAdapter(SourceAdapter):
@@ -682,6 +720,240 @@ class BigQueryAdapter(SourceAdapter):
                 duration_ms=duration_ms,
                 error_message=str(exc),
             )
+
+    # ------------------------------------------------------------------
+    # SourceAdapterV2 protocol
+    # ------------------------------------------------------------------
+
+    @property
+    def declared_capabilities(self) -> frozenset[AdapterCapability]:
+        return frozenset({AdapterCapability.DISCOVER, AdapterCapability.SCHEMA, AdapterCapability.TRAFFIC})
+
+    async def probe(
+        self,
+        adapter: PersistedSourceAdapter,
+        capabilities: frozenset[AdapterCapability] | None = None,
+    ) -> tuple[CapabilityProbeResult, ...]:
+        """Probe which capabilities are actually available.
+
+        - DISCOVER: lightweight datasets.list call
+        - SCHEMA: SELECT 1 from INFORMATION_SCHEMA.COLUMNS
+        - TRAFFIC: SELECT 1 from INFORMATION_SCHEMA.JOBS_BY_PROJECT
+        """
+        caps = capabilities if capabilities is not None else self.declared_capabilities
+        config = self._get_config(adapter)
+        project_id, sa_json = self._credentials(adapter)
+        client = self._get_client(project_id, sa_json)
+        bigquery = _get_bigquery_module()
+
+        scope_ctx = ScopeContext(
+            scope=ExtractionScope.REGION,
+            identifiers={"project": project_id, "location": config.location},
+        )
+        results: list[CapabilityProbeResult] = []
+
+        if AdapterCapability.DISCOVER in caps:
+            try:
+                list(client.list_datasets())
+                results.append(CapabilityProbeResult(
+                    capability=AdapterCapability.DISCOVER,
+                    available=True,
+                    scope=ExtractionScope.REGION,
+                    scope_context=scope_ctx,
+                ))
+            except Exception as exc:
+                results.append(CapabilityProbeResult(
+                    capability=AdapterCapability.DISCOVER,
+                    available=False,
+                    scope=ExtractionScope.REGION,
+                    scope_context=scope_ctx,
+                    message=str(exc),
+                    permissions_missing=_missing_permissions_from_exc(exc),
+                ))
+
+        if AdapterCapability.SCHEMA in caps:
+            probe_sql = (
+                f"SELECT 1 FROM `{project_id}`.`region-{config.location}`"
+                f".INFORMATION_SCHEMA.COLUMNS LIMIT 1"
+            )
+            try:
+                client.query(probe_sql, job_config=bigquery.QueryJobConfig()).result()
+                results.append(CapabilityProbeResult(
+                    capability=AdapterCapability.SCHEMA,
+                    available=True,
+                    scope=ExtractionScope.REGION,
+                    scope_context=scope_ctx,
+                ))
+            except Exception as exc:
+                results.append(CapabilityProbeResult(
+                    capability=AdapterCapability.SCHEMA,
+                    available=False,
+                    scope=ExtractionScope.REGION,
+                    scope_context=scope_ctx,
+                    message=str(exc),
+                    permissions_missing=_missing_permissions_from_exc(exc),
+                ))
+
+        if AdapterCapability.TRAFFIC in caps:
+            jobs_view = (
+                f"`{project_id}`.`region-{config.location}`.INFORMATION_SCHEMA.JOBS_BY_PROJECT"
+            )
+            probe_sql = f"SELECT 1 FROM {jobs_view} LIMIT 1"
+            try:
+                client.query(probe_sql, job_config=bigquery.QueryJobConfig()).result()
+                results.append(CapabilityProbeResult(
+                    capability=AdapterCapability.TRAFFIC,
+                    available=True,
+                    scope=ExtractionScope.REGION,
+                    scope_context=scope_ctx,
+                ))
+            except Exception as exc:
+                results.append(CapabilityProbeResult(
+                    capability=AdapterCapability.TRAFFIC,
+                    available=False,
+                    scope=ExtractionScope.REGION,
+                    scope_context=scope_ctx,
+                    message=str(exc),
+                    permissions_missing=_missing_permissions_from_exc(exc),
+                ))
+
+        return tuple(results)
+
+    async def discover(self, adapter: PersistedSourceAdapter) -> DiscoverySnapshot:
+        """DISCOVER: list all datasets in the project as DiscoveredContainers."""
+        config = self._get_config(adapter)
+        project_id, sa_json = self._credentials(adapter)
+        client = self._get_client(project_id, sa_json)
+
+        started_at = time.perf_counter()
+        captured_at = datetime.now(tz=UTC)
+
+        datasets = list(client.list_datasets())
+        containers = tuple(
+            DiscoveredContainer(
+                container_id=f"{project_id}.{_get_dataset_id(ds)}",
+                container_type="dataset",
+                display_name=_get_dataset_id(ds),
+                location=config.location,
+                metadata={"project_id": project_id},
+            )
+            for ds in datasets
+            if _get_dataset_id(ds)
+        )
+
+        duration_ms = (time.perf_counter() - started_at) * 1000.0
+        scope_ctx = ScopeContext(
+            scope=ExtractionScope.REGION,
+            identifiers={"project": project_id, "location": config.location},
+        )
+        meta = ExtractionMeta(
+            adapter_key=adapter.key,
+            adapter_kind=SourceAdapterKindV2.BIGQUERY,
+            capability=AdapterCapability.DISCOVER,
+            scope_context=scope_ctx,
+            captured_at=captured_at,
+            duration_ms=duration_ms,
+            row_count=len(containers),
+        )
+        return DiscoverySnapshot(meta=meta, containers=containers)
+
+    async def extract_schema(self, adapter: PersistedSourceAdapter) -> SchemaSnapshotV2:
+        """SCHEMA: wrap introspect_schema() output into v2 SchemaSnapshotV2."""
+        started_at = time.perf_counter()
+        captured_at = datetime.now(tz=UTC)
+
+        v1_snapshot = await self.introspect_schema(adapter)
+
+        objects = tuple(
+            SchemaObject(
+                schema_name=tbl.schema_name,
+                object_name=tbl.object_name,
+                kind=V2SchemaObjectKind(tbl.object_kind.value),
+                columns=tuple(
+                    V2ColumnSchema(
+                        name=col.name,
+                        data_type=col.data_type,
+                        is_nullable=col.is_nullable,
+                    )
+                    for col in tbl.columns
+                ),
+                row_count=tbl.row_count,
+                size_bytes=tbl.size_bytes,
+                partition_column=tbl.partition_column,
+                clustering_columns=tbl.clustering_columns,
+            )
+            for tbl in v1_snapshot.objects
+        )
+
+        config = self._get_config(adapter)
+        project_id, _ = self._credentials(adapter)
+        duration_ms = (time.perf_counter() - started_at) * 1000.0
+        scope_ctx = ScopeContext(
+            scope=ExtractionScope.REGION,
+            identifiers={"project": project_id, "location": config.location},
+        )
+        meta = ExtractionMeta(
+            adapter_key=adapter.key,
+            adapter_kind=SourceAdapterKindV2.BIGQUERY,
+            capability=AdapterCapability.SCHEMA,
+            scope_context=scope_ctx,
+            captured_at=captured_at,
+            duration_ms=duration_ms,
+            row_count=len(objects),
+        )
+        return SchemaSnapshotV2(meta=meta, objects=objects)
+
+    async def extract_traffic(
+        self,
+        adapter: PersistedSourceAdapter,
+        *,
+        since: datetime | None = None,
+    ) -> TrafficExtractionResult:
+        """TRAFFIC: wrap observe_traffic() output into v2 TrafficExtractionResult."""
+        started_at = time.perf_counter()
+        captured_at = datetime.now(tz=UTC)
+
+        v1_result = await self.observe_traffic(adapter, since=since)
+
+        config = self._get_config(adapter)
+        project_id, _ = self._credentials(adapter)
+        duration_ms = (time.perf_counter() - started_at) * 1000.0
+        scope_ctx = ScopeContext(
+            scope=ExtractionScope.REGION,
+            identifiers={"project": project_id, "location": config.location},
+        )
+        meta = ExtractionMeta(
+            adapter_key=adapter.key,
+            adapter_kind=SourceAdapterKindV2.BIGQUERY,
+            capability=AdapterCapability.TRAFFIC,
+            scope_context=scope_ctx,
+            captured_at=captured_at,
+            duration_ms=duration_ms,
+            row_count=len(v1_result.events),
+        )
+        return TrafficExtractionResult(
+            meta=meta,
+            events=v1_result.events,
+            observation_cursor=v1_result.observation_cursor,
+        )
+
+    async def extract_definitions(self, adapter: PersistedSourceAdapter) -> None:  # type: ignore[override]
+        raise NotImplementedError(
+            "BigQueryAdapter does not support DEFINITIONS extraction. "
+            "DDL retrieval via INFORMATION_SCHEMA.TABLES.ddl is planned for Phase 2."
+        )
+
+    async def extract_lineage(self, adapter: PersistedSourceAdapter) -> None:  # type: ignore[override]
+        raise NotImplementedError(
+            "BigQueryAdapter does not support LINEAGE extraction. "
+            "Lineage is inferred from TRAFFIC events by the scanner as a post-processing step."
+        )
+
+    async def extract_orchestration(self, adapter: PersistedSourceAdapter) -> None:  # type: ignore[override]
+        raise NotImplementedError(
+            "BigQueryAdapter does not support ORCHESTRATION extraction. "
+            "BigQuery has no native orchestration; use AirflowAdapter for DAG metadata."
+        )
 
     def get_setup_instructions(self) -> SetupInstructions:
         """Return operator guidance for enabling a BigQuery source adapter."""
