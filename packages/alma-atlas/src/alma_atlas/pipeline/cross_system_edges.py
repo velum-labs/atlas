@@ -8,6 +8,7 @@ into the Atlas store as ``Edge`` objects with ``kind="schema_match"``.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from alma_analysis.edge_discovery import EdgeDiscoveryConfig, EdgeDiscoveryEngine
@@ -16,6 +17,8 @@ from alma_atlas_store.edge_repository import Edge, EdgeRepository
 if TYPE_CHECKING:
     from alma_atlas_store.db import Database
     from alma_connectors.source_adapter import SchemaSnapshot
+
+logger = logging.getLogger(__name__)
 
 
 def discover_cross_system_edges(
@@ -72,7 +75,16 @@ def discover_cross_system_edges(
                 config=pair_config,
             )
 
-            data_edges = engine.discover_edges(snapshots[source_id_a], snapshots[source_id_b])
+            try:
+                data_edges = engine.discover_edges(snapshots[source_id_a], snapshots[source_id_b])
+            except Exception as exc:
+                logger.warning(
+                    "Edge discovery failed for %s <> %s: %s",
+                    source_id_a,
+                    source_id_b,
+                    exc,
+                )
+                continue
 
             for data_edge in data_edges:
                 edge_discovery_meta = data_edge.transport.metadata.get("edge_discovery", {})

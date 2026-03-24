@@ -44,8 +44,8 @@ class ScanAllResult:
     cross_system_edge_count: int = 0
 
 
-def run_scan(source: SourceConfig, cfg: AtlasConfig) -> ScanResult:
-    """Run a full scan for a single registered source.
+async def run_scan_async(source: SourceConfig, cfg: AtlasConfig) -> ScanResult:
+    """Run a full scan for a single registered source (async implementation).
 
     Args:
         source: The source configuration (kind, id, params).
@@ -64,7 +64,7 @@ def run_scan(source: SourceConfig, cfg: AtlasConfig) -> ScanResult:
         return ScanResult(source_id=source.id, error=str(exc))
 
     try:
-        snapshot = asyncio.run(adapter.introspect_schema(persisted))
+        snapshot = await adapter.introspect_schema(persisted)
     except Exception as exc:
         return ScanResult(source_id=source.id, error=f"Schema introspection failed: {exc}")
 
@@ -104,7 +104,7 @@ def run_scan(source: SourceConfig, cfg: AtlasConfig) -> ScanResult:
                     dep_edge_count += 1
 
         try:
-            traffic = asyncio.run(adapter.observe_traffic(persisted))
+            traffic = await adapter.observe_traffic(persisted)
         except Exception as exc:
             return ScanResult(
                 source_id=source.id,
@@ -116,7 +116,7 @@ def run_scan(source: SourceConfig, cfg: AtlasConfig) -> ScanResult:
 
         edge_count = stitch(traffic, db, source_id=source.id, source_kind=source.kind) + dep_edge_count
 
-    _run_enforcement(snapshot, source.id, cfg)
+        _run_enforcement(snapshot, source.id, db)
 
     return ScanResult(
         source_id=source.id,
@@ -126,7 +126,20 @@ def run_scan(source: SourceConfig, cfg: AtlasConfig) -> ScanResult:
     )
 
 
-def _run_enforcement(snapshot: SchemaSnapshot, source_id: str, cfg: AtlasConfig) -> None:
+def run_scan(source: SourceConfig, cfg: AtlasConfig) -> ScanResult:
+    """Sync entry point for a full scan — safe from both sync and async contexts.
+
+    Args:
+        source: The source configuration (kind, id, params).
+        cfg:    Atlas configuration (used to open the SQLite store).
+
+    Returns:
+        A ScanResult summarising assets written and edges derived.
+    """
+    return asyncio.run(run_scan_async(source, cfg))
+
+
+def _run_enforcement(snapshot: SchemaSnapshot, source_id: str, db: object) -> None:
     """Run drift detection + enforcement for any assets that have contracts.
 
     Silently skips assets without contracts.  Enforcement violations are
@@ -134,55 +147,58 @@ def _run_enforcement(snapshot: SchemaSnapshot, source_id: str, cfg: AtlasConfig)
     the result is merely logged (shadow), surfaced (warn), or blocking
     (enforce — currently logged but not raising, as the pipeline caller is
     responsible for acting on ScanResult.warnings).
+
+    Args:
+        snapshot:  Schema snapshot from the adapter.
+        source_id: Source identifier for asset ID construction.
+        db:        Open Database connection (shared from the caller).
     """
     import logging
 
     from alma_atlas.enforcement.drift import DriftDetector
     from alma_atlas.enforcement.engine import EnforcementEngine
     from alma_atlas_store.contract_repository import ContractRepository
-    from alma_atlas_store.db import Database
     from alma_atlas_store.schema_repository import ColumnInfo, SchemaRepository
     from alma_atlas_store.schema_repository import SchemaSnapshot as StoreSnapshot
 
     log = logging.getLogger(__name__)
     detector = DriftDetector()
 
-    with Database(cfg.db_path) as db:  # type: ignore[arg-type]
-        contract_repo = ContractRepository(db)
-        schema_repo = SchemaRepository(db)
-        engine = EnforcementEngine(db)
+    contract_repo = ContractRepository(db)
+    schema_repo = SchemaRepository(db)
+    engine = EnforcementEngine(db)
 
-        for obj in snapshot.objects:
-            asset_id = f"{source_id}::{obj.schema_name}.{obj.object_name}"
-            contracts = contract_repo.list_for_asset(asset_id)
-            if not contracts:
-                continue
+    for obj in snapshot.objects:
+        asset_id = f"{source_id}::{obj.schema_name}.{obj.object_name}"
+        contracts = contract_repo.list_for_asset(asset_id)
+        if not contracts:
+            continue
 
-            previous = schema_repo.get_latest(asset_id)
-            # Build current StoreSnapshot from the connector SchemaSnapshot object.
-            current_cols = [
-                ColumnInfo(
-                    name=c.name,
-                    type=getattr(c, "data_type", None) or getattr(c, "type", "unknown"),
-                    nullable=getattr(c, "nullable", True),
+        previous = schema_repo.get_latest(asset_id)
+        # Build current StoreSnapshot from the connector SchemaSnapshot object.
+        current_cols = [
+            ColumnInfo(
+                name=c.name,
+                type=getattr(c, "data_type", None) or getattr(c, "type", "unknown"),
+                nullable=getattr(c, "nullable", True),
+            )
+            for c in (obj.columns or [])
+        ]
+        current = StoreSnapshot(asset_id=asset_id, columns=current_cols)
+
+        report = detector.detect(asset_id, previous, current)
+        if not report.has_violations:
+            continue
+
+        for contract in contracts:
+            result = engine.enforce(report, contract.mode)
+            if result.blocked:
+                log.warning(
+                    "[enforcement/enforce] Pipeline BLOCKED for asset %s — "
+                    "%d error violation(s) detected.",
+                    asset_id,
+                    report.error_count,
                 )
-                for c in (obj.columns or [])
-            ]
-            current = StoreSnapshot(asset_id=asset_id, columns=current_cols)
-
-            report = detector.detect(asset_id, previous, current)
-            if not report.has_violations:
-                continue
-
-            for contract in contracts:
-                result = engine.enforce(report, contract.mode)
-                if result.blocked:
-                    log.warning(
-                        "[enforcement/enforce] Pipeline BLOCKED for asset %s — "
-                        "%d error violation(s) detected.",
-                        asset_id,
-                        report.error_count,
-                    )
 
 
 def run_scan_all(sources: list[SourceConfig], cfg: AtlasConfig) -> ScanAllResult:
@@ -372,4 +388,107 @@ def _build_adapter(source: SourceConfig):  # type: ignore[return]
         )
         return SnowflakeAdapter(resolve_secret=_resolve_env), persisted
 
-    raise ValueError(f"Unknown source kind: {kind!r}. Supported: bigquery, dbt, postgres, snowflake")
+    if kind == "airflow":
+        from alma_connectors.adapters.airflow import AirflowAdapter
+        from alma_connectors.source_adapter_v2 import SourceAdapterKindV2
+
+        auth_token: str | None = source.params.get("auth_token") or (
+            os.environ.get(source.params["auth_token_env"])
+            if "auth_token_env" in source.params
+            else os.environ.get("AIRFLOW_AUTH_TOKEN") or None
+        )
+        adapter = AirflowAdapter(
+            base_url=source.params.get("base_url", ""),
+            auth_token=auth_token,
+            username=source.params.get("username"),
+            password=source.params.get("password"),
+        )
+        persisted = PersistedSourceAdapter(
+            id=adapter_id,
+            key=adapter_key,
+            display_name=source.id,
+            kind=SourceAdapterKindV2.AIRFLOW,  # type: ignore[arg-type]
+            target_id=source.id,
+            status=SourceAdapterStatus.READY,
+            config=None,  # type: ignore[arg-type]
+        )
+        return adapter, persisted
+
+    if kind == "looker":
+        from alma_connectors.adapters.looker import LookerAdapter
+        from alma_connectors.source_adapter_v2 import SourceAdapterKindV2
+
+        client_id = source.params.get("client_id") or os.environ.get(
+            source.params.get("client_id_env", "LOOKER_CLIENT_ID"), ""
+        )
+        client_secret = source.params.get("client_secret") or os.environ.get(
+            source.params.get("client_secret_env", "LOOKER_CLIENT_SECRET"), ""
+        )
+        adapter = LookerAdapter(
+            instance_url=source.params.get("instance_url", ""),
+            client_id=client_id,
+            client_secret=client_secret,
+            port=int(source.params.get("port", 19999)),
+        )
+        persisted = PersistedSourceAdapter(
+            id=adapter_id,
+            key=adapter_key,
+            display_name=source.id,
+            kind=SourceAdapterKindV2.LOOKER,  # type: ignore[arg-type]
+            target_id=source.id,
+            status=SourceAdapterStatus.READY,
+            config=None,  # type: ignore[arg-type]
+        )
+        return adapter, persisted
+
+    if kind == "fivetran":
+        from alma_connectors.adapters.fivetran import FivetranAdapter
+        from alma_connectors.source_adapter_v2 import SourceAdapterKindV2
+
+        api_key = source.params.get("api_key") or os.environ.get(
+            source.params.get("api_key_env", "FIVETRAN_API_KEY"), ""
+        )
+        api_secret = source.params.get("api_secret") or os.environ.get(
+            source.params.get("api_secret_env", "FIVETRAN_API_SECRET"), ""
+        )
+        adapter = FivetranAdapter(
+            api_key=api_key,
+            api_secret=api_secret,
+        )
+        persisted = PersistedSourceAdapter(
+            id=adapter_id,
+            key=adapter_key,
+            display_name=source.id,
+            kind=SourceAdapterKindV2.FIVETRAN,  # type: ignore[arg-type]
+            target_id=source.id,
+            status=SourceAdapterStatus.READY,
+            config=None,  # type: ignore[arg-type]
+        )
+        return adapter, persisted
+
+    if kind == "metabase":
+        from alma_connectors.adapters.metabase import MetabaseAdapter
+        from alma_connectors.source_adapter_v2 import SourceAdapterKindV2
+
+        api_key_mb: str | None = source.params.get("api_key") or os.environ.get(
+            source.params.get("api_key_env", "METABASE_API_KEY")
+        ) or None
+        adapter = MetabaseAdapter(
+            instance_url=source.params.get("instance_url", ""),
+            api_key=api_key_mb,
+            username=source.params.get("username"),
+            password=source.params.get("password"),
+        )
+        persisted = PersistedSourceAdapter(
+            id=adapter_id,
+            key=adapter_key,
+            display_name=source.id,
+            kind=SourceAdapterKindV2.METABASE,  # type: ignore[arg-type]
+            target_id=source.id,
+            status=SourceAdapterStatus.READY,
+            config=None,  # type: ignore[arg-type]
+        )
+        return adapter, persisted
+
+    _SUPPORTED_KINDS = {"airflow", "bigquery", "dbt", "fivetran", "looker", "metabase", "postgres", "snowflake"}
+    raise ValueError(f"Unknown source kind: {kind!r}. Supported: {', '.join(sorted(_SUPPORTED_KINDS))}")
