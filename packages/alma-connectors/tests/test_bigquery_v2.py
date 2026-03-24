@@ -23,6 +23,7 @@ from alma_connectors.source_adapter_v2 import (
     DefinitionSnapshot,
     DiscoverySnapshot,
     ExtractionScope,
+    SchemaObjectKind as V2SchemaObjectKind,
     SchemaSnapshotV2,
     TrafficExtractionResult,
 )
@@ -60,10 +61,15 @@ class _FakeBQClient:
         view_rows: list[dict[str, Any]] | None = None,
         routine_rows: list[dict[str, Any]] | None = None,
         table_ddl_rows: list[dict[str, Any]] | None = None,
+        model_rows: list[dict[str, Any]] | None = None,
+        options_rows: list[dict[str, Any]] | None = None,
+        parameter_rows: list[dict[str, Any]] | None = None,
         raise_on_list_datasets: Exception | None = None,
         raise_on_schema_query: Exception | None = None,
         raise_on_jobs_query: Exception | None = None,
         raise_on_definitions_query: Exception | None = None,
+        raise_on_routines_query: Exception | None = None,
+        raise_on_models_query: Exception | None = None,
     ) -> None:
         self._datasets = [_FakeDataset(d) for d in (datasets if datasets is not None else ["ds_a", "ds_b"])]
         self._column_rows = column_rows or []
@@ -72,10 +78,15 @@ class _FakeBQClient:
         self._view_rows = view_rows or []
         self._routine_rows = routine_rows or []
         self._table_ddl_rows = table_ddl_rows or []
+        self._model_rows = model_rows or []
+        self._options_rows = options_rows or []
+        self._parameter_rows = parameter_rows or []
         self._raise_on_list_datasets = raise_on_list_datasets
         self._raise_on_schema_query = raise_on_schema_query
         self._raise_on_jobs_query = raise_on_jobs_query
         self._raise_on_definitions_query = raise_on_definitions_query
+        self._raise_on_routines_query = raise_on_routines_query
+        self._raise_on_models_query = raise_on_models_query
         self.queries_issued: list[str] = []
 
     def list_datasets(self) -> list[_FakeDataset]:
@@ -99,10 +110,20 @@ class _FakeBQClient:
             if self._raise_on_definitions_query is not None:
                 raise self._raise_on_definitions_query
             return _FakeQueryJob(self._view_rows)
+        if "INFORMATION_SCHEMA.PARAMETERS" in sql:
+            return _FakeQueryJob(self._parameter_rows)
         if "INFORMATION_SCHEMA.ROUTINES" in sql:
+            if self._raise_on_routines_query is not None:
+                raise self._raise_on_routines_query
             if self._raise_on_definitions_query is not None:
                 raise self._raise_on_definitions_query
             return _FakeQueryJob(self._routine_rows)
+        if "INFORMATION_SCHEMA.TABLE_OPTIONS" in sql:
+            return _FakeQueryJob(self._options_rows)
+        if "INFORMATION_SCHEMA.MODELS" in sql:
+            if self._raise_on_models_query is not None:
+                raise self._raise_on_models_query
+            return _FakeQueryJob(self._model_rows)
         if "INFORMATION_SCHEMA.TABLES" in sql:
             return _FakeQueryJob(self._table_ddl_rows)
         # probe SELECT 1, test_connection SELECT 1, etc.
@@ -370,6 +391,131 @@ def test_extract_schema_converts_columns() -> None:
     assert obj.columns[0].name == "email"
     assert obj.columns[0].data_type == "STRING"
     assert obj.columns[0].is_nullable is True
+
+
+def test_extract_schema_includes_udfs() -> None:
+    routine_rows = [
+        {
+            "routine_schema": "analytics",
+            "routine_name": "add_one",
+            "routine_type": "FUNCTION",
+            "data_type": "INT64",
+            "routine_definition": "x + 1",
+            "routine_body": "SQL",
+            "external_language": "",
+        },
+    ]
+    parameter_rows = [
+        {
+            "specific_schema": "analytics",
+            "specific_name": "add_one",
+            "parameter_name": "x",
+            "data_type": "INT64",
+            "ordinal_position": 1,
+        },
+    ]
+    client = _FakeBQClient(routine_rows=routine_rows, parameter_rows=parameter_rows)
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    snapshot = asyncio.run(bq.extract_schema(persisted))
+    udf_objs = [o for o in snapshot.objects if o.kind == V2SchemaObjectKind.UDF]
+    assert len(udf_objs) == 1
+    udf = udf_objs[0]
+    assert udf.schema_name == "analytics"
+    assert udf.object_name == "add_one"
+    assert udf.return_type == "INT64"
+    assert udf.definition_body == "x + 1"
+    assert udf.language == "SQL"
+    assert len(udf.columns) == 1
+    assert udf.columns[0].name == "x"
+    assert udf.columns[0].data_type == "INT64"
+
+
+def test_extract_schema_includes_freshness_metadata() -> None:
+    column_rows = [
+        {
+            "table_schema": "ds",
+            "table_name": "orders",
+            "column_name": "id",
+            "data_type": "INT64",
+            "is_nullable": "NO",
+            "ordinal_position": 1,
+            "is_partitioning_column": "NO",
+            "clustering_ordinal_position": None,
+        },
+    ]
+    lmt = datetime(2024, 1, 15, 12, 0, 0, tzinfo=UTC)
+    storage_rows = [
+        {
+            "dataset_id": "ds",
+            "table_id": "orders",
+            "row_count": 1000,
+            "total_logical_bytes": 512000,
+            "last_modified_time": lmt,
+        },
+    ]
+    client = _FakeBQClient(column_rows=column_rows, storage_rows=storage_rows)
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    snapshot = asyncio.run(bq.extract_schema(persisted))
+    assert len(snapshot.objects) == 1
+    obj = snapshot.objects[0]
+    assert obj.row_count == 1000
+    assert obj.size_bytes == 512000
+    assert obj.last_modified == lmt
+
+
+def test_extract_schema_routines_access_denied_falls_back_gracefully() -> None:
+    column_rows = [
+        {
+            "table_schema": "ds",
+            "table_name": "orders",
+            "column_name": "id",
+            "data_type": "INT64",
+            "is_nullable": "NO",
+            "ordinal_position": 1,
+            "is_partitioning_column": "NO",
+            "clustering_ordinal_position": None,
+        },
+    ]
+    client = _FakeBQClient(
+        column_rows=column_rows,
+        raise_on_routines_query=PermissionError("403 PermissionDenied: bigquery.routines.get"),
+    )
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    snapshot = asyncio.run(bq.extract_schema(persisted))
+    assert isinstance(snapshot, SchemaSnapshotV2)
+    table_objs = [o for o in snapshot.objects if o.kind == V2SchemaObjectKind.TABLE]
+    assert len(table_objs) == 1
+    routine_objs = [
+        o for o in snapshot.objects
+        if o.kind in (V2SchemaObjectKind.UDF, V2SchemaObjectKind.PROCEDURE)
+    ]
+    assert len(routine_objs) == 0
+
+
+def test_extract_schema_includes_ml_models() -> None:
+    lmt = datetime(2024, 3, 1, 0, 0, 0, tzinfo=UTC)
+    model_rows = [
+        {
+            "model_schema": "ml_datasets",
+            "model_name": "churn_predictor",
+            "model_type": "LOGISTIC_REG",
+            "last_modified_time": lmt,
+        },
+    ]
+    client = _FakeBQClient(model_rows=model_rows)
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter()
+    snapshot = asyncio.run(bq.extract_schema(persisted))
+    model_objs = [o for o in snapshot.objects if o.kind == V2SchemaObjectKind.ML_MODEL]
+    assert len(model_objs) == 1
+    model = model_objs[0]
+    assert model.schema_name == "ml_datasets"
+    assert model.object_name == "churn_predictor"
+    assert model.model_type == "LOGISTIC_REG"
+    assert model.last_modified == lmt
 
 
 # ---------------------------------------------------------------------------
