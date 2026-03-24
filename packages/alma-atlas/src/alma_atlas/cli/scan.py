@@ -25,6 +25,7 @@ def scan(
     ctx: typer.Context,
     source: Annotated[str | None, typer.Option("--source", "-s", help="Scan a specific source ID.")] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Print what would be scanned without writing.")] = False,
+    no_sync: Annotated[bool, typer.Option("--no-sync", help="Skip automatic team sync after scan.")] = False,
 ) -> None:
     """Scan data sources and populate the Atlas asset graph."""
     if ctx.invoked_subcommand is not None:
@@ -74,3 +75,22 @@ def scan(
             progress.update(task, description=f"[red]Scan failed:[/red] {e}")
         finally:
             progress.stop_task(task)
+
+    # Auto-sync if team is configured and --no-sync not passed
+    if not no_sync:
+        cfg.load_team_config()
+        if cfg.team_server_url and cfg.team_api_key:
+            import asyncio
+
+            from alma_atlas.sync.auth import TeamAuth
+            from alma_atlas.sync.client import SyncClient
+            from alma_atlas_store.db import Database
+
+            try:
+                auth = TeamAuth(cfg.team_api_key)
+                client = SyncClient(cfg.team_server_url, auth, cfg.team_id or "default")
+                with Database(cfg.db_path) as db:
+                    asyncio.run(client.full_sync(db, cfg))
+                rprint("[dim]Team sync complete.[/dim]")
+            except Exception as exc:
+                rprint(f"[yellow]Team sync failed (continuing):[/yellow] {exc}")

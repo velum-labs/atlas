@@ -11,6 +11,7 @@ dependencies = [
     "alma-algebrakit",
     "alma-sqlkit",
     "alma-atlas-store",
+    "httpx>=0.27",
     "typer>=0.15",
     "mcp>=1.6",
     "networkx>=3.4",

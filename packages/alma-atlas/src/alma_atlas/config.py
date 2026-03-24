@@ -46,6 +46,9 @@ class AtlasConfig:
     config_dir: Path = field(default_factory=default_config_dir)
     sources: list[SourceConfig] = field(default_factory=list)
     db_path: Path | None = None
+    team_server_url: str | None = None
+    team_api_key: str | None = None
+    team_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.db_path is None:
@@ -55,9 +58,52 @@ class AtlasConfig:
     def sources_file(self) -> Path:
         return self.config_dir / "sources.json"
 
+    @property
+    def config_file(self) -> Path:
+        return self.config_dir / "config.json"
+
+    @property
+    def sync_cursor_file(self) -> Path:
+        return self.config_dir / "sync_cursor.json"
+
     def ensure_dir(self) -> None:
         """Create config directory if it does not exist."""
         self.config_dir.mkdir(parents=True, exist_ok=True)
+
+    def load_team_config(self) -> None:
+        """Load team settings from config.json into this instance."""
+        if not self.config_file.exists():
+            return
+        data: dict = json.loads(self.config_file.read_text())
+        team = data.get("team", {})
+        self.team_server_url = team.get("server_url")
+        self.team_api_key = team.get("api_key")
+        self.team_id = team.get("team_id")
+
+    def save_team_config(self) -> None:
+        """Persist team settings to config.json."""
+        self.ensure_dir()
+        data: dict = {}
+        if self.config_file.exists():
+            data = json.loads(self.config_file.read_text())
+        data["team"] = {
+            "server_url": self.team_server_url,
+            "api_key": self.team_api_key,
+            "team_id": self.team_id,
+        }
+        self.config_file.write_text(json.dumps(data, indent=2))
+
+    def load_sync_cursor(self) -> str | None:
+        """Return the stored sync cursor timestamp, or None if none exists."""
+        if not self.sync_cursor_file.exists():
+            return None
+        data: dict = json.loads(self.sync_cursor_file.read_text())
+        return data.get("cursor")
+
+    def save_sync_cursor(self, cursor: str) -> None:
+        """Store the sync cursor timestamp."""
+        self.ensure_dir()
+        self.sync_cursor_file.write_text(json.dumps({"cursor": cursor}))
 
     def load_sources(self) -> list[SourceConfig]:
         """Load registered sources from disk."""

@@ -15,6 +15,7 @@ Tool catalogue:
     - atlas_suggest_tables      Suggest relevant tables for a search query
     - atlas_check_contract      Validate schema against data contract spec
     - atlas_list_violations     List recent enforcement violations from the store
+    - atlas_team_sync           Trigger a team graph sync programmatically
 """
 
 from __future__ import annotations
@@ -146,6 +147,11 @@ def register(server: Server, cfg: AtlasConfig) -> None:
                     },
                 },
             ),
+            Tool(
+                name="atlas_team_sync",
+                description="Trigger a team graph sync — push local Atlas changes to the team server and pull team contracts. Requires team sync to be configured via `alma-atlas team init`.",
+                inputSchema={"type": "object", "properties": {}},
+            ),
         ]
 
     @server.call_tool()
@@ -182,6 +188,9 @@ def register(server: Server, cfg: AtlasConfig) -> None:
 
         if name == "atlas_list_violations":
             return _handle_list_violations(cfg, arguments)
+
+        if name == "atlas_team_sync":
+            return await _handle_team_sync(cfg)
 
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
@@ -498,6 +507,32 @@ def _handle_list_violations(cfg: AtlasConfig, arguments: dict[str, Any]) -> list
             f"\n    detected: {v.detected_at}"
         )
     return [TextContent(type="text", text="\n".join(lines))]
+
+
+async def _handle_team_sync(cfg: AtlasConfig) -> list[TextContent]:
+    cfg.load_team_config()
+    if not cfg.team_server_url or not cfg.team_api_key:
+        return [TextContent(type="text", text="Team sync not configured. Run `alma-atlas team init` first.")]
+    if not cfg.db_path or not cfg.db_path.exists():
+        return [TextContent(type="text", text="No Atlas database found. Run `alma-atlas scan` first.")]
+
+    from alma_atlas.sync.auth import TeamAuth
+    from alma_atlas.sync.client import SyncClient
+    from alma_atlas_store.db import Database
+
+    auth = TeamAuth(cfg.team_api_key)
+    client = SyncClient(cfg.team_server_url, auth, cfg.team_id or "default")
+    try:
+        with Database(cfg.db_path) as db:
+            response = await client.full_sync(db, cfg)
+        return [
+            TextContent(
+                type="text",
+                text=f"Team sync complete: {response.accepted_count} record(s) accepted, {len(response.rejected)} rejected.",
+            )
+        ]
+    except Exception as exc:
+        return [TextContent(type="text", text=f"Team sync failed: {exc}")]
 
 
 def _handle_check_contract(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
