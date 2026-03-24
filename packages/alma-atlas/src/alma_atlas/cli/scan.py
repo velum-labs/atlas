@@ -49,18 +49,28 @@ def scan(
             rprint(f"  Would scan: [cyan]{s.id}[/cyan] ([magenta]{s.kind}[/magenta])")
         return
 
-    from alma_atlas.pipeline.scan import run_scan
+    from alma_atlas.pipeline.scan import run_scan_all
 
     with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=console) as progress:
-        for src in sources:
-            task = progress.add_task(f"Scanning [cyan]{src.id}[/cyan]...", total=None)
-            try:
-                result = run_scan(src, cfg)
-                progress.update(
-                    task,
-                    description=f"[green]Done:[/green] {src.id} — {result.asset_count} assets, {result.edge_count} edges",
-                )
-            except Exception as e:
-                progress.update(task, description=f"[red]Failed:[/red] {src.id} — {e}")
-            finally:
-                progress.stop_task(task)
+        task = progress.add_task(f"Scanning {len(sources)} source(s)...", total=None)
+        try:
+            all_result = run_scan_all(sources, cfg)
+            for result in all_result.results:
+                if result.error:
+                    rprint(f"  [red]Failed:[/red] {result.source_id} — {result.error}")
+                else:
+                    rprint(
+                        f"  [green]Done:[/green] {result.source_id} — "
+                        f"{result.asset_count} assets, {result.edge_count} edges"
+                    )
+            progress.update(
+                task,
+                description=(
+                    f"[green]Scan complete[/green] — "
+                    f"{all_result.cross_system_edge_count} cross-system edge(s) discovered"
+                ),
+            )
+        except Exception as e:
+            progress.update(task, description=f"[red]Scan failed:[/red] {e}")
+        finally:
+            progress.stop_task(task)

@@ -16,8 +16,12 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from alma_atlas.config import AtlasConfig, SourceConfig
+
+if TYPE_CHECKING:
+    from alma_connectors.source_adapter import SchemaSnapshot
 
 
 @dataclass
@@ -29,6 +33,15 @@ class ScanResult:
     edge_count: int = 0
     error: str | None = None
     warnings: list[str] = field(default_factory=list)
+    snapshot: SchemaSnapshot | None = None
+
+
+@dataclass
+class ScanAllResult:
+    """Summary of a completed multi-source scan including cross-system edges."""
+
+    results: list[ScanResult] = field(default_factory=list)
+    cross_system_edge_count: int = 0
 
 
 def run_scan(source: SourceConfig, cfg: AtlasConfig) -> ScanResult:
@@ -98,6 +111,7 @@ def run_scan(source: SourceConfig, cfg: AtlasConfig) -> ScanResult:
                 asset_count=len(snapshot.objects),
                 edge_count=dep_edge_count,
                 warnings=[f"Traffic observation failed: {exc}"],
+                snapshot=snapshot,
             )
 
         edge_count = stitch(traffic, db, source_id=source.id, source_kind=source.kind) + dep_edge_count
@@ -106,7 +120,45 @@ def run_scan(source: SourceConfig, cfg: AtlasConfig) -> ScanResult:
         source_id=source.id,
         asset_count=len(snapshot.objects),
         edge_count=edge_count,
+        snapshot=snapshot,
     )
+
+
+def run_scan_all(sources: list[SourceConfig], cfg: AtlasConfig) -> ScanAllResult:
+    """Run scans for all sources, then discover cross-system edges.
+
+    Calls :func:`run_scan` for each source in order, collects the resulting
+    :class:`ScanResult` objects and their schema snapshots, then hands all
+    snapshots to :func:`~alma_atlas.pipeline.cross_system_edges.discover_cross_system_edges`
+    to find edges that span system boundaries.
+
+    Args:
+        sources: List of source configurations to scan.
+        cfg:     Atlas configuration (used to open the SQLite store).
+
+    Returns:
+        A :class:`ScanAllResult` aggregating per-source results and the total
+        number of cross-system edges discovered.
+    """
+    from alma_atlas_store.db import Database
+
+    from alma_atlas.pipeline.cross_system_edges import discover_cross_system_edges
+
+    results: list[ScanResult] = []
+    snapshots: dict[str, SchemaSnapshot] = {}
+
+    for source in sources:
+        result = run_scan(source, cfg)
+        results.append(result)
+        if result.snapshot is not None:
+            snapshots[source.id] = result.snapshot
+
+    cross_system_edge_count = 0
+    if len(snapshots) >= 2:
+        with Database(cfg.db_path) as db:  # type: ignore[arg-type]
+            cross_system_edge_count = discover_cross_system_edges(snapshots, db)
+
+    return ScanAllResult(results=results, cross_system_edge_count=cross_system_edge_count)
 
 
 def _build_adapter(source: SourceConfig):  # type: ignore[return]
