@@ -158,41 +158,117 @@ class TestLookerAdapterStub:
         with pytest.raises(ValueError, match="client_secret"):
             LookerAdapter(instance_url="https://myco.looker.com", client_id="cid", client_secret="")
 
-    def test_discover_raises_not_implemented(self) -> None:
-        adapter = LookerAdapter(
-            instance_url="https://myco.looker.com",
-            client_id="cid",
-            client_secret="csec",
-        )
-        with pytest.raises(NotImplementedError):
-            asyncio.run(adapter.discover(_fake_persisted("looker-test")))
+    def test_discover_is_implemented(self) -> None:
+        """DISCOVER is declared and implemented — verify it returns a snapshot."""
+        from unittest.mock import MagicMock, patch
 
-    def test_extract_schema_raises_not_implemented(self) -> None:
         adapter = LookerAdapter(
             instance_url="https://myco.looker.com",
             client_id="cid",
             client_secret="csec",
         )
-        with pytest.raises(NotImplementedError):
-            asyncio.run(adapter.extract_schema(_fake_persisted("looker-test")))
 
-    def test_extract_definitions_raises_not_implemented(self) -> None:
-        adapter = LookerAdapter(
-            instance_url="https://myco.looker.com",
-            client_id="cid",
-            client_secret="csec",
-        )
-        with pytest.raises(NotImplementedError):
-            asyncio.run(adapter.extract_definitions(_fake_persisted("looker-test")))
+        def _mock_post(url, **kwargs):
+            resp = MagicMock()
+            resp.raise_for_status = MagicMock()
+            resp.json.return_value = {"access_token": "tok", "expires_in": 3600}
+            return resp
 
-    def test_extract_lineage_raises_not_implemented(self) -> None:
+        def _mock_get(url, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.raise_for_status = MagicMock()
+            resp.json.return_value = []
+            return resp
+
+        with patch("alma_connectors.adapters.looker.httpx.post", side_effect=_mock_post), \
+             patch("alma_connectors.adapters.looker.httpx.get", side_effect=_mock_get):
+            snapshot = asyncio.run(adapter.discover(_fake_persisted("looker-test")))
+        assert snapshot is not None
+
+    def test_extract_schema_is_implemented(self) -> None:
+        """SCHEMA is declared and implemented — verify it returns a snapshot."""
+        from unittest.mock import MagicMock, patch
+
         adapter = LookerAdapter(
             instance_url="https://myco.looker.com",
             client_id="cid",
             client_secret="csec",
         )
-        with pytest.raises(NotImplementedError):
-            asyncio.run(adapter.extract_lineage(_fake_persisted("looker-test")))
+
+        def _mock_post(url, **kwargs):
+            resp = MagicMock()
+            resp.raise_for_status = MagicMock()
+            resp.json.return_value = {"access_token": "tok", "expires_in": 3600}
+            return resp
+
+        def _mock_get(url, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.raise_for_status = MagicMock()
+            resp.json.return_value = []
+            return resp
+
+        with patch("alma_connectors.adapters.looker.httpx.post", side_effect=_mock_post), \
+             patch("alma_connectors.adapters.looker.httpx.get", side_effect=_mock_get):
+            snapshot = asyncio.run(adapter.extract_schema(_fake_persisted("looker-test")))
+        assert snapshot is not None
+
+    def test_extract_definitions_is_implemented(self) -> None:
+        """DEFINITIONS is declared and implemented — verify it returns a snapshot."""
+        from unittest.mock import MagicMock, patch
+
+        adapter = LookerAdapter(
+            instance_url="https://myco.looker.com",
+            client_id="cid",
+            client_secret="csec",
+        )
+
+        def _mock_post(url, **kwargs):
+            resp = MagicMock()
+            resp.raise_for_status = MagicMock()
+            resp.json.return_value = {"access_token": "tok", "expires_in": 3600}
+            return resp
+
+        def _mock_get(url, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.raise_for_status = MagicMock()
+            resp.json.return_value = []
+            return resp
+
+        with patch("alma_connectors.adapters.looker.httpx.post", side_effect=_mock_post), \
+             patch("alma_connectors.adapters.looker.httpx.get", side_effect=_mock_get):
+            snapshot = asyncio.run(adapter.extract_definitions(_fake_persisted("looker-test")))
+        assert snapshot is not None
+
+    def test_extract_lineage_is_implemented(self) -> None:
+        """LINEAGE is declared and implemented — verify it returns a snapshot."""
+        from unittest.mock import MagicMock, patch
+
+        adapter = LookerAdapter(
+            instance_url="https://myco.looker.com",
+            client_id="cid",
+            client_secret="csec",
+        )
+
+        def _mock_post(url, **kwargs):
+            resp = MagicMock()
+            resp.raise_for_status = MagicMock()
+            resp.json.return_value = {"access_token": "tok", "expires_in": 3600}
+            return resp
+
+        def _mock_get(url, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.raise_for_status = MagicMock()
+            resp.json.return_value = []
+            return resp
+
+        with patch("alma_connectors.adapters.looker.httpx.post", side_effect=_mock_post), \
+             patch("alma_connectors.adapters.looker.httpx.get", side_effect=_mock_get):
+            snapshot = asyncio.run(adapter.extract_lineage(_fake_persisted("looker-test")))
+        assert snapshot is not None
 
     def test_extract_traffic_raises_not_implemented(self) -> None:
         """TRAFFIC is not declared — must still raise NotImplementedError, not AttributeError."""
