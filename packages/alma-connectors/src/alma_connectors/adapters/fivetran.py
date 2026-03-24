@@ -112,6 +112,7 @@ class FivetranAdapter(BaseAdapterV2):
         self._api_secret = api_secret
         self._api_base = api_base.rstrip("/")
         self._timeout_seconds = timeout_seconds
+        self._client: httpx.AsyncClient | None = None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -120,9 +121,20 @@ class FivetranAdapter(BaseAdapterV2):
     def _scope_identifiers(self) -> dict[str, str]:
         return {"api_base": self._api_base}
 
-    def _api_get(self, path: str, *, params: dict[str, Any] | None = None) -> Any:
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient()
+        return self._client
+
+    async def close(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+    async def _api_get(self, path: str, *, params: dict[str, Any] | None = None) -> Any:
         """Execute an authenticated GET request against the Fivetran API."""
-        resp = httpx.get(
+        client = await self._get_client()
+        resp = await client.get(
             f"{self._api_base}/{path}",
             auth=(self._api_key, self._api_secret),
             params=params,
@@ -131,7 +143,7 @@ class FivetranAdapter(BaseAdapterV2):
         resp.raise_for_status()
         return resp.json()
 
-    def _get_all_connectors(self) -> list[dict[str, Any]]:
+    async def _get_all_connectors(self) -> list[dict[str, Any]]:
         """Paginate through GET /v1/connectors and return all connectors."""
         connectors: list[dict[str, Any]] = []
         cursor: str | None = None
@@ -139,7 +151,7 @@ class FivetranAdapter(BaseAdapterV2):
             params: dict[str, Any] = {"limit": 100}
             if cursor:
                 params["cursor"] = cursor
-            response = self._api_get("v1/connectors", params=params)
+            response = await self._api_get("v1/connectors", params=params)
             data = response.get("data", {})
             items = data.get("items", [])
             connectors.extend(items)
@@ -159,7 +171,7 @@ class FivetranAdapter(BaseAdapterV2):
     ) -> ConnectionTestResult:
         """Validate credentials by fetching the user/account info."""
         try:
-            resp = self._api_get("v1/account/info")
+            resp = await self._api_get("v1/account/info")
             account = (resp.get("data") or {}).get("account_name") or "unknown"
             return ConnectionTestResult(
                 success=True,
@@ -177,7 +189,7 @@ class FivetranAdapter(BaseAdapterV2):
         caps_to_probe = capabilities if capabilities is not None else self.declared_capabilities
 
         try:
-            self._api_get("v1/connectors", params={"limit": 1})
+            await self._api_get("v1/connectors", params={"limit": 1})
             available = True
         except Exception:
             available = False
@@ -221,7 +233,7 @@ class FivetranAdapter(BaseAdapterV2):
             }
         """
         t0 = time.monotonic()
-        connectors = self._get_all_connectors()
+        connectors = await self._get_all_connectors()
 
         containers = [
             DiscoveredContainer(
@@ -277,14 +289,14 @@ class FivetranAdapter(BaseAdapterV2):
             }
         """
         t0 = time.monotonic()
-        connectors = self._get_all_connectors()
+        connectors = await self._get_all_connectors()
         edges: list[LineageEdge] = []
 
         for connector in connectors:
             connector_id = connector["id"]
             dest_schema_prefix = connector.get("schema") or connector_id
             try:
-                resp = self._api_get(f"v1/connectors/{connector_id}/schemas")
+                resp = await self._api_get(f"v1/connectors/{connector_id}/schemas")
                 schemas = (resp.get("data") or {}).get("schemas") or {}
             except Exception:
                 logger.warning("Failed to fetch schemas for connector %s", connector_id)
@@ -344,13 +356,13 @@ class FivetranAdapter(BaseAdapterV2):
             }
         """
         t0 = time.monotonic()
-        connectors = self._get_all_connectors()
+        connectors = await self._get_all_connectors()
         units: list[OrchestrationUnit] = []
 
         for connector in connectors:
             connector_id = connector["id"]
             try:
-                resp = self._api_get(f"v1/connectors/{connector_id}")
+                resp = await self._api_get(f"v1/connectors/{connector_id}")
                 detail = resp.get("data") or {}
             except Exception:
                 logger.warning("Failed to fetch details for connector %s", connector_id)

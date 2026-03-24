@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -70,6 +70,26 @@ def _mock_response(json_data: object, *, status_code: int = 200) -> MagicMock:
     return resp
 
 
+def _make_mock_client(
+    *,
+    post_return=None,
+    get_return=None,
+    get_side_effect=None,
+    post_side_effect=None,
+) -> AsyncMock:
+    """Create an AsyncMock httpx client with pre-configured responses."""
+    mock_client = AsyncMock()
+    if post_return is not None:
+        mock_client.post.return_value = post_return
+    if post_side_effect is not None:
+        mock_client.post.side_effect = post_side_effect
+    if get_return is not None:
+        mock_client.get.return_value = get_return
+    if get_side_effect is not None:
+        mock_client.get.side_effect = get_side_effect
+    return mock_client
+
+
 # ---------------------------------------------------------------------------
 # Constructor validation
 # ---------------------------------------------------------------------------
@@ -97,12 +117,14 @@ def test_constructor_rejects_empty_client_secret() -> None:
 
 def test_get_access_token_posts_credentials() -> None:
     adapter = _make_adapter()
-    with patch("httpx.post", return_value=_mock_response(_TOKEN_RESP)) as mock_post:
-        token = adapter._get_access_token()
+    mock_client = _make_mock_client(post_return=_mock_response(_TOKEN_RESP))
+    adapter._client = mock_client
+
+    token = asyncio.run(adapter._get_access_token())
 
     assert token == "test-token-abc"
-    mock_post.assert_called_once()
-    call_kwargs = mock_post.call_args
+    mock_client.post.assert_called_once()
+    call_kwargs = mock_client.post.call_args
     assert call_kwargs[1]["data"]["client_id"] == "cid"
     assert call_kwargs[1]["data"]["client_secret"] == "csecret"
     assert "/api/4.0/login" in call_kwargs[0][0]
@@ -110,36 +132,42 @@ def test_get_access_token_posts_credentials() -> None:
 
 def test_get_access_token_caches_token() -> None:
     adapter = _make_adapter()
-    with patch("httpx.post", return_value=_mock_response(_TOKEN_RESP)) as mock_post:
-        adapter._get_access_token()
-        adapter._get_access_token()  # second call — should use cache
+    mock_client = _make_mock_client(post_return=_mock_response(_TOKEN_RESP))
+    adapter._client = mock_client
 
-    mock_post.assert_called_once()
+    asyncio.run(adapter._get_access_token())
+    asyncio.run(adapter._get_access_token())  # second call — should use cache
+
+    mock_client.post.assert_called_once()
 
 
 def test_get_access_token_refreshes_when_expired() -> None:
     import time
 
     adapter = _make_adapter()
-    with patch("httpx.post", return_value=_mock_response(_TOKEN_RESP)) as mock_post:
-        adapter._get_access_token()
-        # Force expiry
-        adapter._token_expires_at = time.monotonic() - 1
-        adapter._get_access_token()
+    mock_client = _make_mock_client(post_return=_mock_response(_TOKEN_RESP))
+    adapter._client = mock_client
 
-    assert mock_post.call_count == 2
+    asyncio.run(adapter._get_access_token())
+    # Force expiry
+    adapter._token_expires_at = time.monotonic() - 1
+    asyncio.run(adapter._get_access_token())
+
+    assert mock_client.post.call_count == 2
 
 
 def test_api_get_uses_bearer_token() -> None:
     adapter = _make_adapter()
-    with (
-        patch("httpx.post", return_value=_mock_response(_TOKEN_RESP)),
-        patch("httpx.get", return_value=_mock_response({"email": "svc@co.com"})) as mock_get,
-    ):
-        result = adapter._api_get("user")
+    mock_client = _make_mock_client(
+        post_return=_mock_response(_TOKEN_RESP),
+        get_return=_mock_response({"email": "svc@co.com"}),
+    )
+    adapter._client = mock_client
+
+    result = asyncio.run(adapter._api_get("user"))
 
     assert result == {"email": "svc@co.com"}
-    _, kwargs = mock_get.call_args
+    _, kwargs = mock_client.get.call_args
     assert kwargs["headers"]["Authorization"] == "token test-token-abc"
 
 
@@ -153,17 +181,19 @@ def test_api_get_refreshes_token_on_401() -> None:
     new_token_resp = {"access_token": "new-token-xyz", "expires_in": 3600}
     success_resp = _mock_response({"email": "svc@co.com"})
 
-    with (
-        patch("httpx.post", return_value=_mock_response(new_token_resp)) as mock_post,
-        patch("httpx.get", side_effect=[_mock_response({}, status_code=401), success_resp]) as mock_get,
-    ):
-        result = adapter._api_get("user")
+    mock_client = _make_mock_client(
+        post_return=_mock_response(new_token_resp),
+        get_side_effect=[_mock_response({}, status_code=401), success_resp],
+    )
+    adapter._client = mock_client
+
+    result = asyncio.run(adapter._api_get("user"))
 
     assert result == {"email": "svc@co.com"}
-    mock_post.assert_called_once()  # token was refreshed
-    assert mock_get.call_count == 2
+    mock_client.post.assert_called_once()  # token was refreshed
+    assert mock_client.get.call_count == 2
     # Second call must use new token
-    second_call_headers = mock_get.call_args_list[1][1]["headers"]
+    second_call_headers = mock_client.get.call_args_list[1][1]["headers"]
     assert second_call_headers["Authorization"] == "token new-token-xyz"
 
 
@@ -176,11 +206,13 @@ def test_test_connection_success() -> None:
     adapter = _make_adapter()
     persisted = _make_persisted()
 
-    with (
-        patch("httpx.post", return_value=_mock_response(_TOKEN_RESP)),
-        patch("httpx.get", return_value=_mock_response({"email": "svc@company.com"})),
-    ):
-        result = asyncio.run(adapter.test_connection(persisted))
+    mock_client = _make_mock_client(
+        post_return=_mock_response(_TOKEN_RESP),
+        get_return=_mock_response({"email": "svc@company.com"}),
+    )
+    adapter._client = mock_client
+
+    result = asyncio.run(adapter.test_connection(persisted))
 
     assert result.success is True
     assert "svc@company.com" in result.message
@@ -190,8 +222,10 @@ def test_test_connection_failure() -> None:
     adapter = _make_adapter()
     persisted = _make_persisted()
 
-    with patch("httpx.post", side_effect=httpx.ConnectError("unreachable")):
-        result = asyncio.run(adapter.test_connection(persisted))
+    mock_client = _make_mock_client(post_side_effect=httpx.ConnectError("unreachable"))
+    adapter._client = mock_client
+
+    result = asyncio.run(adapter.test_connection(persisted))
 
     assert result.success is False
     assert "unreachable" in result.message
@@ -210,16 +244,16 @@ def test_probe_all_capabilities_available() -> None:
     adapter = _make_adapter()
     persisted = _make_persisted()
 
-    responses = [
-        _mock_response({"email": "svc@co.com"}),  # GET user
-        _mock_response(_LOOKML_MODELS_LIST),        # GET lookml_models
-    ]
+    mock_client = _make_mock_client(
+        post_return=_mock_response(_TOKEN_RESP),
+        get_side_effect=[
+            _mock_response({"email": "svc@co.com"}),  # GET user
+            _mock_response(_LOOKML_MODELS_LIST),        # GET lookml_models
+        ],
+    )
+    adapter._client = mock_client
 
-    with (
-        patch("httpx.post", return_value=_mock_response(_TOKEN_RESP)),
-        patch("httpx.get", side_effect=responses),
-    ):
-        results = asyncio.run(adapter.probe(persisted))
+    results = asyncio.run(adapter.probe(persisted))
 
     assert len(results) == len(adapter.declared_capabilities)
     assert all(r.available for r in results)
@@ -229,8 +263,10 @@ def test_probe_unavailable_when_auth_fails() -> None:
     adapter = _make_adapter()
     persisted = _make_persisted()
 
-    with patch("httpx.post", side_effect=httpx.ConnectError("refused")):
-        results = asyncio.run(adapter.probe(persisted))
+    mock_client = _make_mock_client(post_side_effect=httpx.ConnectError("refused"))
+    adapter._client = mock_client
+
+    results = asyncio.run(adapter.probe(persisted))
 
     assert all(not r.available for r in results)
     assert all("auth check failed" in (r.message or "") for r in results)
@@ -241,16 +277,16 @@ def test_probe_subset_of_capabilities() -> None:
     persisted = _make_persisted()
     caps = frozenset({AdapterCapability.DISCOVER})
 
-    responses = [
-        _mock_response({"email": "svc@co.com"}),
-        _mock_response(_LOOKML_MODELS_LIST),
-    ]
+    mock_client = _make_mock_client(
+        post_return=_mock_response(_TOKEN_RESP),
+        get_side_effect=[
+            _mock_response({"email": "svc@co.com"}),
+            _mock_response(_LOOKML_MODELS_LIST),
+        ],
+    )
+    adapter._client = mock_client
 
-    with (
-        patch("httpx.post", return_value=_mock_response(_TOKEN_RESP)),
-        patch("httpx.get", side_effect=responses),
-    ):
-        results = asyncio.run(adapter.probe(persisted, capabilities=caps))
+    results = asyncio.run(adapter.probe(persisted, capabilities=caps))
 
     assert len(results) == 1
     assert results[0].capability == AdapterCapability.DISCOVER
@@ -282,11 +318,13 @@ def test_discover_builds_project_model_explore_containers() -> None:
     adapter = _make_adapter()
     persisted = _make_persisted()
 
-    with (
-        patch("httpx.post", return_value=_mock_response(_TOKEN_RESP)),
-        patch("httpx.get", return_value=_mock_response(_MODELS_RESPONSE)),
-    ):
-        snapshot = asyncio.run(adapter.discover(persisted))
+    mock_client = _make_mock_client(
+        post_return=_mock_response(_TOKEN_RESP),
+        get_return=_mock_response(_MODELS_RESPONSE),
+    )
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.discover(persisted))
 
     ids = {c.container_id for c in snapshot.containers}
     types = {c.container_type for c in snapshot.containers}
@@ -306,11 +344,13 @@ def test_discover_deduplicates_projects() -> None:
     adapter = _make_adapter()
     persisted = _make_persisted()
 
-    with (
-        patch("httpx.post", return_value=_mock_response(_TOKEN_RESP)),
-        patch("httpx.get", return_value=_mock_response(_MODELS_RESPONSE)),
-    ):
-        snapshot = asyncio.run(adapter.discover(persisted))
+    mock_client = _make_mock_client(
+        post_return=_mock_response(_TOKEN_RESP),
+        get_return=_mock_response(_MODELS_RESPONSE),
+    )
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.discover(persisted))
 
     project_containers = [c for c in snapshot.containers if c.container_type == "project"]
     assert len(project_containers) == 1
@@ -320,11 +360,13 @@ def test_discover_explore_label_fallback() -> None:
     adapter = _make_adapter()
     persisted = _make_persisted()
 
-    with (
-        patch("httpx.post", return_value=_mock_response(_TOKEN_RESP)),
-        patch("httpx.get", return_value=_mock_response(_MODELS_RESPONSE)),
-    ):
-        snapshot = asyncio.run(adapter.discover(persisted))
+    mock_client = _make_mock_client(
+        post_return=_mock_response(_TOKEN_RESP),
+        get_return=_mock_response(_MODELS_RESPONSE),
+    )
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.discover(persisted))
 
     # "invoices" explore has empty label — should fall back to name
     invoices = next(c for c in snapshot.containers if c.container_id == "looker://explore/finance/invoices")
@@ -335,11 +377,13 @@ def test_discover_meta() -> None:
     adapter = _make_adapter()
     persisted = _make_persisted()
 
-    with (
-        patch("httpx.post", return_value=_mock_response(_TOKEN_RESP)),
-        patch("httpx.get", return_value=_mock_response(_MODELS_RESPONSE)),
-    ):
-        snapshot = asyncio.run(adapter.discover(persisted))
+    mock_client = _make_mock_client(
+        post_return=_mock_response(_TOKEN_RESP),
+        get_return=_mock_response(_MODELS_RESPONSE),
+    )
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.discover(persisted))
 
     assert snapshot.meta.capability == AdapterCapability.DISCOVER
     assert snapshot.meta.adapter_key == "looker-prod"
@@ -371,14 +415,16 @@ def test_extract_schema_maps_dimensions_and_measures() -> None:
         {"name": "ecommerce", "project_name": "my_project", "explores": [{"name": "orders"}]},
     ]
 
-    with (
-        patch("httpx.post", return_value=_mock_response(_TOKEN_RESP)),
-        patch("httpx.get", side_effect=[
+    mock_client = _make_mock_client(
+        post_return=_mock_response(_TOKEN_RESP),
+        get_side_effect=[
             _mock_response(simple_model),         # GET lookml_models
             _mock_response(_EXPLORE_FIELDS_RESP), # GET explore fields
-        ]),
-    ):
-        snapshot = asyncio.run(adapter.extract_schema(persisted))
+        ],
+    )
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.extract_schema(persisted))
 
     assert len(snapshot.objects) == 1
     obj = snapshot.objects[0]
@@ -398,14 +444,16 @@ def test_extract_schema_dimension_type_and_description() -> None:
         {"name": "ecommerce", "project_name": "p", "explores": [{"name": "orders"}]},
     ]
 
-    with (
-        patch("httpx.post", return_value=_mock_response(_TOKEN_RESP)),
-        patch("httpx.get", side_effect=[
+    mock_client = _make_mock_client(
+        post_return=_mock_response(_TOKEN_RESP),
+        get_side_effect=[
             _mock_response(simple_model),
             _mock_response(_EXPLORE_FIELDS_RESP),
-        ]),
-    ):
-        snapshot = asyncio.run(adapter.extract_schema(persisted))
+        ],
+    )
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.extract_schema(persisted))
 
     id_col = next(c for c in snapshot.objects[0].columns if c.name == "orders.id")
     assert id_col.data_type == "number"
@@ -423,14 +471,16 @@ def test_extract_schema_meta() -> None:
         {"name": "ecommerce", "project_name": "p", "explores": [{"name": "orders"}]},
     ]
 
-    with (
-        patch("httpx.post", return_value=_mock_response(_TOKEN_RESP)),
-        patch("httpx.get", side_effect=[
+    mock_client = _make_mock_client(
+        post_return=_mock_response(_TOKEN_RESP),
+        get_side_effect=[
             _mock_response(simple_model),
             _mock_response(_EXPLORE_FIELDS_RESP),
-        ]),
-    ):
-        snapshot = asyncio.run(adapter.extract_schema(persisted))
+        ],
+    )
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.extract_schema(persisted))
 
     assert snapshot.meta.capability == AdapterCapability.SCHEMA
     assert snapshot.meta.row_count == 1
@@ -461,14 +511,16 @@ def test_extract_definitions_includes_sql_expressions() -> None:
         {"name": "ecommerce", "project_name": "p", "explores": [{"name": "orders"}]},
     ]
 
-    with (
-        patch("httpx.post", return_value=_mock_response(_TOKEN_RESP)),
-        patch("httpx.get", side_effect=[
+    mock_client = _make_mock_client(
+        post_return=_mock_response(_TOKEN_RESP),
+        get_side_effect=[
             _mock_response(simple_model),
             _mock_response(_EXPLORE_SQL_RESP),
-        ]),
-    ):
-        snapshot = asyncio.run(adapter.extract_definitions(persisted))
+        ],
+    )
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.extract_definitions(persisted))
 
     assert len(snapshot.definitions) == 1
     defn = snapshot.definitions[0]
@@ -491,14 +543,16 @@ def test_extract_definitions_fallback_when_no_sql() -> None:
         {"name": "ecommerce", "project_name": "p", "explores": [{"name": "orders"}]},
     ]
 
-    with (
-        patch("httpx.post", return_value=_mock_response(_TOKEN_RESP)),
-        patch("httpx.get", side_effect=[
+    mock_client = _make_mock_client(
+        post_return=_mock_response(_TOKEN_RESP),
+        get_side_effect=[
             _mock_response(simple_model),
             _mock_response(no_sql_resp),
-        ]),
-    ):
-        snapshot = asyncio.run(adapter.extract_definitions(persisted))
+        ],
+    )
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.extract_definitions(persisted))
 
     # definition_text must be non-empty (falls back to explore name comment)
     assert snapshot.definitions[0].definition_text.strip() != ""
@@ -512,14 +566,16 @@ def test_extract_definitions_meta() -> None:
         {"name": "ecommerce", "project_name": "p", "explores": [{"name": "orders"}]},
     ]
 
-    with (
-        patch("httpx.post", return_value=_mock_response(_TOKEN_RESP)),
-        patch("httpx.get", side_effect=[
+    mock_client = _make_mock_client(
+        post_return=_mock_response(_TOKEN_RESP),
+        get_side_effect=[
             _mock_response(simple_model),
             _mock_response(_EXPLORE_SQL_RESP),
-        ]),
-    ):
-        snapshot = asyncio.run(adapter.extract_definitions(persisted))
+        ],
+    )
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.extract_definitions(persisted))
 
     assert snapshot.meta.capability == AdapterCapability.DEFINITIONS
 
@@ -556,14 +612,16 @@ def test_extract_lineage_primary_view_edge() -> None:
         {"name": "ecommerce", "project_name": "p", "explores": [{"name": "orders"}]},
     ]
 
-    with (
-        patch("httpx.post", return_value=_mock_response(_TOKEN_RESP)),
-        patch("httpx.get", side_effect=[
+    mock_client = _make_mock_client(
+        post_return=_mock_response(_TOKEN_RESP),
+        get_side_effect=[
             _mock_response(simple_model),
             _mock_response(_EXPLORE_LINEAGE_RESP),
-        ]),
-    ):
-        snapshot = asyncio.run(adapter.extract_lineage(persisted))
+        ],
+    )
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.extract_lineage(persisted))
 
     primary_edge = next(
         e for e in snapshot.edges if e.source_object == "analytics.orders"
@@ -581,14 +639,16 @@ def test_extract_lineage_join_edges() -> None:
         {"name": "ecommerce", "project_name": "p", "explores": [{"name": "orders"}]},
     ]
 
-    with (
-        patch("httpx.post", return_value=_mock_response(_TOKEN_RESP)),
-        patch("httpx.get", side_effect=[
+    mock_client = _make_mock_client(
+        post_return=_mock_response(_TOKEN_RESP),
+        get_side_effect=[
             _mock_response(simple_model),
             _mock_response(_EXPLORE_LINEAGE_RESP),
-        ]),
-    ):
-        snapshot = asyncio.run(adapter.extract_lineage(persisted))
+        ],
+    )
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.extract_lineage(persisted))
 
     sources = {e.source_object for e in snapshot.edges}
     assert "analytics.users" in sources
@@ -606,14 +666,16 @@ def test_extract_lineage_edge_kind_is_declared() -> None:
         {"name": "ecommerce", "project_name": "p", "explores": [{"name": "orders"}]},
     ]
 
-    with (
-        patch("httpx.post", return_value=_mock_response(_TOKEN_RESP)),
-        patch("httpx.get", side_effect=[
+    mock_client = _make_mock_client(
+        post_return=_mock_response(_TOKEN_RESP),
+        get_side_effect=[
             _mock_response(simple_model),
             _mock_response(_EXPLORE_LINEAGE_RESP),
-        ]),
-    ):
-        snapshot = asyncio.run(adapter.extract_lineage(persisted))
+        ],
+    )
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.extract_lineage(persisted))
 
     assert all(e.edge_kind == LineageEdgeKind.DECLARED for e in snapshot.edges)
 
@@ -633,14 +695,16 @@ def test_extract_lineage_no_sql_table_name_produces_no_edge() -> None:
         {"name": "ecommerce", "project_name": "p", "explores": [{"name": "orders"}]},
     ]
 
-    with (
-        patch("httpx.post", return_value=_mock_response(_TOKEN_RESP)),
-        patch("httpx.get", side_effect=[
+    mock_client = _make_mock_client(
+        post_return=_mock_response(_TOKEN_RESP),
+        get_side_effect=[
             _mock_response(simple_model),
             _mock_response(no_table_resp),
-        ]),
-    ):
-        snapshot = asyncio.run(adapter.extract_lineage(persisted))
+        ],
+    )
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.extract_lineage(persisted))
 
     assert len(snapshot.edges) == 0
 
@@ -653,14 +717,16 @@ def test_extract_lineage_meta() -> None:
         {"name": "ecommerce", "project_name": "p", "explores": [{"name": "orders"}]},
     ]
 
-    with (
-        patch("httpx.post", return_value=_mock_response(_TOKEN_RESP)),
-        patch("httpx.get", side_effect=[
+    mock_client = _make_mock_client(
+        post_return=_mock_response(_TOKEN_RESP),
+        get_side_effect=[
             _mock_response(simple_model),
             _mock_response(_EXPLORE_LINEAGE_RESP),
-        ]),
-    ):
-        snapshot = asyncio.run(adapter.extract_lineage(persisted))
+        ],
+    )
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.extract_lineage(persisted))
 
     assert snapshot.meta.capability == AdapterCapability.LINEAGE
     assert snapshot.meta.row_count == len(snapshot.edges)

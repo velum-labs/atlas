@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -23,7 +23,6 @@ from alma_connectors.source_adapter_v2 import AdapterCapability
 
 _ADAPTER_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 _INSTANCE_URL = "https://metabase.example.com"
-_METABASE_MODULE = "alma_connectors.adapters.metabase.httpx"
 
 
 def _make_persisted() -> PersistedSourceAdapter:
@@ -52,6 +51,26 @@ def _mock_response(data: object, *, status_code: int = 200) -> MagicMock:
     resp.json.return_value = data
     resp.raise_for_status = MagicMock()
     return resp
+
+
+def _make_mock_client(
+    *,
+    get_return=None,
+    get_side_effect=None,
+    post_return=None,
+    post_side_effect=None,
+) -> AsyncMock:
+    """Create an AsyncMock httpx client."""
+    mock_client = AsyncMock()
+    if get_return is not None:
+        mock_client.get.return_value = get_return
+    if get_side_effect is not None:
+        mock_client.get.side_effect = get_side_effect
+    if post_return is not None:
+        mock_client.post.return_value = post_return
+    if post_side_effect is not None:
+        mock_client.post.side_effect = post_side_effect
+    return mock_client
 
 
 # ---------------------------------------------------------------------------
@@ -91,15 +110,18 @@ def test_constructor_strips_trailing_slash() -> None:
 
 def test_get_auth_headers_api_key() -> None:
     adapter = _make_adapter_apikey()
-    headers = adapter._get_auth_headers()
+    headers = asyncio.run(adapter._get_auth_headers())
     assert headers == {"x-api-key": "mb_test_key"}
 
 
 def test_get_auth_headers_api_key_does_not_call_session_endpoint() -> None:
     adapter = _make_adapter_apikey()
-    with patch(_METABASE_MODULE) as mock_httpx:
-        adapter._get_auth_headers()
-        mock_httpx.post.assert_not_called()
+    mock_client = AsyncMock()
+    adapter._client = mock_client
+
+    asyncio.run(adapter._get_auth_headers())
+
+    mock_client.post.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -109,20 +131,24 @@ def test_get_auth_headers_api_key_does_not_call_session_endpoint() -> None:
 
 def test_get_auth_headers_username_password_fetches_token() -> None:
     adapter = _make_adapter_userpass()
-    with patch(_METABASE_MODULE) as mock_httpx:
-        mock_httpx.post.return_value = _mock_response({"id": "tok_abc123"})
-        headers = adapter._get_auth_headers()
+    mock_client = _make_mock_client(post_return=_mock_response({"id": "tok_abc123"}))
+    adapter._client = mock_client
+
+    headers = asyncio.run(adapter._get_auth_headers())
+
     assert headers == {"X-Metabase-Session": "tok_abc123"}
     assert adapter._session_token == "tok_abc123"
 
 
 def test_get_auth_headers_session_token_cached() -> None:
     adapter = _make_adapter_userpass()
-    with patch(_METABASE_MODULE) as mock_httpx:
-        mock_httpx.post.return_value = _mock_response({"id": "tok_xyz"})
-        adapter._get_auth_headers()
-        adapter._get_auth_headers()
-        assert mock_httpx.post.call_count == 1
+    mock_client = _make_mock_client(post_return=_mock_response({"id": "tok_xyz"}))
+    adapter._client = mock_client
+
+    asyncio.run(adapter._get_auth_headers())
+    asyncio.run(adapter._get_auth_headers())
+
+    assert mock_client.post.call_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -132,22 +158,25 @@ def test_get_auth_headers_session_token_cached() -> None:
 
 def test_api_get_builds_correct_url() -> None:
     adapter = _make_adapter_apikey()
-    with patch(_METABASE_MODULE) as mock_httpx:
-        mock_httpx.get.return_value = _mock_response({"data": []})
-        adapter._api_get("database")
-        mock_httpx.get.assert_called_once()
-        call_args = mock_httpx.get.call_args
-        assert call_args[0][0] == f"{_INSTANCE_URL}/api/database"
+    mock_client = _make_mock_client(get_return=_mock_response({"data": []}))
+    adapter._client = mock_client
+
+    asyncio.run(adapter._api_get("database"))
+
+    mock_client.get.assert_called_once()
+    call_args = mock_client.get.call_args
+    assert call_args[0][0] == f"{_INSTANCE_URL}/api/database"
 
 
 def test_api_get_raises_on_http_error() -> None:
     adapter = _make_adapter_apikey()
-    with patch(_METABASE_MODULE) as mock_httpx:
-        resp = _mock_response({}, status_code=401)
-        resp.raise_for_status.side_effect = Exception("401 Unauthorized")
-        mock_httpx.get.return_value = resp
-        with pytest.raises(Exception, match="401"):
-            adapter._api_get("database")
+    resp = _mock_response({}, status_code=401)
+    resp.raise_for_status.side_effect = Exception("401 Unauthorized")
+    mock_client = _make_mock_client(get_return=resp)
+    adapter._client = mock_client
+
+    with pytest.raises(Exception, match="401"):
+        asyncio.run(adapter._api_get("database"))
 
 
 # ---------------------------------------------------------------------------
@@ -158,9 +187,13 @@ def test_api_get_raises_on_http_error() -> None:
 def test_test_connection_success() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter_apikey()
-    with patch(_METABASE_MODULE) as mock_httpx:
-        mock_httpx.get.return_value = _mock_response({"id": 1, "email": "admin@example.com"})
-        result = asyncio.run(adapter.test_connection(persisted))
+    mock_client = _make_mock_client(
+        get_return=_mock_response({"id": 1, "email": "admin@example.com"})
+    )
+    adapter._client = mock_client
+
+    result = asyncio.run(adapter.test_connection(persisted))
+
     assert result.success is True
     assert "admin@example.com" in result.message
 
@@ -168,10 +201,13 @@ def test_test_connection_success() -> None:
 def test_test_connection_failure() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter_apikey()
-    with patch(_METABASE_MODULE) as mock_httpx:
-        mock_httpx.get.return_value = _mock_response({}, status_code=401)
-        mock_httpx.get.return_value.raise_for_status.side_effect = Exception("Unauthorized")
-        result = asyncio.run(adapter.test_connection(persisted))
+    resp = _mock_response({}, status_code=401)
+    resp.raise_for_status.side_effect = Exception("Unauthorized")
+    mock_client = _make_mock_client(get_return=resp)
+    adapter._client = mock_client
+
+    result = asyncio.run(adapter.test_connection(persisted))
+
     assert result.success is False
     assert "Unauthorized" in result.message
 
@@ -184,19 +220,19 @@ def test_test_connection_failure() -> None:
 def test_probe_all_available() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter_apikey()
-    with patch(_METABASE_MODULE) as mock_httpx:
-        # /api/database succeeds, /api/setting fails (OSS)
-        db_resp = _mock_response({"data": []})
-        setting_resp = _mock_response({}, status_code=403)
-        setting_resp.raise_for_status.side_effect = Exception("403")
 
-        def get_side_effect(url, **kwargs):
-            if "setting" in url:
-                return setting_resp
-            return db_resp
+    setting_resp = _mock_response({}, status_code=403)
+    setting_resp.raise_for_status.side_effect = Exception("403")
 
-        mock_httpx.get.side_effect = get_side_effect
-        results = asyncio.run(adapter.probe(persisted))
+    def get_side_effect(url, **kwargs):
+        if "setting" in url:
+            return setting_resp
+        return _mock_response({"data": []})
+
+    mock_client = _make_mock_client(get_side_effect=get_side_effect)
+    adapter._client = mock_client
+
+    results = asyncio.run(adapter.probe(persisted))
 
     assert len(results) == 3
     assert all(r.available for r in results)
@@ -207,9 +243,12 @@ def test_probe_all_available() -> None:
 def test_probe_unavailable_when_api_down() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter_apikey()
-    with patch(_METABASE_MODULE) as mock_httpx:
-        mock_httpx.get.side_effect = Exception("Connection refused")
-        results = asyncio.run(adapter.probe(persisted))
+    mock_client = AsyncMock()
+    mock_client.get.side_effect = Exception("Connection refused")
+    adapter._client = mock_client
+
+    results = asyncio.run(adapter.probe(persisted))
+
     assert all(not r.available for r in results)
 
 
@@ -217,9 +256,11 @@ def test_probe_subset_of_capabilities() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter_apikey()
     caps = frozenset({AdapterCapability.DISCOVER})
-    with patch(_METABASE_MODULE) as mock_httpx:
-        mock_httpx.get.return_value = _mock_response({"data": []})
-        results = asyncio.run(adapter.probe(persisted, capabilities=caps))
+    mock_client = _make_mock_client(get_return=_mock_response({"data": []}))
+    adapter._client = mock_client
+
+    results = asyncio.run(adapter.probe(persisted, capabilities=caps))
+
     assert len(results) == 1
     assert results[0].capability == AdapterCapability.DISCOVER
 
@@ -256,16 +297,18 @@ _COLLECTION_LIST = [
 def test_discover_returns_databases_and_collections() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter_apikey()
-    with patch(_METABASE_MODULE) as mock_httpx:
-        def get_side_effect(url, **kwargs):
-            if "/api/database" in url:
-                return _mock_response(_DB_LIST)
-            if "/api/collection" in url:
-                return _mock_response(_COLLECTION_LIST)
-            return _mock_response({})
 
-        mock_httpx.get.side_effect = get_side_effect
-        snapshot = asyncio.run(adapter.discover(persisted))
+    def get_side_effect(url, **kwargs):
+        if "/api/database" in url:
+            return _mock_response(_DB_LIST)
+        if "/api/collection" in url:
+            return _mock_response(_COLLECTION_LIST)
+        return _mock_response({})
+
+    mock_client = _make_mock_client(get_side_effect=get_side_effect)
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.discover(persisted))
 
     # 2 databases + 1 non-archived collection
     assert len(snapshot.containers) == 3
@@ -276,14 +319,16 @@ def test_discover_returns_databases_and_collections() -> None:
 def test_discover_skips_archived_collections() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter_apikey()
-    with patch(_METABASE_MODULE) as mock_httpx:
-        def get_side_effect(url, **kwargs):
-            if "/api/database" in url:
-                return _mock_response({"data": []})
-            return _mock_response(_COLLECTION_LIST)
 
-        mock_httpx.get.side_effect = get_side_effect
-        snapshot = asyncio.run(adapter.discover(persisted))
+    def get_side_effect(url, **kwargs):
+        if "/api/database" in url:
+            return _mock_response({"data": []})
+        return _mock_response(_COLLECTION_LIST)
+
+    mock_client = _make_mock_client(get_side_effect=get_side_effect)
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.discover(persisted))
 
     collection_ids = [c.container_id for c in snapshot.containers]
     assert "metabase://collection/2" not in collection_ids
@@ -293,14 +338,16 @@ def test_discover_skips_archived_collections() -> None:
 def test_discover_database_container_id_format() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter_apikey()
-    with patch(_METABASE_MODULE) as mock_httpx:
-        def get_side_effect(url, **kwargs):
-            if "/api/database" in url:
-                return _mock_response(_DB_LIST)
-            return _mock_response([])
 
-        mock_httpx.get.side_effect = get_side_effect
-        snapshot = asyncio.run(adapter.discover(persisted))
+    def get_side_effect(url, **kwargs):
+        if "/api/database" in url:
+            return _mock_response(_DB_LIST)
+        return _mock_response([])
+
+    mock_client = _make_mock_client(get_side_effect=get_side_effect)
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.discover(persisted))
 
     db_containers = [c for c in snapshot.containers if c.container_type == "database"]
     assert any(c.container_id == "metabase://database/1" for c in db_containers)
@@ -309,14 +356,16 @@ def test_discover_database_container_id_format() -> None:
 def test_discover_meta_capability() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter_apikey()
-    with patch(_METABASE_MODULE) as mock_httpx:
-        def get_side_effect(url, **kwargs):
-            if "/api/database" in url:
-                return _mock_response({"data": []})
-            return _mock_response([])
 
-        mock_httpx.get.side_effect = get_side_effect
-        snapshot = asyncio.run(adapter.discover(persisted))
+    def get_side_effect(url, **kwargs):
+        if "/api/database" in url:
+            return _mock_response({"data": []})
+        return _mock_response([])
+
+    mock_client = _make_mock_client(get_side_effect=get_side_effect)
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.discover(persisted))
 
     assert snapshot.meta.capability == AdapterCapability.DISCOVER
     assert snapshot.meta.adapter_kind.value == "metabase"
@@ -367,16 +416,18 @@ _DB_METADATA = {
 def test_extract_schema_maps_tables_and_columns() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter_apikey()
-    with patch(_METABASE_MODULE) as mock_httpx:
-        def get_side_effect(url, **kwargs):
-            if "metadata" in url:
-                return _mock_response(_DB_METADATA)
-            if "/api/database" in url:
-                return _mock_response(_DB_LIST)
-            return _mock_response({})
 
-        mock_httpx.get.side_effect = get_side_effect
-        snapshot = asyncio.run(adapter.extract_schema(persisted))
+    def get_side_effect(url, **kwargs):
+        if "metadata" in url:
+            return _mock_response(_DB_METADATA)
+        if "/api/database" in url:
+            return _mock_response(_DB_LIST)
+        return _mock_response({})
+
+    mock_client = _make_mock_client(get_side_effect=get_side_effect)
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.extract_schema(persisted))
 
     assert len(snapshot.objects) == 4  # 2 tables per 2 DBs (second DB same metadata)
     orders = next(o for o in snapshot.objects if o.object_name == "orders")
@@ -390,16 +441,18 @@ def test_extract_schema_maps_tables_and_columns() -> None:
 def test_extract_schema_view_kind() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter_apikey()
-    with patch(_METABASE_MODULE) as mock_httpx:
-        def get_side_effect(url, **kwargs):
-            if "metadata" in url:
-                return _mock_response(_DB_METADATA)
-            if "/api/database" in url:
-                return _mock_response({"data": [{"id": 1, "name": "DB", "engine": "postgres"}]})
-            return _mock_response({})
 
-        mock_httpx.get.side_effect = get_side_effect
-        snapshot = asyncio.run(adapter.extract_schema(persisted))
+    def get_side_effect(url, **kwargs):
+        if "metadata" in url:
+            return _mock_response(_DB_METADATA)
+        if "/api/database" in url:
+            return _mock_response({"data": [{"id": 1, "name": "DB", "engine": "postgres"}]})
+        return _mock_response({})
+
+    mock_client = _make_mock_client(get_side_effect=get_side_effect)
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.extract_schema(persisted))
 
     from alma_connectors.source_adapter_v2 import SchemaObjectKind
     view = next(o for o in snapshot.objects if o.object_name == "user_view")
@@ -409,19 +462,21 @@ def test_extract_schema_view_kind() -> None:
 def test_extract_schema_skips_failed_databases() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter_apikey()
-    with patch(_METABASE_MODULE) as mock_httpx:
-        metadata_fail = _mock_response({}, status_code=403)
-        metadata_fail.raise_for_status.side_effect = Exception("403 Forbidden")
 
-        def get_side_effect(url, **kwargs):
-            if "metadata" in url:
-                return metadata_fail
-            if "/api/database" in url:
-                return _mock_response({"data": [{"id": 1, "name": "DB", "engine": "postgres"}]})
-            return _mock_response({})
+    metadata_fail = _mock_response({}, status_code=403)
+    metadata_fail.raise_for_status.side_effect = Exception("403 Forbidden")
 
-        mock_httpx.get.side_effect = get_side_effect
-        snapshot = asyncio.run(adapter.extract_schema(persisted))
+    def get_side_effect(url, **kwargs):
+        if "metadata" in url:
+            return metadata_fail
+        if "/api/database" in url:
+            return _mock_response({"data": [{"id": 1, "name": "DB", "engine": "postgres"}]})
+        return _mock_response({})
+
+    mock_client = _make_mock_client(get_side_effect=get_side_effect)
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.extract_schema(persisted))
 
     assert len(snapshot.objects) == 0
 
@@ -429,14 +484,16 @@ def test_extract_schema_skips_failed_databases() -> None:
 def test_extract_schema_meta_capability() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter_apikey()
-    with patch(_METABASE_MODULE) as mock_httpx:
-        def get_side_effect(url, **kwargs):
-            if "/api/database" in url:
-                return _mock_response({"data": []})
-            return _mock_response({})
 
-        mock_httpx.get.side_effect = get_side_effect
-        snapshot = asyncio.run(adapter.extract_schema(persisted))
+    def get_side_effect(url, **kwargs):
+        if "/api/database" in url:
+            return _mock_response({"data": []})
+        return _mock_response({})
+
+    mock_client = _make_mock_client(get_side_effect=get_side_effect)
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.extract_schema(persisted))
 
     assert snapshot.meta.capability == AdapterCapability.SCHEMA
 
@@ -468,20 +525,21 @@ _ACTIVITY_FEED = [
 def test_extract_traffic_oss_activity_feed() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter_apikey()
-    with patch(_METABASE_MODULE) as mock_httpx:
-        ee_resp = _mock_response({}, status_code=404)
-        ee_resp.raise_for_status.side_effect = Exception("404")
-        activity_resp = _mock_response(_ACTIVITY_FEED)
 
-        def get_side_effect(url, **kwargs):
-            if "ee/audit" in url:
-                return ee_resp
-            if "/api/activity" in url:
-                return activity_resp
-            return _mock_response({})
+    ee_resp = _mock_response({}, status_code=404)
+    ee_resp.raise_for_status.side_effect = Exception("404")
 
-        mock_httpx.get.side_effect = get_side_effect
-        result = asyncio.run(adapter.extract_traffic(persisted))
+    def get_side_effect(url, **kwargs):
+        if "ee/audit" in url:
+            return ee_resp
+        if "/api/activity" in url:
+            return _mock_response(_ACTIVITY_FEED)
+        return _mock_response({})
+
+    mock_client = _make_mock_client(get_side_effect=get_side_effect)
+    adapter._client = mock_client
+
+    result = asyncio.run(adapter.extract_traffic(persisted))
 
     # Only card-query topic should be included
     assert len(result.events) == 1
@@ -496,17 +554,19 @@ def test_extract_traffic_since_filter() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter_apikey()
     since = datetime(2024, 1, 15, 11, 0, 0, tzinfo=UTC)  # after both events
-    with patch(_METABASE_MODULE) as mock_httpx:
-        ee_resp = _mock_response({}, status_code=404)
-        ee_resp.raise_for_status.side_effect = Exception("404")
 
-        def get_side_effect(url, **kwargs):
-            if "ee/audit" in url:
-                return ee_resp
-            return _mock_response(_ACTIVITY_FEED)
+    ee_resp = _mock_response({}, status_code=404)
+    ee_resp.raise_for_status.side_effect = Exception("404")
 
-        mock_httpx.get.side_effect = get_side_effect
-        result = asyncio.run(adapter.extract_traffic(persisted, since=since))
+    def get_side_effect(url, **kwargs):
+        if "ee/audit" in url:
+            return ee_resp
+        return _mock_response(_ACTIVITY_FEED)
+
+    mock_client = _make_mock_client(get_side_effect=get_side_effect)
+    adapter._client = mock_client
+
+    result = asyncio.run(adapter.extract_traffic(persisted, since=since))
 
     assert len(result.events) == 0
 
@@ -528,14 +588,16 @@ def test_extract_traffic_enterprise_endpoint_preferred() -> None:
             }
         ]
     }
-    with patch(_METABASE_MODULE) as mock_httpx:
-        def get_side_effect(url, **kwargs):
-            if "ee/audit" in url:
-                return _mock_response(ee_data)
-            return _mock_response(_ACTIVITY_FEED)
 
-        mock_httpx.get.side_effect = get_side_effect
-        result = asyncio.run(adapter.extract_traffic(persisted))
+    def get_side_effect(url, **kwargs):
+        if "ee/audit" in url:
+            return _mock_response(ee_data)
+        return _mock_response(_ACTIVITY_FEED)
+
+    mock_client = _make_mock_client(get_side_effect=get_side_effect)
+    adapter._client = mock_client
+
+    result = asyncio.run(adapter.extract_traffic(persisted))
 
     assert len(result.events) == 1
     assert result.events[0].sql == "SELECT 1"
@@ -545,17 +607,19 @@ def test_extract_traffic_enterprise_endpoint_preferred() -> None:
 def test_extract_traffic_meta_capability() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter_apikey()
-    with patch(_METABASE_MODULE) as mock_httpx:
-        ee_resp = _mock_response({}, status_code=404)
-        ee_resp.raise_for_status.side_effect = Exception("404")
 
-        def get_side_effect(url, **kwargs):
-            if "ee/audit" in url:
-                return ee_resp
-            return _mock_response([])
+    ee_resp = _mock_response({}, status_code=404)
+    ee_resp.raise_for_status.side_effect = Exception("404")
 
-        mock_httpx.get.side_effect = get_side_effect
-        result = asyncio.run(adapter.extract_traffic(persisted))
+    def get_side_effect(url, **kwargs):
+        if "ee/audit" in url:
+            return ee_resp
+        return _mock_response([])
+
+    mock_client = _make_mock_client(get_side_effect=get_side_effect)
+    adapter._client = mock_client
+
+    result = asyncio.run(adapter.extract_traffic(persisted))
 
     assert result.meta.capability == AdapterCapability.TRAFFIC
 

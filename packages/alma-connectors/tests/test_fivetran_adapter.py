@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -22,7 +22,6 @@ from alma_connectors.source_adapter_v2 import AdapterCapability, LineageEdgeKind
 # ---------------------------------------------------------------------------
 
 _ADAPTER_ID = "ffffffff-eeee-dddd-cccc-bbbbbbbbbbbb"
-_FIVETRAN_MODULE = "alma_connectors.adapters.fivetran.httpx"
 
 
 def _make_persisted() -> PersistedSourceAdapter:
@@ -47,6 +46,20 @@ def _mock_response(data: object, *, status_code: int = 200) -> MagicMock:
     resp.json.return_value = data
     resp.raise_for_status = MagicMock()
     return resp
+
+
+def _make_mock_client(
+    *,
+    get_return=None,
+    get_side_effect=None,
+) -> AsyncMock:
+    """Create an AsyncMock httpx client."""
+    mock_client = AsyncMock()
+    if get_return is not None:
+        mock_client.get.return_value = get_return
+    if get_side_effect is not None:
+        mock_client.get.side_effect = get_side_effect
+    return mock_client
 
 
 # Sample connector list response (single page, no cursor)
@@ -144,21 +157,24 @@ def test_constructor_strips_trailing_slash_from_base() -> None:
 
 def test_api_get_uses_basic_auth() -> None:
     adapter = _make_adapter()
-    with patch(_FIVETRAN_MODULE) as mock_httpx:
-        mock_httpx.get.return_value = _mock_response({"data": {}})
-        adapter._api_get("v1/connectors")
-        _, kwargs = mock_httpx.get.call_args
-        assert kwargs["auth"] == ("key123", "secret456")
+    mock_client = _make_mock_client(get_return=_mock_response({"data": {}}))
+    adapter._client = mock_client
+
+    asyncio.run(adapter._api_get("v1/connectors"))
+
+    _, kwargs = mock_client.get.call_args
+    assert kwargs["auth"] == ("key123", "secret456")
 
 
 def test_api_get_raises_on_http_error() -> None:
     adapter = _make_adapter()
-    with patch(_FIVETRAN_MODULE) as mock_httpx:
-        resp = _mock_response({}, status_code=401)
-        resp.raise_for_status.side_effect = Exception("401 Unauthorized")
-        mock_httpx.get.return_value = resp
-        with pytest.raises(Exception, match="401"):
-            adapter._api_get("v1/connectors")
+    resp = _mock_response({}, status_code=401)
+    resp.raise_for_status.side_effect = Exception("401 Unauthorized")
+    mock_client = _make_mock_client(get_return=resp)
+    adapter._client = mock_client
+
+    with pytest.raises(Exception, match="401"):
+        asyncio.run(adapter._api_get("v1/connectors"))
 
 
 # ---------------------------------------------------------------------------
@@ -169,11 +185,13 @@ def test_api_get_raises_on_http_error() -> None:
 def test_test_connection_success() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter()
-    with patch(_FIVETRAN_MODULE) as mock_httpx:
-        mock_httpx.get.return_value = _mock_response(
-            {"data": {"account_name": "Acme Corp"}}
-        )
-        result = asyncio.run(adapter.test_connection(persisted))
+    mock_client = _make_mock_client(
+        get_return=_mock_response({"data": {"account_name": "Acme Corp"}})
+    )
+    adapter._client = mock_client
+
+    result = asyncio.run(adapter.test_connection(persisted))
+
     assert result.success is True
     assert "Acme Corp" in result.message
 
@@ -181,9 +199,12 @@ def test_test_connection_success() -> None:
 def test_test_connection_failure() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter()
-    with patch(_FIVETRAN_MODULE) as mock_httpx:
-        mock_httpx.get.side_effect = Exception("Connection refused")
-        result = asyncio.run(adapter.test_connection(persisted))
+    mock_client = AsyncMock()
+    mock_client.get.side_effect = Exception("Connection refused")
+    adapter._client = mock_client
+
+    result = asyncio.run(adapter.test_connection(persisted))
+
     assert result.success is False
     assert "Connection refused" in result.message
 
@@ -196,9 +217,11 @@ def test_test_connection_failure() -> None:
 def test_probe_returns_one_result_per_capability() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter()
-    with patch(_FIVETRAN_MODULE) as mock_httpx:
-        mock_httpx.get.return_value = _mock_response(_CONNECTORS_RESPONSE)
-        results = asyncio.run(adapter.probe(persisted))
+    mock_client = _make_mock_client(get_return=_mock_response(_CONNECTORS_RESPONSE))
+    adapter._client = mock_client
+
+    results = asyncio.run(adapter.probe(persisted))
+
     assert len(results) == 3
     caps = {r.capability for r in results}
     assert caps == {AdapterCapability.DISCOVER, AdapterCapability.LINEAGE, AdapterCapability.ORCHESTRATION}
@@ -207,9 +230,12 @@ def test_probe_returns_one_result_per_capability() -> None:
 def test_probe_unavailable_when_api_down() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter()
-    with patch(_FIVETRAN_MODULE) as mock_httpx:
-        mock_httpx.get.side_effect = Exception("timeout")
-        results = asyncio.run(adapter.probe(persisted))
+    mock_client = AsyncMock()
+    mock_client.get.side_effect = Exception("timeout")
+    adapter._client = mock_client
+
+    results = asyncio.run(adapter.probe(persisted))
+
     assert all(not r.available for r in results)
 
 
@@ -217,9 +243,11 @@ def test_probe_subset_capabilities() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter()
     caps = frozenset({AdapterCapability.LINEAGE})
-    with patch(_FIVETRAN_MODULE) as mock_httpx:
-        mock_httpx.get.return_value = _mock_response(_CONNECTORS_RESPONSE)
-        results = asyncio.run(adapter.probe(persisted, capabilities=caps))
+    mock_client = _make_mock_client(get_return=_mock_response(_CONNECTORS_RESPONSE))
+    adapter._client = mock_client
+
+    results = asyncio.run(adapter.probe(persisted, capabilities=caps))
+
     assert len(results) == 1
     assert results[0].capability == AdapterCapability.LINEAGE
 
@@ -232,18 +260,22 @@ def test_probe_subset_capabilities() -> None:
 def test_discover_returns_one_container_per_connector() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter()
-    with patch(_FIVETRAN_MODULE) as mock_httpx:
-        mock_httpx.get.return_value = _mock_response(_CONNECTORS_RESPONSE)
-        snapshot = asyncio.run(adapter.discover(persisted))
+    mock_client = _make_mock_client(get_return=_mock_response(_CONNECTORS_RESPONSE))
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.discover(persisted))
+
     assert len(snapshot.containers) == 2
 
 
 def test_discover_container_id_format() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter()
-    with patch(_FIVETRAN_MODULE) as mock_httpx:
-        mock_httpx.get.return_value = _mock_response(_CONNECTORS_RESPONSE)
-        snapshot = asyncio.run(adapter.discover(persisted))
+    mock_client = _make_mock_client(get_return=_mock_response(_CONNECTORS_RESPONSE))
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.discover(persisted))
+
     ids = {c.container_id for c in snapshot.containers}
     assert "fivetran://connector/iodize_impressive" in ids
     assert "fivetran://connector/singing_modular" in ids
@@ -252,18 +284,22 @@ def test_discover_container_id_format() -> None:
 def test_discover_container_type_is_connector() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter()
-    with patch(_FIVETRAN_MODULE) as mock_httpx:
-        mock_httpx.get.return_value = _mock_response(_CONNECTORS_RESPONSE)
-        snapshot = asyncio.run(adapter.discover(persisted))
+    mock_client = _make_mock_client(get_return=_mock_response(_CONNECTORS_RESPONSE))
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.discover(persisted))
+
     assert all(c.container_type == "connector" for c in snapshot.containers)
 
 
 def test_discover_display_name_uses_schema() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter()
-    with patch(_FIVETRAN_MODULE) as mock_httpx:
-        mock_httpx.get.return_value = _mock_response(_CONNECTORS_RESPONSE)
-        snapshot = asyncio.run(adapter.discover(persisted))
+    mock_client = _make_mock_client(get_return=_mock_response(_CONNECTORS_RESPONSE))
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.discover(persisted))
+
     names = {c.display_name for c in snapshot.containers}
     assert "production_pg" in names
     assert "salesforce_crm" in names
@@ -272,9 +308,11 @@ def test_discover_display_name_uses_schema() -> None:
 def test_discover_metadata_includes_service() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter()
-    with patch(_FIVETRAN_MODULE) as mock_httpx:
-        mock_httpx.get.return_value = _mock_response(_CONNECTORS_RESPONSE)
-        snapshot = asyncio.run(adapter.discover(persisted))
+    mock_client = _make_mock_client(get_return=_mock_response(_CONNECTORS_RESPONSE))
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.discover(persisted))
+
     pg = next(c for c in snapshot.containers if c.display_name == "production_pg")
     assert pg.metadata["service"] == "postgres"
 
@@ -294,20 +332,24 @@ def test_discover_paginates_when_cursor_present() -> None:
             "next_cursor": None,
         }
     }
-    with patch(_FIVETRAN_MODULE) as mock_httpx:
-        mock_httpx.get.side_effect = [_mock_response(page1), _mock_response(page2)]
-        snapshot = asyncio.run(adapter.discover(persisted))
+    mock_client = _make_mock_client(get_side_effect=[_mock_response(page1), _mock_response(page2)])
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.discover(persisted))
+
     assert len(snapshot.containers) == 2
 
 
 def test_discover_meta_capability() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter()
-    with patch(_FIVETRAN_MODULE) as mock_httpx:
-        mock_httpx.get.return_value = _mock_response(
-            {"data": {"items": [], "next_cursor": None}}
-        )
-        snapshot = asyncio.run(adapter.discover(persisted))
+    mock_client = _make_mock_client(
+        get_return=_mock_response({"data": {"items": [], "next_cursor": None}})
+    )
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.discover(persisted))
+
     assert snapshot.meta.capability == AdapterCapability.DISCOVER
 
 
@@ -319,14 +361,16 @@ def test_discover_meta_capability() -> None:
 def test_extract_lineage_maps_source_to_destination() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter()
-    with patch(_FIVETRAN_MODULE) as mock_httpx:
-        def get_side_effect(url, **kwargs):
-            if "schemas" in url:
-                return _mock_response(_SCHEMAS_RESPONSE)
-            return _mock_response(_CONNECTORS_RESPONSE)
 
-        mock_httpx.get.side_effect = get_side_effect
-        snapshot = asyncio.run(adapter.extract_lineage(persisted))
+    def get_side_effect(url, **kwargs):
+        if "schemas" in url:
+            return _mock_response(_SCHEMAS_RESPONSE)
+        return _mock_response(_CONNECTORS_RESPONSE)
+
+    mock_client = _make_mock_client(get_side_effect=get_side_effect)
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.extract_lineage(persisted))
 
     # 2 enabled tables × 2 connectors (same mock applies to both)
     assert len(snapshot.edges) == 4
@@ -335,14 +379,16 @@ def test_extract_lineage_maps_source_to_destination() -> None:
 def test_extract_lineage_edge_kinds() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter()
-    with patch(_FIVETRAN_MODULE) as mock_httpx:
-        def get_side_effect(url, **kwargs):
-            if "schemas" in url:
-                return _mock_response(_SCHEMAS_RESPONSE)
-            return _mock_response(_CONNECTORS_RESPONSE)
 
-        mock_httpx.get.side_effect = get_side_effect
-        snapshot = asyncio.run(adapter.extract_lineage(persisted))
+    def get_side_effect(url, **kwargs):
+        if "schemas" in url:
+            return _mock_response(_SCHEMAS_RESPONSE)
+        return _mock_response(_CONNECTORS_RESPONSE)
+
+    mock_client = _make_mock_client(get_side_effect=get_side_effect)
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.extract_lineage(persisted))
 
     assert all(e.edge_kind == LineageEdgeKind.CONNECTOR_API for e in snapshot.edges)
     assert all(e.confidence == 1.0 for e in snapshot.edges)
@@ -357,14 +403,16 @@ def test_extract_lineage_skips_disabled_tables() -> None:
             "next_cursor": None,
         }
     }
-    with patch(_FIVETRAN_MODULE) as mock_httpx:
-        def get_side_effect(url, **kwargs):
-            if "schemas" in url:
-                return _mock_response(_SCHEMAS_RESPONSE)
-            return _mock_response(single_connector)
 
-        mock_httpx.get.side_effect = get_side_effect
-        snapshot = asyncio.run(adapter.extract_lineage(persisted))
+    def get_side_effect(url, **kwargs):
+        if "schemas" in url:
+            return _mock_response(_SCHEMAS_RESPONSE)
+        return _mock_response(single_connector)
+
+    mock_client = _make_mock_client(get_side_effect=get_side_effect)
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.extract_lineage(persisted))
 
     table_names = [e.source_object for e in snapshot.edges]
     assert not any("internal_audit" in t for t in table_names)
@@ -373,17 +421,19 @@ def test_extract_lineage_skips_disabled_tables() -> None:
 def test_extract_lineage_skips_connector_on_error() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter()
-    with patch(_FIVETRAN_MODULE) as mock_httpx:
-        schemas_fail = _mock_response({}, status_code=404)
-        schemas_fail.raise_for_status.side_effect = Exception("404")
 
-        def get_side_effect(url, **kwargs):
-            if "schemas" in url:
-                return schemas_fail
-            return _mock_response(_CONNECTORS_RESPONSE)
+    schemas_fail = _mock_response({}, status_code=404)
+    schemas_fail.raise_for_status.side_effect = Exception("404")
 
-        mock_httpx.get.side_effect = get_side_effect
-        snapshot = asyncio.run(adapter.extract_lineage(persisted))
+    def get_side_effect(url, **kwargs):
+        if "schemas" in url:
+            return schemas_fail
+        return _mock_response(_CONNECTORS_RESPONSE)
+
+    mock_client = _make_mock_client(get_side_effect=get_side_effect)
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.extract_lineage(persisted))
 
     assert len(snapshot.edges) == 0
 
@@ -391,11 +441,13 @@ def test_extract_lineage_skips_connector_on_error() -> None:
 def test_extract_lineage_meta_capability() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter()
-    with patch(_FIVETRAN_MODULE) as mock_httpx:
-        mock_httpx.get.return_value = _mock_response(
-            {"data": {"items": [], "next_cursor": None}}
-        )
-        snapshot = asyncio.run(adapter.extract_lineage(persisted))
+    mock_client = _make_mock_client(
+        get_return=_mock_response({"data": {"items": [], "next_cursor": None}})
+    )
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.extract_lineage(persisted))
+
     assert snapshot.meta.capability == AdapterCapability.LINEAGE
 
 
@@ -407,27 +459,29 @@ def test_extract_lineage_meta_capability() -> None:
 def test_extract_orchestration_maps_sync_schedule() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter()
-    with patch(_FIVETRAN_MODULE) as mock_httpx:
-        def get_side_effect(url, **kwargs):
-            if url.endswith("/iodize_impressive") or "/connectors/iodize_impressive" in url:
-                return _mock_response(_CONNECTOR_DETAIL_RESPONSE)
-            if url.endswith("/singing_modular") or "/connectors/singing_modular" in url:
-                return _mock_response({
-                    "data": {
-                        "id": "singing_modular",
-                        "service": "salesforce",
-                        "schema": "salesforce_crm",
-                        "group_id": "g",
-                        "sync_frequency": 1440,
-                        "schedule_type": "manual",
-                        "succeeded_at": None,
-                        "status": {"sync_state": "paused"},
-                    }
-                })
-            return _mock_response(_CONNECTORS_RESPONSE)
 
-        mock_httpx.get.side_effect = get_side_effect
-        snapshot = asyncio.run(adapter.extract_orchestration(persisted))
+    def get_side_effect(url, **kwargs):
+        if url.endswith("/iodize_impressive") or "/connectors/iodize_impressive" in url:
+            return _mock_response(_CONNECTOR_DETAIL_RESPONSE)
+        if url.endswith("/singing_modular") or "/connectors/singing_modular" in url:
+            return _mock_response({
+                "data": {
+                    "id": "singing_modular",
+                    "service": "salesforce",
+                    "schema": "salesforce_crm",
+                    "group_id": "g",
+                    "sync_frequency": 1440,
+                    "schedule_type": "manual",
+                    "succeeded_at": None,
+                    "status": {"sync_state": "paused"},
+                }
+            })
+        return _mock_response(_CONNECTORS_RESPONSE)
+
+    mock_client = _make_mock_client(get_side_effect=get_side_effect)
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.extract_orchestration(persisted))
 
     assert len(snapshot.units) == 2
     pg_unit = next(u for u in snapshot.units if "iodize_impressive" in u.unit_id)
@@ -438,14 +492,16 @@ def test_extract_orchestration_maps_sync_schedule() -> None:
 def test_extract_orchestration_unit_type() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter()
-    with patch(_FIVETRAN_MODULE) as mock_httpx:
-        def get_side_effect(url, **kwargs):
-            if "/connectors/" in url and not url.endswith("/connectors"):
-                return _mock_response(_CONNECTOR_DETAIL_RESPONSE)
-            return _mock_response(_CONNECTORS_RESPONSE)
 
-        mock_httpx.get.side_effect = get_side_effect
-        snapshot = asyncio.run(adapter.extract_orchestration(persisted))
+    def get_side_effect(url, **kwargs):
+        if "/connectors/" in url and not url.endswith("/connectors"):
+            return _mock_response(_CONNECTOR_DETAIL_RESPONSE)
+        return _mock_response(_CONNECTORS_RESPONSE)
+
+    mock_client = _make_mock_client(get_side_effect=get_side_effect)
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.extract_orchestration(persisted))
 
     assert all(u.unit_type == "connector_sync" for u in snapshot.units)
 
@@ -453,14 +509,16 @@ def test_extract_orchestration_unit_type() -> None:
 def test_extract_orchestration_last_run_status() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter()
-    with patch(_FIVETRAN_MODULE) as mock_httpx:
-        def get_side_effect(url, **kwargs):
-            if "/connectors/" in url and not url.endswith("/connectors"):
-                return _mock_response(_CONNECTOR_DETAIL_RESPONSE)
-            return _mock_response(_CONNECTORS_RESPONSE)
 
-        mock_httpx.get.side_effect = get_side_effect
-        snapshot = asyncio.run(adapter.extract_orchestration(persisted))
+    def get_side_effect(url, **kwargs):
+        if "/connectors/" in url and not url.endswith("/connectors"):
+            return _mock_response(_CONNECTOR_DETAIL_RESPONSE)
+        return _mock_response(_CONNECTORS_RESPONSE)
+
+    mock_client = _make_mock_client(get_side_effect=get_side_effect)
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.extract_orchestration(persisted))
 
     pg_unit = next(u for u in snapshot.units if "iodize_impressive" in u.unit_id)
     assert pg_unit.last_run_status == "scheduled"
@@ -469,11 +527,13 @@ def test_extract_orchestration_last_run_status() -> None:
 def test_extract_orchestration_meta_capability() -> None:
     persisted = _make_persisted()
     adapter = _make_adapter()
-    with patch(_FIVETRAN_MODULE) as mock_httpx:
-        mock_httpx.get.return_value = _mock_response(
-            {"data": {"items": [], "next_cursor": None}}
-        )
-        snapshot = asyncio.run(adapter.extract_orchestration(persisted))
+    mock_client = _make_mock_client(
+        get_return=_mock_response({"data": {"items": [], "next_cursor": None}})
+    )
+    adapter._client = mock_client
+
+    snapshot = asyncio.run(adapter.extract_orchestration(persisted))
+
     assert snapshot.meta.capability == AdapterCapability.ORCHESTRATION
 
 

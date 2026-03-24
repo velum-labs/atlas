@@ -30,6 +30,7 @@ Example usage::
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any
@@ -134,6 +135,8 @@ class LookerAdapter(BaseAdapterV2):
         self._timeout_seconds = timeout_seconds
         self._access_token: str | None = None
         self._token_expires_at: float = 0.0
+        self._client: httpx.AsyncClient | None = None
+        self._token_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -145,31 +148,44 @@ class LookerAdapter(BaseAdapterV2):
     def _base_url(self) -> str:
         return f"{self._instance_url}:{self._port}/api/4.0"
 
-    def _get_access_token(self) -> str:
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient()
+        return self._client
+
+    async def close(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+    async def _get_access_token(self) -> str:
         """Obtain or refresh an OAuth2 access token via POST /api/4.0/login.
 
         Caches the token and only re-fetches when it is within 60 seconds of
-        expiry.
+        expiry.  An asyncio.Lock prevents concurrent coroutines from
+        double-fetching tokens.
 
         Returns:
             Valid bearer token string.
         """
-        now = time.monotonic()
-        if self._access_token and now < self._token_expires_at - 60:
+        async with self._token_lock:
+            now = time.monotonic()
+            if self._access_token and now < self._token_expires_at - 60:
+                return self._access_token
+
+            client = await self._get_client()
+            resp = await client.post(
+                f"{self._base_url()}/login",
+                data={"client_id": self._client_id, "client_secret": self._client_secret},
+                timeout=self._timeout_seconds,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            self._access_token = data["access_token"]
+            self._token_expires_at = now + data.get("expires_in", 3600)
             return self._access_token
 
-        resp = httpx.post(
-            f"{self._base_url()}/login",
-            data={"client_id": self._client_id, "client_secret": self._client_secret},
-            timeout=self._timeout_seconds,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        self._access_token = data["access_token"]
-        self._token_expires_at = now + data.get("expires_in", 3600)
-        return self._access_token
-
-    def _api_get(self, path: str, *, params: dict[str, Any] | None = None) -> Any:
+    async def _api_get(self, path: str, *, params: dict[str, Any] | None = None) -> Any:
         """Execute an authenticated GET request against the Looker API.
 
         Automatically refreshes the access token on a 401 response and retries
@@ -182,8 +198,9 @@ class LookerAdapter(BaseAdapterV2):
         Returns:
             Parsed JSON response (dict or list).
         """
-        token = self._get_access_token()
-        resp = httpx.get(
+        token = await self._get_access_token()
+        client = await self._get_client()
+        resp = await client.get(
             f"{self._base_url()}/{path}",
             headers={"Authorization": f"token {token}"},
             params=params,
@@ -193,8 +210,8 @@ class LookerAdapter(BaseAdapterV2):
             # Token expired mid-flight — clear cache and retry once.
             self._access_token = None
             self._token_expires_at = 0.0
-            token = self._get_access_token()
-            resp = httpx.get(
+            token = await self._get_access_token()
+            resp = await client.get(
                 f"{self._base_url()}/{path}",
                 headers={"Authorization": f"token {token}"},
                 params=params,
@@ -217,7 +234,7 @@ class LookerAdapter(BaseAdapterV2):
             ConnectionTestResult indicating success or failure.
         """
         try:
-            me = self._api_get("user")
+            me = await self._api_get("user")
             return ConnectionTestResult(
                 success=True,
                 message=f"Looker instance reachable; logged in as {me.get('email', 'unknown')}",
@@ -248,14 +265,14 @@ class LookerAdapter(BaseAdapterV2):
         message: str | None = None
 
         try:
-            self._api_get("user")
+            await self._api_get("user")
         except Exception as exc:
             available = False
             message = f"auth check failed: {exc}"
 
         if available:
             try:
-                self._api_get("lookml_models", params={"limit": "1"})
+                await self._api_get("lookml_models", params={"limit": "1"})
             except Exception as exc:
                 available = False
                 message = f"model access check failed: {exc}"
@@ -288,7 +305,7 @@ class LookerAdapter(BaseAdapterV2):
             DiscoverySnapshot with containers for all projects, models, and explores.
         """
         t0 = time.monotonic()
-        models = self._api_get("lookml_models")
+        models = await self._api_get("lookml_models")
 
         containers: list[DiscoveredContainer] = []
         seen_projects: set[str] = set()
@@ -341,14 +358,14 @@ class LookerAdapter(BaseAdapterV2):
             SchemaSnapshotV2 with one SchemaObject per explore.
         """
         t0 = time.monotonic()
-        models = self._api_get("lookml_models")
+        models = await self._api_get("lookml_models")
 
         objects: list[SchemaObject] = []
         for model in models:
             model_name = model["name"]
             for explore_stub in model.get("explores", []):
                 explore_name = explore_stub["name"]
-                explore = self._api_get(
+                explore = await self._api_get(
                     f"lookml_models/{model_name}/explores/{explore_name}",
                     params={"fields": "fields"},
                 )
@@ -397,14 +414,14 @@ class LookerAdapter(BaseAdapterV2):
             DefinitionSnapshot with one ObjectDefinition per explore.
         """
         t0 = time.monotonic()
-        models = self._api_get("lookml_models")
+        models = await self._api_get("lookml_models")
 
         definitions: list[ObjectDefinition] = []
         for model in models:
             model_name = model["name"]
             for explore_stub in model.get("explores", []):
                 explore_name = explore_stub["name"]
-                explore = self._api_get(
+                explore = await self._api_get(
                     f"lookml_models/{model_name}/explores/{explore_name}",
                     params={"fields": "fields"},
                 )
@@ -453,14 +470,14 @@ class LookerAdapter(BaseAdapterV2):
             LineageSnapshot with edges from database tables to Looker explores.
         """
         t0 = time.monotonic()
-        models = self._api_get("lookml_models")
+        models = await self._api_get("lookml_models")
 
         edges: list[LineageEdge] = []
         for model in models:
             model_name = model["name"]
             for explore_stub in model.get("explores", []):
                 explore_name = explore_stub["name"]
-                explore = self._api_get(
+                explore = await self._api_get(
                     f"lookml_models/{model_name}/explores/{explore_name}",
                     params={"fields": "name,joins,view_name,sql_table_name"},
                 )

@@ -127,6 +127,7 @@ class MetabaseAdapter(BaseAdapterV2):
         self._password = password
         self._timeout_seconds = timeout_seconds
         self._session_token: str | None = None
+        self._client: httpx.AsyncClient | None = None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -135,12 +136,23 @@ class MetabaseAdapter(BaseAdapterV2):
     def _scope_identifiers(self) -> dict[str, str]:
         return {"instance_url": self._instance_url}
 
-    def _get_auth_headers(self) -> dict[str, str]:
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient()
+        return self._client
+
+    async def close(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+    async def _get_auth_headers(self) -> dict[str, str]:
         """Return the correct authentication headers for API requests."""
         if self._api_key:
             return {"x-api-key": self._api_key}
         if not self._session_token:
-            resp = httpx.post(
+            client = await self._get_client()
+            resp = await client.post(
                 f"{self._instance_url}/api/session",
                 json={"username": self._username, "password": self._password},
                 timeout=self._timeout_seconds,
@@ -149,14 +161,29 @@ class MetabaseAdapter(BaseAdapterV2):
             self._session_token = resp.json()["id"]
         return {"X-Metabase-Session": self._session_token}
 
-    def _api_get(self, path: str, *, params: dict[str, Any] | None = None) -> Any:
-        """Execute an authenticated GET request against the Metabase API."""
-        resp = httpx.get(
+    async def _api_get(self, path: str, *, params: dict[str, Any] | None = None) -> Any:
+        """Execute an authenticated GET request against the Metabase API.
+
+        On a 401 response, clears the session token, re-authenticates, and
+        retries once.
+        """
+        headers = await self._get_auth_headers()
+        client = await self._get_client()
+        resp = await client.get(
             f"{self._instance_url}/api/{path}",
-            headers=self._get_auth_headers(),
+            headers=headers,
             params=params,
             timeout=self._timeout_seconds,
         )
+        if resp.status_code == 401:
+            self._session_token = None
+            headers = await self._get_auth_headers()
+            resp = await client.get(
+                f"{self._instance_url}/api/{path}",
+                headers=headers,
+                params=params,
+                timeout=self._timeout_seconds,
+            )
         resp.raise_for_status()
         return resp.json()
 
@@ -170,7 +197,7 @@ class MetabaseAdapter(BaseAdapterV2):
     ) -> ConnectionTestResult:
         """Validate connectivity by calling ``GET /api/user/current``."""
         try:
-            me = self._api_get("user/current")
+            me = await self._api_get("user/current")
             return ConnectionTestResult(
                 success=True,
                 message=f"Metabase reachable; logged in as {me.get('email', 'unknown')}",
@@ -188,7 +215,7 @@ class MetabaseAdapter(BaseAdapterV2):
 
         # Verify basic connectivity
         try:
-            self._api_get("database")
+            await self._api_get("database")
             db_ok = True
         except Exception:
             db_ok = False
@@ -197,7 +224,7 @@ class MetabaseAdapter(BaseAdapterV2):
         enterprise_traffic = False
         if db_ok and AdapterCapability.TRAFFIC in caps_to_probe:
             try:
-                settings = self._api_get("setting")
+                settings = await self._api_get("setting")
                 features = {}
                 if isinstance(settings, list):
                     features = {
@@ -250,10 +277,10 @@ class MetabaseAdapter(BaseAdapterV2):
         """DISCOVER: list databases and collections → DiscoveredContainers."""
         t0 = time.monotonic()
 
-        db_response = self._api_get("database")
+        db_response = await self._api_get("database")
         databases = db_response.get("data", db_response) if isinstance(db_response, dict) else db_response
 
-        collections = self._api_get("collection")
+        collections = await self._api_get("collection")
 
         containers: list[DiscoveredContainer] = []
         for db in databases:
@@ -297,7 +324,7 @@ class MetabaseAdapter(BaseAdapterV2):
         """SCHEMA: table and field definitions for each connected database."""
         t0 = time.monotonic()
 
-        db_response = self._api_get("database")
+        db_response = await self._api_get("database")
         databases = db_response.get("data", db_response) if isinstance(db_response, dict) else db_response
 
         objects: list[SchemaObject] = []
@@ -305,7 +332,7 @@ class MetabaseAdapter(BaseAdapterV2):
             db_id = db["id"]
             db_name = db["name"]
             try:
-                meta = self._api_get(f"database/{db_id}/metadata", params={"include_hidden": "false"})
+                meta = await self._api_get(f"database/{db_id}/metadata", params={"include_hidden": "false"})
             except Exception:
                 logger.warning("Failed to fetch metadata for database %s (%s)", db_id, db_name)
                 continue
@@ -360,7 +387,7 @@ class MetabaseAdapter(BaseAdapterV2):
             params: dict[str, Any] = {"limit": 1000}
             if since:
                 params["start_date"] = since.isoformat()
-            ee_response = self._api_get("ee/audit-app/query_execution", params=params)
+            ee_response = await self._api_get("ee/audit-app/query_execution", params=params)
             entries = ee_response.get("data", []) if isinstance(ee_response, dict) else ee_response
             for entry in entries:
                 started_raw = entry.get("started_at") or ""
@@ -385,7 +412,7 @@ class MetabaseAdapter(BaseAdapterV2):
 
         if not enterprise_ok:
             # Fall back to OSS activity feed
-            activity = self._api_get("activity", params={"limit": 1000})
+            activity = await self._api_get("activity", params={"limit": 1000})
             if isinstance(activity, dict):
                 activity = activity.get("data", [])
             for entry in activity:
