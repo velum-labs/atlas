@@ -4,7 +4,7 @@ Covers:
     - Sync client: retry on 503, cursor not updated on partial failure, request IDs
     - Enforcement engine: empty schema, malformed contract mode, deterministic IDs
     - Scan pipeline: per-source timeout, adapter construction failure, concurrent semaphore
-    - Security: _validate_identifier rejects injections, config __repr__ redacts secrets
+    - Security: quote_bq_identifier / quote_sf_identifier escape adversarial identifiers, config __repr__ redacts secrets
     - Config: atlas.yml rejects unknown top-level keys
 """
 
@@ -389,53 +389,74 @@ class TestScanPipelineHardening:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class TestIdentifierValidation:
-    """_validate_identifier rejects values containing injection-risk characters."""
+class TestIdentifierQuoting:
+    """quote_bq_identifier / quote_sf_identifier properly escape adversarial inputs."""
 
-    def test_valid_identifier_passes(self):
-        from alma_connectors.adapters.snowflake import _validate_identifier
+    def test_sf_normal_identifier(self):
+        from alma_ports.sql_safety import quote_sf_identifier
 
-        assert _validate_identifier("MY_DATABASE") == "MY_DATABASE"
-        assert _validate_identifier("schema123") == "schema123"
-        assert _validate_identifier("") == ""
+        assert quote_sf_identifier("MY_DATABASE") == '"MY_DATABASE"'
+        assert quote_sf_identifier("schema123") == '"schema123"'
 
-    def test_single_quote_rejected(self):
-        from alma_connectors.adapters.snowflake import _validate_identifier
+    def test_sf_empty_raises(self):
+        from alma_ports.sql_safety import quote_sf_identifier
 
-        with pytest.raises(ValueError, match="disallowed"):
-            _validate_identifier("db'name")
+        with pytest.raises(ValueError, match="must not be empty"):
+            quote_sf_identifier("")
 
-    def test_double_quote_rejected(self):
-        from alma_connectors.adapters.snowflake import _validate_identifier
+    def test_sf_single_quote_escaped(self):
+        from alma_ports.sql_safety import quote_sf_identifier
 
-        with pytest.raises(ValueError, match="disallowed"):
-            _validate_identifier('db"name')
+        # Single quotes are not special in double-quote delimiters; no escaping needed
+        result = quote_sf_identifier("db'name")
+        assert result == '"db\'name"'
 
-    def test_semicolon_rejected(self):
-        from alma_connectors.adapters.snowflake import _validate_identifier
+    def test_sf_double_quote_escaped(self):
+        from alma_ports.sql_safety import quote_sf_identifier
 
-        with pytest.raises(ValueError, match="disallowed"):
-            _validate_identifier("db;DROP TABLE users")
+        result = quote_sf_identifier('db"name')
+        assert result == '"db""name"'
 
-    def test_sql_comment_rejected(self):
-        from alma_connectors.adapters.snowflake import _validate_identifier
+    def test_sf_semicolon_injection_contained(self):
+        from alma_ports.sql_safety import quote_sf_identifier
 
-        with pytest.raises(ValueError, match="disallowed"):
-            _validate_identifier("db--comment")
+        result = quote_sf_identifier("db;DROP TABLE users")
+        assert result == '"db;DROP TABLE users"'
 
-    def test_newline_rejected(self):
-        from alma_connectors.adapters.snowflake import _validate_identifier
+    def test_sf_comment_injection_contained(self):
+        from alma_ports.sql_safety import quote_sf_identifier
 
-        with pytest.raises(ValueError, match="disallowed"):
-            _validate_identifier("db\nname")
+        result = quote_sf_identifier("db--comment")
+        assert result == '"db--comment"'
 
-    def test_bigquery_validate_identifier_same_rules(self):
-        """BigQuery adapter has the same _validate_identifier function."""
-        from alma_connectors.adapters.bigquery import _validate_identifier
+    def test_sf_newline_contained(self):
+        from alma_ports.sql_safety import quote_sf_identifier
 
-        assert _validate_identifier("my-project") == "my-project"
-        with pytest.raises(ValueError, match="disallowed"):
-            _validate_identifier("project';DROP")
+        result = quote_sf_identifier("db\nname")
+        assert result == '"db\nname"'
+
+    def test_bq_normal_identifier(self):
+        from alma_ports.sql_safety import quote_bq_identifier
+
+        assert quote_bq_identifier("my-project") == "`my-project`"
+
+    def test_bq_injection_contained(self):
+        from alma_ports.sql_safety import quote_bq_identifier
+
+        result = quote_bq_identifier("project';DROP")
+        assert result == "`project';DROP`"
+
+    def test_bq_backtick_escaped(self):
+        from alma_ports.sql_safety import quote_bq_identifier
+
+        result = quote_bq_identifier("tab`le")
+        assert result == "`tab\\`le`"
+
+    def test_bq_empty_raises(self):
+        from alma_ports.sql_safety import quote_bq_identifier
+
+        with pytest.raises(ValueError, match="must not be empty"):
+            quote_bq_identifier("")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

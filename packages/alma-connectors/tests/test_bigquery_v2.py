@@ -839,16 +839,21 @@ def test_validate_location_format() -> None:
     _validate_bq_location("eu-west1")
 
 
-def test_validate_malicious_project_id() -> None:
-    """project_id with SQL injection chars raises ValueError from _assert_safe_identifier."""
-    from alma_connectors.adapters.bigquery import _assert_safe_identifier
+def test_quote_bq_identifier_adversarial() -> None:
+    """quote_bq_identifier wraps adversarial project_id values safely in backticks."""
+    from alma_ports.sql_safety import quote_bq_identifier
 
-    with pytest.raises(ValueError, match="project_id"):
-        _assert_safe_identifier("project`DROP TABLE foo;--", "project_id")
-    with pytest.raises(ValueError, match="project_id"):
-        _assert_safe_identifier("project'; DROP TABLE foo;--", "project_id")
-    # safe value passes
-    _assert_safe_identifier("my-project-123", "project_id")
+    # Backtick inside value is escaped
+    result = quote_bq_identifier("project`DROP TABLE foo;--")
+    assert result.startswith("`") and result.endswith("`")
+    assert "\\`" in result
+
+    # Single quote and semicolons are enclosed without any escaping needed
+    result2 = quote_bq_identifier("project'; DROP TABLE foo;--")
+    assert result2 == "`project'; DROP TABLE foo;--`"
+
+    # Normal project ID works unchanged (minus wrapping)
+    assert quote_bq_identifier("my-project-123") == "`my-project-123`"
 
 
 # ---------------------------------------------------------------------------

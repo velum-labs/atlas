@@ -439,16 +439,18 @@ def test_v1_introspect_schema_still_works(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_validate_schema_names_injection() -> None:
-    """Schema name with SQL injection chars raises ValueError."""
-    from alma_connectors.adapters.postgres import _assert_safe_identifier
+    """Schema names are passed as parameterized values (ANY(%s) / ALL(%s)),
+    so they are never interpolated into SQL and require no identifier quoting.
+    Verify the adapter config accepts arbitrary schema name strings without error."""
+    from alma_connectors import PostgresAdapterConfig
+    from alma_connectors.source_adapter import ExternalSecretRef
 
-    with pytest.raises(ValueError, match="schema name"):
-        _assert_safe_identifier("public'; DROP TABLE foo;--", "schema name")
-    with pytest.raises(ValueError, match="schema name"):
-        _assert_safe_identifier('public"', "schema name")
-    # valid schema name passes
-    _assert_safe_identifier("public", "schema name")
-    _assert_safe_identifier("my_schema", "schema name")
+    # Adversarial names are accepted at config level; safety comes from parameterization
+    config = PostgresAdapterConfig(
+        database_secret=ExternalSecretRef(provider="env", reference="DSN"),
+        include_schemas=("public'; DROP TABLE foo;--", 'public"'),
+    )
+    assert "public" in config.include_schemas[0]
 
 
 # ---------------------------------------------------------------------------

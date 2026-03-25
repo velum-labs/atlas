@@ -54,34 +54,9 @@ from alma_connectors.source_adapter_v2 import (
 from alma_connectors.source_adapter_v2 import (
     SchemaObjectKind as V2SchemaObjectKind,
 )
+from alma_ports.sql_safety import quote_bq_identifier
 
 logger = logging.getLogger(__name__)
-
-# Sequences that must not appear in SQL identifiers used in f-string queries.
-# Single hyphens are allowed (valid in BigQuery project IDs like my-project).
-_IDENTIFIER_INJECTION_RE = re.compile(r"""['";\n\r]|--|/\*|\*/""")
-
-
-def _validate_identifier(value: str, name: str = "identifier") -> str:
-    """Reject SQL identifier values that contain injection-risk characters.
-
-    Args:
-        value: The identifier string to validate.
-        name:  Human-readable name used in the error message.
-
-    Returns:
-        The original *value* if it passes validation.
-
-    Raises:
-        ValueError: If *value* contains disallowed characters.
-    """
-    if _IDENTIFIER_INJECTION_RE.search(value):
-        raise ValueError(
-            f"SQL identifier {name!r} contains disallowed characters: {value!r}. "
-            "Quotes, semicolons, comment markers, and newlines are not allowed."
-        )
-    return value
-
 
 # INFORMATION_SCHEMA.JOBS_BY_PROJECT retains at most 180 days of history.
 _BQ_JOBS_RETENTION_DAYS = 180
@@ -92,7 +67,6 @@ _BQ_JOBS_RETENTION_DAYS = 180
 
 _BQ_PROJECT_ID_RE = re.compile(r"^[a-z][a-z0-9\-]{4,28}[a-z0-9]$")
 _BQ_VALID_LOCATION_RE = re.compile(r"^[a-z][a-z0-9\-]{1,}$")
-_SAFE_IDENTIFIER_RE = re.compile(r"^[a-zA-Z0-9_\-\.]+$")
 
 
 def _validate_bq_project_id(project_id: str) -> None:
@@ -107,15 +81,6 @@ def _validate_bq_location(location: str) -> None:
     if not _BQ_VALID_LOCATION_RE.fullmatch(location):
         raise ValueError(
             f"Invalid BigQuery location {location!r}: must be lowercase alphanumeric with hyphens"
-        )
-
-
-def _assert_safe_identifier(value: str, field_name: str) -> None:
-    """Reject values that could break out of SQL f-string interpolation."""
-    if not _SAFE_IDENTIFIER_RE.fullmatch(value):
-        raise ValueError(
-            f"Config field {field_name!r} contains characters that are not allowed "
-            f"in SQL identifiers: {value!r}"
         )
 
 
@@ -464,11 +429,9 @@ class BigQueryAdapter(SourceAdapter):
         return config.project_id, sa_json
 
     def _validate_config(self, config: BigQueryAdapterConfig) -> None:
-        """Validate project_id and location format to prevent SQL injection and misconfiguration."""
+        """Validate project_id and location format."""
         _validate_bq_project_id(config.project_id)
         _validate_bq_location(config.location)
-        _assert_safe_identifier(config.project_id, "project_id")
-        _assert_safe_identifier(config.location, "location")
 
     # ------------------------------------------------------------------
     # Async context manager support
@@ -574,7 +537,7 @@ class BigQueryAdapter(SourceAdapter):
               ordinal_position,
               is_partitioning_column,
               clustering_ordinal_position
-            FROM `{config.project_id}`.`region-{config.location}`.INFORMATION_SCHEMA.COLUMNS
+            FROM {quote_bq_identifier(config.project_id)}.{quote_bq_identifier(f"region-{config.location}")}.INFORMATION_SCHEMA.COLUMNS
             WHERE table_schema <> 'INFORMATION_SCHEMA'
             ORDER BY table_schema, table_name, ordinal_position
             LIMIT @max_rows
@@ -621,7 +584,7 @@ class BigQueryAdapter(SourceAdapter):
         # --- TABLE_STORAGE query (row counts + logical bytes) ---
         storage_lookup: dict[tuple[str, str], dict[str, int]] = {}
         try:
-            _region = f"`{config.project_id}`.`region-{config.location}`"
+            _region = f"{quote_bq_identifier(config.project_id)}.{quote_bq_identifier(f'region-{config.location}')}"
             storage_sql = f"""
                 SELECT dataset_id, table_id, row_count, total_logical_bytes
                 FROM {_region}.INFORMATION_SCHEMA.TABLE_STORAGE
@@ -691,7 +654,7 @@ class BigQueryAdapter(SourceAdapter):
         project_id, sa_json = self._credentials(adapter)
         client = self._get_client(project_id, sa_json)
         bigquery = _get_bigquery_module()
-        jobs_view = f"`{config.project_id}`.`region-{config.location}`.INFORMATION_SCHEMA.JOBS_BY_PROJECT"
+        jobs_view = f"{quote_bq_identifier(config.project_id)}.{quote_bq_identifier(f'region-{config.location}')}.INFORMATION_SCHEMA.JOBS_BY_PROJECT"
 
         cursor_creation_time = _cursor_creation_time(adapter)
         if cursor_creation_time is not None:
@@ -954,10 +917,9 @@ class BigQueryAdapter(SourceAdapter):
                 ))
 
         if AdapterCapability.SCHEMA in caps:
-            _validate_identifier(project_id, "project_id")
-            _validate_identifier(config.location, "location")
             probe_sql = (
-                f"SELECT 1 FROM `{project_id}`.`region-{config.location}`"
+                f"SELECT 1 FROM {quote_bq_identifier(project_id)}"
+                f".{quote_bq_identifier(f'region-{config.location}')}"
                 f".INFORMATION_SCHEMA.COLUMNS LIMIT 1"
             )
             try:
@@ -979,10 +941,10 @@ class BigQueryAdapter(SourceAdapter):
                 ))
 
         if AdapterCapability.TRAFFIC in caps:
-            _validate_identifier(project_id, "project_id")
-            _validate_identifier(config.location, "location")
             jobs_view = (
-                f"`{project_id}`.`region-{config.location}`.INFORMATION_SCHEMA.JOBS_BY_PROJECT"
+                f"{quote_bq_identifier(project_id)}"
+                f".{quote_bq_identifier(f'region-{config.location}')}"
+                f".INFORMATION_SCHEMA.JOBS_BY_PROJECT"
             )
             probe_sql = f"SELECT 1 FROM {jobs_view} LIMIT 1"
             try:
@@ -1004,7 +966,7 @@ class BigQueryAdapter(SourceAdapter):
                 ))
 
         if AdapterCapability.DEFINITIONS in caps:
-            _region = f"`{project_id}`.`region-{config.location}`"
+            _region = f"{quote_bq_identifier(project_id)}.{quote_bq_identifier(f'region-{config.location}')}"
             probe_errors: list[str] = []
             missing_perms: list[str] = []
             for probe_sql in (
@@ -1091,7 +1053,7 @@ class BigQueryAdapter(SourceAdapter):
         project_id, sa_json = self._credentials(adapter)
         client = self._get_client(project_id, sa_json)
         bigquery = _get_bigquery_module()
-        region_prefix = f"`{project_id}`.`region-{config.location}`"
+        region_prefix = f"{quote_bq_identifier(project_id)}.{quote_bq_identifier(f'region-{config.location}')}"
 
         # ------------------------------------------------------------------
         # 1. COLUMNS
@@ -1425,7 +1387,7 @@ class BigQueryAdapter(SourceAdapter):
 
         started_at = time.perf_counter()
         captured_at = datetime.now(tz=UTC)
-        region = f"`{project_id}`.`region-{config.location}`"
+        region = f"{quote_bq_identifier(project_id)}.{quote_bq_identifier(f'region-{config.location}')}"
         definitions: list[ObjectDefinition] = []
 
         # --- Views ---

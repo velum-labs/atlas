@@ -66,22 +66,6 @@ from alma_connectors.source_adapter_v2 import (
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Input validation helpers
-# ---------------------------------------------------------------------------
-
-_SAFE_IDENTIFIER_RE = re.compile(r"^[a-zA-Z0-9_\-\.]+$")
-
-
-def _assert_safe_identifier(value: str, field_name: str) -> None:
-    """Reject values that could break out of SQL f-string interpolation."""
-    if not _SAFE_IDENTIFIER_RE.fullmatch(value):
-        raise ValueError(
-            f"Config field {field_name!r} contains characters that are not allowed "
-            f"in SQL identifiers: {value!r}"
-        )
-
-
 def _validate_postgres_dsn(dsn: str, field_name: str = "DSN") -> None:
     """Validate that dsn looks like a PostgreSQL connection string."""
     stripped = dsn.strip()
@@ -274,11 +258,6 @@ class PostgresAdapter(SourceAdapter):
             raise ValueError(f"adapter '{adapter.key}' is not configured as postgres")
         return adapter.config
 
-    def _validate_config(self, config: PostgresAdapterConfig) -> None:
-        """Validate schema names to prevent SQL injection."""
-        for schema in list(config.include_schemas) + list(config.exclude_schemas):
-            _assert_safe_identifier(schema, "schema name")
-
     # ------------------------------------------------------------------
     # Async context manager support
     # ------------------------------------------------------------------
@@ -334,7 +313,6 @@ class PostgresAdapter(SourceAdapter):
             stacklevel=2,
         )
         config = self._get_config(adapter)
-        self._validate_config(config)
         include_schemas = list(config.include_schemas)
         exclude_schemas = list(config.exclude_schemas)
         dsn = self._get_dsn(adapter)
@@ -396,7 +374,6 @@ class PostgresAdapter(SourceAdapter):
             stacklevel=2,
         )
         config = self._get_config(adapter)
-        self._validate_config(config)
         dsn = self._get_dsn(adapter)
         include_schemas = list(config.include_schemas)
         exclude_schemas = list(config.exclude_schemas)
@@ -878,7 +855,6 @@ class PostgresAdapter(SourceAdapter):
         """Probe which v2 capabilities are actually available at runtime."""
         caps_to_probe = capabilities if capabilities is not None else self.declared_capabilities
         config = self._get_config(adapter)
-        self._validate_config(config)
         dsn = self._get_dsn(adapter)
 
         info_schema_ok = False
@@ -990,8 +966,6 @@ class PostgresAdapter(SourceAdapter):
         adapter: PersistedSourceAdapter,
     ) -> DiscoverySnapshot:
         """DISCOVER: enumerate PostgreSQL schemas as containers."""
-        config = self._get_config(adapter)
-        self._validate_config(config)
         dsn = self._get_dsn(adapter)
         started_at = time.perf_counter()
         logger.debug("PostgreSQL discover started: adapter=%s", adapter.key)
@@ -1185,7 +1159,6 @@ class PostgresAdapter(SourceAdapter):
     ) -> DefinitionSnapshot:
         """DEFINITIONS: view SQL via pg_get_viewdef + routine source via pg_get_functiondef."""
         config = self._get_config(adapter)
-        self._validate_config(config)
         dsn = self._get_dsn(adapter)
         include_schemas = list(config.include_schemas)
         exclude_schemas = list(config.exclude_schemas)

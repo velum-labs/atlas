@@ -53,37 +53,9 @@ from alma_connectors.source_adapter_v2 import (
 from alma_connectors.source_adapter_v2 import (
     SchemaObjectKind as V2SchemaObjectKind,
 )
+from alma_ports.sql_safety import quote_sf_identifier
 
 logger = logging.getLogger(__name__)
-
-# Sequences that must not appear in SQL identifiers used in f-string queries.
-# Single hyphens are allowed (valid in cloud warehouse identifiers like project-id).
-_IDENTIFIER_INJECTION_RE = re.compile(r"""['";\n\r]|--|/\*|\*/""")
-
-
-def _validate_identifier(value: str, name: str = "identifier") -> str:
-    """Reject SQL identifier values that contain injection-risk characters.
-
-    Applies to database/schema/table names interpolated directly into SQL
-    f-strings.  Raises ``ValueError`` if the value contains quotes, semicolons,
-    SQL comment markers (-- or /* */), or newlines.
-
-    Args:
-        value: The identifier string to validate.
-        name:  Human-readable name used in the error message.
-
-    Returns:
-        The original *value* if it passes validation.
-
-    Raises:
-        ValueError: If *value* contains disallowed characters.
-    """
-    if _IDENTIFIER_INJECTION_RE.search(value):
-        raise ValueError(
-            f"SQL identifier {name!r} contains disallowed characters: {value!r}. "
-            "Quotes, semicolons, comment markers, and newlines are not allowed."
-        )
-    return value
 
 _SNOWFLAKE_SYSTEM_SCHEMAS = frozenset({"INFORMATION_SCHEMA"})
 
@@ -349,7 +321,7 @@ class SnowflakeAdapter:
         config = self._get_config(adapter)
         self._validate_config(config)
         database = config.database
-        db_prefix = f"{_validate_identifier(database, 'database')}." if database else ""
+        db_prefix = f"{quote_sf_identifier(database)}." if database else ""
 
         columns_sql = f"""\
 SELECT
@@ -662,7 +634,7 @@ LIMIT {max_rows}
         caps = capabilities if capabilities is not None else self.declared_capabilities
         config = self._get_config(adapter)
         self._validate_config(config)
-        db_prefix = f"{_validate_identifier(config.database, 'database')}." if config.database else ""
+        db_prefix = f"{quote_sf_identifier(config.database)}." if config.database else ""
 
         scope_ctx = ScopeContext(
             scope=ExtractionScope.GLOBAL,
@@ -870,7 +842,7 @@ LIMIT {max_rows}
         config = self._get_config(adapter)
         self._validate_config(config)
         database = config.database
-        db_prefix = f"{_validate_identifier(database, 'database')}." if database else ""
+        db_prefix = f"{quote_sf_identifier(database)}." if database else ""
         exclude_upper = frozenset(s.upper() for s in config.exclude_schemas)
         include_upper = frozenset(s.upper() for s in config.include_schemas) if config.include_schemas else None
 
@@ -1112,7 +1084,7 @@ WHERE PROCEDURE_SCHEMA NOT IN ('INFORMATION_SCHEMA')
         config = self._get_config(adapter)
         self._validate_config(config)
         database = config.database
-        db_prefix = f"{_validate_identifier(database, 'database')}." if database else ""
+        db_prefix = f"{quote_sf_identifier(database)}." if database else ""
 
         started_at = time.monotonic()
         captured_at = datetime.now(UTC)
