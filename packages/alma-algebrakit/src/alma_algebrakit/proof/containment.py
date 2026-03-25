@@ -527,12 +527,14 @@ class QueryGeneralizer:
     ) -> GeneralizationResult:
         """Compute Least Upper Bound (LUB) of multiple queries.
 
-        LUB(Q1, Q2, ...) is the most specific query that contains all Qi.
+        LUB(Q1, Q2, ...) is the most general query that contains all Qi.
         Every tuple in any Qi is also in LUB.
 
-        For conjunctive queries:
-        - Relations: R1 ∪ R2 ∪ ... (union of all atoms)
-        - Predicates: φ1 ∧ φ2 ∧ ... (conjunction - most restrictive)
+        For conjunctive queries, a query is *more general* (higher in the lattice)
+        when it has fewer atoms (fewer joins → more answers). Adding atoms makes a
+        CQ more restrictive, not more general. Therefore:
+        - Relations: R1 ∩ R2 ∩ ... (intersection — keep only atoms common to all)
+        - Predicates: keep only predicates shared by all queries
         - Head: A1 ∩ A2 ∩ ... (intersection of projections)
 
         Args:
@@ -556,53 +558,76 @@ class QueryGeneralizer:
                 input_count=1,
             )
 
-        # Step 1: Compute union of relation atoms
-        all_atoms: list[CQAtom] = []
-        all_variables: set[str] = set()
-        all_bound_columns: dict[str, AttributeRef] = {}
-        relation_ids: set[str] = set()
+        # Step 1: Compute intersection of relation atoms
+        common_relation_ids: set[str] = {a.relation_id for a in queries[0].atoms}
+        for q in queries[1:]:
+            q_ids = {a.relation_id for a in q.atoms}
+            common_relation_ids &= q_ids
 
-        for q in queries:
-            for atom in q.atoms:
-                # Add atom if not already present (by relation_id)
-                if atom.relation_id not in relation_ids:
-                    all_atoms.append(atom)
-                    relation_ids.add(atom.relation_id)
-            all_variables.update(q.variables)
-            all_bound_columns.update(q.bound_columns)
+        if not common_relation_ids:
+            return GeneralizationResult(
+                success=False,
+                explanation="No common relations across queries",
+                input_count=len(queries),
+            )
+
+        # Build atoms for common relations (use first query as template)
+        common_atoms: list[CQAtom] = [
+            a for a in queries[0].atoms if a.relation_id in common_relation_ids
+        ]
+        common_variables: set[str] = set()
+        common_bound_columns: dict[str, AttributeRef] = {}
+        for atom in common_atoms:
+            common_variables.update(atom.variables)
+            for var in atom.variables:
+                if var in queries[0].bound_columns:
+                    common_bound_columns[var] = queries[0].bound_columns[var]
 
         # Step 2: Compute intersection of heads (common projected columns)
         common_head = set(queries[0].head)
         for q in queries[1:]:
             common_head &= set(q.head)
+        common_head = common_head & common_variables
         common_head_list = sorted(common_head)
 
-        # Step 3: Combine all predicates (conjunction)
-        all_predicates: list[BoundPredicate] = []
-        predicate_fps: list[str] = []
+        # Step 3: Keep only predicates shared by ALL queries
+        # A predicate is "shared" if its fingerprint appears in every query's predicate list
+        shared_fps: set[str] | None = None
         for q in queries:
-            for p in q.predicates:
-                # Check if already added (by fingerprint)
-                fp = self._predicate_fingerprint(p)
-                if fp not in predicate_fps:
-                    all_predicates.append(p)
-                    predicate_fps.append(fp)
+            q_fps = {self._predicate_fingerprint(p) for p in q.predicates}
+            if shared_fps is None:
+                shared_fps = q_fps
+            else:
+                shared_fps &= q_fps
+
+        first_pred_map = {self._predicate_fingerprint(p): p for p in queries[0].predicates}
+        shared_predicates: list[BoundPredicate] = []
+        shared_predicate_fps: list[str] = []
+        dropped_fps: list[str] = []
+
+        for fp, pred in first_pred_map.items():
+            if shared_fps and fp in shared_fps and self._predicate_uses_only(pred, common_variables):
+                shared_predicates.append(pred)
+                shared_predicate_fps.append(fp)
+            else:
+                dropped_fps.append(fp)
 
         # Build the LUB CQ
         lub_cq = CQRepresentation(
             head=common_head_list,
-            atoms=all_atoms,
-            predicates=all_predicates,
-            variables=all_variables,
-            bound_columns=all_bound_columns,
+            atoms=common_atoms,
+            predicates=shared_predicates,
+            variables=common_variables,
+            bound_columns=common_bound_columns,
         )
 
         return GeneralizationResult(
             success=True,
             cq=lub_cq,
-            explanation=f"LUB of {len(queries)} queries with {len(all_atoms)} atoms",
-            common_relations=list(relation_ids),
-            common_predicates=predicate_fps,
+            explanation=f"LUB of {len(queries)} queries with {len(common_atoms)} common atoms",
+            common_relations=list(common_relation_ids),
+            common_predicates=shared_predicate_fps,
+            dropped_predicates=dropped_fps,
             input_count=len(queries),
         )
 

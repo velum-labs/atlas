@@ -454,7 +454,7 @@ class DuckDBExecutor:
                 if val is None:
                     vals.append("NULL")
                 elif isinstance(val, str):
-                    vals.append(f"'{val}'")
+                    vals.append("'" + val.replace("'", "''") + "'")
                 else:
                     vals.append(str(val))
             rows.append(f"({', '.join(vals)})")

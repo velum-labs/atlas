@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from alma_algebrakit.models.algebra import (
     Aggregation,
     AtomicPredicate,
+    ColumnRef,
     CompoundPredicate,
     Difference,
     Expression,
@@ -382,18 +383,34 @@ class RANormalizer:
         # Relation or other base case
         return expr
 
-    def _flatten_inner_joins(self, expr: RAExpression) -> RAExpression:
-        """Flatten nested inner joins into a single multi-way join representation.
+    def _collect_inner_join_leaves(self, expr: RAExpression) -> list[RAExpression]:
+        """Collect leaf nodes from a nested inner-join tree.
 
-        Note: This is only safe for inner equi-joins. Outer joins cannot be reordered.
+        Recursively descends through INNER JOIN nodes, collecting leaves so that
+        a right-deep (or arbitrarily nested) tree can be rebuilt as left-deep.
+        """
+        if isinstance(expr, Join) and expr.join_type == JoinType.INNER:
+            return self._collect_inner_join_leaves(expr.left) + self._collect_inner_join_leaves(
+                expr.right
+            )
+        return [self._flatten_inner_joins(expr)]
+
+    def _flatten_inner_joins(self, expr: RAExpression) -> RAExpression:
+        """Flatten nested inner joins into a left-deep join tree.
+
+        Collects all leaf relations from a nested inner-join tree and rebuilds
+        them as a left-associative (left-deep) sequence of inner joins.  The
+        ON conditions of the original tree are dropped because each individual
+        ON clause only makes sense in the context of its original subtree; the
+        parent normalizer will re-push selection predicates after flattening.
+
+        Note: This is only safe for inner joins. Outer joins cannot be reordered.
         """
         if isinstance(expr, Join):
-            # Recursively flatten children first
-            left = self._flatten_inner_joins(expr.left)
-            right = self._flatten_inner_joins(expr.right)
-
             # Only flatten inner joins
             if expr.join_type != JoinType.INNER:
+                left = self._flatten_inner_joins(expr.left)
+                right = self._flatten_inner_joins(expr.right)
                 return Join(
                     left=left,
                     right=right,
@@ -401,14 +418,17 @@ class RANormalizer:
                     condition=expr.condition,
                 )
 
-            # For inner joins, we could flatten into a list representation
-            # For now, just return with flattened children
-            return Join(
-                left=left,
-                right=right,
-                join_type=expr.join_type,
-                condition=expr.condition,
-            )
+            # Collect all leaf nodes and rebuild as left-deep
+            leaves = self._collect_inner_join_leaves(expr)
+            result: RAExpression = leaves[0]
+            for leaf in leaves[1:]:
+                result = Join(
+                    left=result,
+                    right=leaf,
+                    join_type=JoinType.INNER,
+                    condition=None,
+                )
+            return result
 
         if isinstance(expr, Selection):
             return Selection(
@@ -484,6 +504,61 @@ class RANormalizer:
 
         return expr
 
+    @staticmethod
+    def _collect_subtree_aliases(expr: RAExpression) -> set[str]:
+        """Collect all relation alias names referenced in a subtree."""
+        return {r.effective_name() for r in expr.relation_instances()}
+
+    @staticmethod
+    def _swap_condition_aliases(
+        condition: Predicate | None,
+        left_aliases: set[str],
+        right_aliases: set[str],
+    ) -> Predicate | None:
+        """Rewrite a join ON condition after swapping left/right subtrees.
+
+        When subtrees are swapped, column references that pointed to the original
+        left aliases now live in the right subtree (and vice versa).  For named
+        column references this is semantically correct either way, but rewriting
+        ensures the canonical form is internally consistent: after swapping
+        subtrees, the condition's column-ref table names are also swapped so that
+        they continue to align with the subtree that now carries them.
+
+        Only performs the swap for the simple case of a 1-to-1 alias mapping
+        (one alias per side).  For compound subtrees the condition is returned
+        unchanged because named column references are valid regardless of
+        physical join ordering.
+        """
+        if condition is None or len(left_aliases) != 1 or len(right_aliases) != 1:
+            return condition
+
+        left_alias = next(iter(left_aliases))
+        right_alias = next(iter(right_aliases))
+        alias_swap = {left_alias: right_alias, right_alias: left_alias}
+
+        def swap_expr(e: Expression) -> Expression:
+            if isinstance(e, ColumnRef) and e.table in alias_swap:
+                return ColumnRef(table=alias_swap[e.table], column=e.column)
+            return e
+
+        def swap_pred(pred: Predicate | None) -> Predicate | None:
+            if pred is None:
+                return None
+            if isinstance(pred, AtomicPredicate):
+                new_left = swap_expr(pred.left)
+                new_right = swap_expr(pred.right) if pred.right is not None else None
+                if new_left is pred.left and new_right is pred.right:
+                    return pred
+                return AtomicPredicate(left=new_left, op=pred.op, right=new_right)
+            if isinstance(pred, CompoundPredicate):
+                new_operands = [swap_pred(op) or op for op in pred.operands]
+                if all(n is o for n, o in zip(new_operands, pred.operands, strict=False)):
+                    return pred
+                return CompoundPredicate(op=pred.op, operands=new_operands)
+            return pred
+
+        return swap_pred(condition)
+
     def _canonicalize_join_order(self, expr: RAExpression) -> RAExpression:
         """Canonicalize join order by sorting tables alphabetically.
 
@@ -494,20 +569,32 @@ class RANormalizer:
             left = self._canonicalize_join_order(expr.left)
             right = self._canonicalize_join_order(expr.right)
 
-            # Only reorder inner equi-joins (safe for reordering)
-            # Non-equi-joins (OR/NOT predicates, non-equality conditions) are NOT safe
-            if expr.is_inner_equijoin():
+            # Reorder inner equi-joins and inner joins without conditions (cross joins).
+            # Non-equi-joins (OR/NOT predicates) are NOT safe to reorder.
+            # Joins with no condition are safe — commutativity holds unconditionally
+            # for INNER, and no-condition joins arise from _flatten_inner_joins.
+            is_reorderable = expr.is_inner_equijoin() or (
+                expr.join_type == JoinType.INNER and not expr.condition
+            )
+            if is_reorderable:
                 # Get the "name" of each side for ordering
                 left_name = self._get_ordering_key(left)
                 right_name = self._get_ordering_key(right)
 
                 if left_name > right_name:
-                    # Swap left and right
+                    # Swap left and right; also rewrite condition aliases so the
+                    # canonical form is internally consistent (left-side refs in the
+                    # condition continue to reference the new left subtree).
+                    left_aliases = self._collect_subtree_aliases(left)
+                    right_aliases = self._collect_subtree_aliases(right)
+                    swapped_condition = self._swap_condition_aliases(
+                        expr.condition, left_aliases, right_aliases
+                    )
                     return Join(
                         left=right,
                         right=left,
                         join_type=expr.join_type,
-                        condition=expr.condition,
+                        condition=swapped_condition,
                     )
 
             return Join(
@@ -991,9 +1078,17 @@ def _rewrite_predicate(
         return AtomicPredicate(left=new_left, op=pred.op, right=new_right)
 
     if isinstance(pred, CompoundPredicate):
-        new_operands = [_rewrite_predicate(op, column_rewrite_map) for op in pred.operands]
-        # Check if anything changed
-        if all(new is old for new, old in zip(new_operands, pred.operands, strict=False)):
+        new_operands = []
+        changed = False
+        for op in pred.operands:
+            rewritten = _rewrite_predicate(op, column_rewrite_map)
+            if rewritten is not None:
+                new_operands.append(rewritten)
+                if rewritten is not op:
+                    changed = True
+            else:
+                new_operands.append(op)
+        if not changed:
             return pred
         return CompoundPredicate(op=pred.op, operands=new_operands)
 

@@ -147,9 +147,24 @@ class RAFolder:
         # Step 2: Check basic fold conditions
         can_fold, reasons = self.check_fold_condition(query_ra, view)
         if not can_fold and coverage == FoldCoverage.FULL:
-            # For full coverage, some conditions are less strict
-            # (e.g., SPJ not required)
-            pass  # Continue to full coverage path
+            # For full coverage the view covers all query tables, so column-lineage
+            # handles remapping and the attribute-coverage threshold is not a hard
+            # constraint.  SPJ is also not required for full coverage.  We only
+            # reject on conditions that actually break correctness (e.g. predicate
+            # implication failures that are not mere warnings).
+            blocking_reasons = [
+                r
+                for r in reasons
+                if not r.startswith("Attribute coverage")
+                and "Partial coverage requires SPJ" not in r
+                and not r.startswith("Warning:")
+            ]
+            if blocking_reasons:
+                return FoldResult(
+                    success=False,
+                    coverage=FoldCoverage.FULL,
+                    rejection_reasons=blocking_reasons,
+                )
 
         # Step 3: Handle based on coverage type
         if coverage == FoldCoverage.FULL:

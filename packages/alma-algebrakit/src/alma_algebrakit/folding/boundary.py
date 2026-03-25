@@ -297,14 +297,11 @@ def _build_join_plan(
     cte_names = _extract_cte_names(original_ra) if original_ra else set()
     truly_unreachable = {r for r in unreachable if r.physical_table.lower() not in cte_names}
 
-    if truly_unreachable and len(remaining) > 0:
-        if len(remaining) == 1 and not joined_remaining:
-            pass
-        elif truly_unreachable:
-            analysis.is_valid = False
-            analysis.rejection_reasons.append(
-                f"Remaining relations have no join path: {[str(r) for r in truly_unreachable]}"
-            )
+    if truly_unreachable:
+        analysis.is_valid = False
+        analysis.rejection_reasons.append(
+            f"Remaining relations have no join path: {[str(r) for r in truly_unreachable]}"
+        )
 
 
 def _classify_predicates_for_analysis(
