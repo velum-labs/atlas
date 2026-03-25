@@ -518,10 +518,10 @@ async def _handle_team_sync(cfg: AtlasConfig) -> list[TextContent]:
     from alma_atlas_store.db import Database
 
     auth = TeamAuth(cfg.team_api_key)
-    client = SyncClient(cfg.team_server_url, auth, cfg.team_id or "default")
     try:
-        with Database(cfg.db_path) as db:
-            response = await client.full_sync(db, cfg)
+        async with SyncClient(cfg.team_server_url, auth, cfg.team_id or "default") as client:
+            with Database(cfg.db_path) as db:
+                response = await client.full_sync(db, cfg)
         return [
             TextContent(
                 type="text",

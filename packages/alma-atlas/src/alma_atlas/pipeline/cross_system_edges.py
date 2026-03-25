@@ -58,10 +58,8 @@ def discover_cross_system_edges(
     edge_repo = EdgeRepository(db)
     total = 0
 
-    for source_id_a in source_ids:
-        for source_id_b in source_ids:
-            if source_id_a == source_id_b:
-                continue
+    for i, source_id_a in enumerate(source_ids):
+        for source_id_b in source_ids[i + 1 :]:
 
             # PersistedSourceAdapter.key must match ^[a-z0-9][a-z0-9_-]*$ —
             # sanitize colons the same way _build_adapter() does.

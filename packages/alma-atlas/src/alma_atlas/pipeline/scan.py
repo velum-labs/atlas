@@ -211,8 +211,9 @@ async def _run_scan_impl(
         # Phase: enforcement.
         t_enforce = time.monotonic()
         logger.info("[scan/%s] Phase: enforcement", source.id)
+        enforcement_blocked = False
         try:
-            _run_enforcement(snapshot, source.id, db)
+            enforcement_blocked = _run_enforcement(snapshot, source.id, db)
         except Exception as exc:
             logger.exception("Enforcement check failed for source %s: %s", source.id, exc)
         logger.info(
@@ -228,12 +229,15 @@ async def _run_scan_impl(
         edge_count,
         time.monotonic() - t0,
     )
-    return ScanResult(
+    result = ScanResult(
         source_id=source.id,
         asset_count=len(snapshot.objects),
         edge_count=edge_count,
         snapshot=snapshot,
     )
+    if enforcement_blocked:
+        result.warnings.append("enforcement_blocked: schema violations detected in enforce mode")
+    return result
 
 
 def run_scan(
@@ -255,19 +259,21 @@ def run_scan(
     return asyncio.run(run_scan_async(source, cfg, timeout=timeout))
 
 
-def _run_enforcement(snapshot: SchemaSnapshot, source_id: str, db: object) -> None:
+def _run_enforcement(snapshot: SchemaSnapshot, source_id: str, db: object) -> bool:
     """Run drift detection + enforcement for any assets that have contracts.
 
     Silently skips assets without contracts.  Enforcement violations are
     always persisted to the store; the mode on each contract controls whether
     the result is merely logged (shadow), surfaced (warn), or blocking
-    (enforce — currently logged but not raising, as the pipeline caller is
-    responsible for acting on ScanResult.warnings).
+    (enforce).
 
     Args:
         snapshot:  Schema snapshot from the adapter.
         source_id: Source identifier for asset ID construction.
         db:        Open Database connection (shared from the caller).
+
+    Returns:
+        True if any contract in enforce mode was blocked; False otherwise.
     """
     import logging
 
@@ -283,6 +289,8 @@ def _run_enforcement(snapshot: SchemaSnapshot, source_id: str, db: object) -> No
     contract_repo = ContractRepository(db)
     schema_repo = SchemaRepository(db)
     engine = EnforcementEngine(db)
+
+    any_blocked = False
 
     for obj in snapshot.objects:
         asset_id = f"{source_id}::{obj.schema_name}.{obj.object_name}"
@@ -309,12 +317,15 @@ def _run_enforcement(snapshot: SchemaSnapshot, source_id: str, db: object) -> No
         for contract in contracts:
             result = engine.enforce(report, contract.mode)
             if result.blocked:
+                any_blocked = True
                 log.warning(
                     "[enforcement/enforce] Pipeline BLOCKED for asset %s — "
                     "%d error violation(s) detected.",
                     asset_id,
                     report.error_count,
                 )
+
+    return any_blocked
 
 
 async def _run_scan_all_async(

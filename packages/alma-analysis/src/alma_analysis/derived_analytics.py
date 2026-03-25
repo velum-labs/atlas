@@ -126,8 +126,8 @@ def _normalize_sql(sql: str) -> str:
 
 
 def _query_hash(normalized_sql: str) -> str:
-    """Return an 8-char hex hash of the normalised SQL."""
-    return hashlib.sha256(normalized_sql.encode()).hexdigest()[:8]
+    """Return a 16-char hex hash of the normalised SQL."""
+    return hashlib.sha256(normalized_sql.encode()).hexdigest()[:16]
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +249,9 @@ _DML_TYPES = frozenset({"insert", "update", "delete", "merge", "truncate"})
 def _get_bytes(event: ObservedQueryEvent) -> float | None:
     """Extract bytes_processed from event metadata, if present."""
     meta = event.metadata or {}
-    raw = meta.get("bytes_processed") or meta.get("total_bytes_processed")
+    raw = meta.get("bytes_processed")
+    if raw is None:
+        raw = meta.get("total_bytes_processed")
     try:
         return float(raw) if raw is not None else None
     except (TypeError, ValueError):

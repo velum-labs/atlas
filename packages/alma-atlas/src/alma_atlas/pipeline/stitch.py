@@ -11,7 +11,9 @@ Returns the number of new or updated edges written.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
 
 from alma_atlas_store.db import Database
 from alma_atlas_store.edge_repository import Edge, EdgeRepository
@@ -19,6 +21,14 @@ from alma_atlas_store.query_repository import QueryObservation, QueryRepository
 from alma_connectors.source_adapter import TrafficObservationResult
 
 logger = logging.getLogger(__name__)
+
+_WS_RE = re.compile(r"\s+")
+
+
+def _fingerprint(sql: str) -> str:
+    """Return a 16-char hex fingerprint of normalised SQL."""
+    normalised = _WS_RE.sub(" ", sql.strip().lower())
+    return hashlib.sha256(normalised.encode()).hexdigest()[:16]
 
 
 def stitch(
@@ -77,10 +87,10 @@ def stitch(
             edges_written += 1
 
         if derived:
-            tables = [ae.upstream_id for ae in derived]
+            tables = [f"{source_id}::{ae.upstream_id}" for ae in derived]
             query_repo.upsert(
                 QueryObservation(
-                    fingerprint=derived[0].query_fingerprint or "",
+                    fingerprint=_fingerprint(event.sql),
                     sql_text=event.sql,
                     tables=tables,
                     source=source_id,

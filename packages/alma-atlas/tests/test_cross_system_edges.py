@@ -103,14 +103,12 @@ def test_matching_tables_produce_edges(db: Database) -> None:
 
     count = discover_cross_system_edges(snapshots, db)
 
-    # Directed: postgres→bigquery AND bigquery→postgres
-    assert count == 2
+    # Undirected: one canonical edge per unordered pair (postgres→bigquery only)
+    assert count == 1
     edges = EdgeRepository(db).list_all()
-    assert len(edges) == 2
-    upstream_ids = {e.upstream_id for e in edges}
-    _downstream_ids = {e.downstream_id for e in edges}
-    assert "postgres:prod::public.orders" in upstream_ids
-    assert "bigquery:warehouse::production.orders" in upstream_ids
+    assert len(edges) == 1
+    assert edges[0].upstream_id == "postgres:prod::public.orders"
+    assert edges[0].downstream_id == "bigquery:warehouse::production.orders"
     assert all(e.kind == "schema_match" for e in edges)
 
 
@@ -217,11 +215,10 @@ def test_three_sources_compare_all_pairs(db: Database) -> None:
 
     count = discover_cross_system_edges(snapshots, db)
 
-    # 3 sources → up to 6 ordered pairs (3×2), each with a matching table.
-    # Edges are directional so postgres→bq-warehouse AND bq-warehouse→postgres etc.
-    assert count == 6
+    # 3 sources → 3 unordered pairs (C(3,2)), each with a matching table.
+    assert count == 3
     edges = EdgeRepository(db).list_all()
-    assert len(edges) == 6
+    assert len(edges) == 3
 
 
 def test_source_not_compared_against_itself(db: Database) -> None:
