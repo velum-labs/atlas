@@ -389,6 +389,8 @@ def apply_probe_routing_override(
 
     if override.read_replica is not None:
         raise ValueError("read_replica is only supported for postgres adapters")
+    if isinstance(adapter.config, DbtAdapterConfig):
+        raise ValueError("dbt adapters do not support probe routing overrides")
     updated_config = replace(
         adapter.config,
         probe_target=(override.probe_target if override.probe_target is not None else adapter.config.probe_target),

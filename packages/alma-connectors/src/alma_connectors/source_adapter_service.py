@@ -8,15 +8,18 @@ from typing import Any
 from uuid import UUID
 
 from alma_connectors.adapters.bigquery import BigQueryAdapter
+from alma_connectors.adapters.dbt import DbtAdapter
 from alma_connectors.adapters.postgres import (
     _DEFAULT_POSTGRES_EXCLUDE_SCHEMAS,
     _DEFAULT_POSTGRES_INCLUDE_SCHEMAS,
     PostgresAdapter,
 )
+from alma_connectors.adapters.snowflake import SnowflakeAdapter
 from alma_connectors.credentials import decrypt_credential, encrypt_credential
 from alma_connectors.source_adapter import (
     BigQueryAdapterConfig,
     ConnectionTestResult,
+    DbtAdapterConfig,
     ExternalSecretRef,
     ManagedSecret,
     PersistedSourceAdapter,
@@ -26,6 +29,7 @@ from alma_connectors.source_adapter import (
     QueryResult,
     SchemaSnapshot,
     SetupInstructions,
+    SnowflakeAdapterConfig,
     SourceAdapter,
     SourceAdapterCapabilities,
     SourceAdapterDefinition,
@@ -69,7 +73,27 @@ class SourceAdapterService:
             SourceAdapterKind.BIGQUERY: BigQueryAdapter(
                 resolve_secret=self.resolve_secret,
             ),
+            SourceAdapterKind.SNOWFLAKE: SnowflakeAdapter(
+                resolve_secret=self.resolve_secret,
+            ),
         }
+
+    def _get_adapter(self, adapter: PersistedSourceAdapter) -> SourceAdapter:
+        """Return the runtime adapter for a persisted adapter.
+
+        DbtAdapter is instantiated per-call from the persisted config because
+        its paths are stored in instance state (unlike stateless v1 adapters).
+        """
+        if adapter.kind == SourceAdapterKind.DBT:
+            if not isinstance(adapter.config, DbtAdapterConfig):
+                raise ValueError("dbt adapter requires DbtAdapterConfig")
+            return DbtAdapter(
+                manifest_path=adapter.config.manifest_path,
+                catalog_path=adapter.config.catalog_path,
+                run_results_path=adapter.config.run_results_path,
+                project_name=adapter.config.project_name,
+            )
+        return self._registry[adapter.kind]
 
     def encrypt_secret(self, secret: str) -> bytes:
         return encrypt_credential(secret, key=self._encryption_key)
@@ -95,9 +119,11 @@ class SourceAdapterService:
         raise ValueError(f"external secret provider '{secret.provider}' is not supported for live resolution")
 
     def get_capabilities(self, adapter: PersistedSourceAdapter) -> SourceAdapterCapabilities:
-        return self._registry[adapter.kind].capabilities
+        return self._get_adapter(adapter).capabilities
 
     def get_setup_instructions(self, kind: SourceAdapterKind) -> SetupInstructions:
+        if kind == SourceAdapterKind.DBT:
+            return DbtAdapter(manifest_path="").get_setup_instructions()
         return self._registry[kind].get_setup_instructions()
 
     def serialize_definition(
@@ -139,21 +165,57 @@ class SourceAdapterService:
                 secrets["read_replica_database_secret"] = self._serialize_secret(config.read_replica.database_secret)
             return payload, secrets
 
-        config = definition.config
-        if not isinstance(config, BigQueryAdapterConfig):
-            raise ValueError("bigquery adapter definition requires bigquery config")
-        payload = {
-            "project_id": config.project_id,
-            "location": config.location,
-            "lookback_hours": config.lookback_hours,
-            "max_job_rows": config.max_job_rows,
-            "max_column_rows": config.max_column_rows,
-            "probe_target": config.probe_target,
-        }
-        secrets = {
-            "service_account_secret": self._serialize_secret(config.service_account_secret),
-        }
-        return payload, secrets
+        if definition.kind == SourceAdapterKind.BIGQUERY:
+            config = definition.config
+            if not isinstance(config, BigQueryAdapterConfig):
+                raise ValueError("bigquery adapter definition requires bigquery config")
+            payload = {
+                "project_id": config.project_id,
+                "location": config.location,
+                "lookback_hours": config.lookback_hours,
+                "max_job_rows": config.max_job_rows,
+                "max_column_rows": config.max_column_rows,
+                "probe_target": config.probe_target,
+            }
+            secrets = {
+                "service_account_secret": self._serialize_secret(config.service_account_secret),
+            }
+            return payload, secrets
+
+        if definition.kind == SourceAdapterKind.SNOWFLAKE:
+            config = definition.config
+            if not isinstance(config, SnowflakeAdapterConfig):
+                raise ValueError("snowflake adapter definition requires snowflake config")
+            payload = {
+                "account": config.account,
+                "warehouse": config.warehouse,
+                "database": config.database,
+                "role": config.role,
+                "include_schemas": list(config.include_schemas),
+                "exclude_schemas": list(config.exclude_schemas),
+                "lookback_hours": config.lookback_hours,
+                "max_query_rows": config.max_query_rows,
+                "probe_target": config.probe_target,
+            }
+            secrets = {
+                "account_secret": self._serialize_secret(config.account_secret),
+            }
+            return payload, secrets
+
+        if definition.kind == SourceAdapterKind.DBT:
+            config = definition.config
+            if not isinstance(config, DbtAdapterConfig):
+                raise ValueError("dbt adapter definition requires dbt config")
+            payload: dict[str, Any] = {
+                "manifest_path": config.manifest_path,
+                "catalog_path": config.catalog_path,
+                "run_results_path": config.run_results_path,
+                "project_name": config.project_name,
+            }
+            secrets: dict[str, dict[str, Any]] = {}
+            return payload, secrets
+
+        raise ValueError(f"unsupported adapter kind for serialization: {definition.kind}")
 
     def row_to_adapter(self, row: dict[str, Any]) -> PersistedSourceAdapter:
         adapter_id = str(row.get("id", "")).strip()
@@ -224,7 +286,7 @@ class SourceAdapterService:
                 probe_target=(str(config["probe_target"]) if config.get("probe_target") is not None else None),
                 read_replica=read_replica,
             )
-        else:
+        elif kind == SourceAdapterKind.BIGQUERY:
             adapter_config = BigQueryAdapterConfig(
                 service_account_secret=self._secret_from_storage_payload(
                     _require_dict(
@@ -239,6 +301,37 @@ class SourceAdapterService:
                 max_column_rows=int(config.get("max_column_rows") or 20_000),
                 probe_target=(str(config["probe_target"]) if config.get("probe_target") is not None else None),
             )
+        elif kind == SourceAdapterKind.SNOWFLAKE:
+            adapter_config = SnowflakeAdapterConfig(
+                account_secret=self._secret_from_storage_payload(
+                    _require_dict(
+                        secrets.get("account_secret") or {},
+                        field_name="account_secret",
+                    )
+                ),
+                account=str(config.get("account", "")),
+                warehouse=str(config.get("warehouse") or "COMPUTE_WH"),
+                database=str(config.get("database") or ""),
+                role=str(config.get("role") or ""),
+                include_schemas=tuple(
+                    str(item) for item in (config.get("include_schemas") or [])
+                ),
+                exclude_schemas=tuple(
+                    str(item) for item in (config.get("exclude_schemas") or ["INFORMATION_SCHEMA"])
+                ),
+                lookback_hours=int(config.get("lookback_hours") or 168),
+                max_query_rows=int(config.get("max_query_rows") or 10_000),
+                probe_target=(str(config["probe_target"]) if config.get("probe_target") is not None else None),
+            )
+        elif kind == SourceAdapterKind.DBT:
+            adapter_config = DbtAdapterConfig(
+                manifest_path=str(config.get("manifest_path", "")),
+                catalog_path=(str(config["catalog_path"]) if config.get("catalog_path") is not None else None),
+                run_results_path=(str(config["run_results_path"]) if config.get("run_results_path") is not None else None),
+                project_name=(str(config["project_name"]) if config.get("project_name") is not None else None),
+            )
+        else:
+            raise ValueError(f"unsupported adapter kind for deserialization: {kind}")
 
         adapter = PersistedSourceAdapter(
             id=adapter_id,
@@ -269,13 +362,13 @@ class SourceAdapterService:
         self,
         adapter: PersistedSourceAdapter,
     ) -> ConnectionTestResult:
-        return await self._registry[adapter.kind].test_connection(adapter)
+        return await self._get_adapter(adapter).test_connection(adapter)
 
     async def introspect_schema(
         self,
         adapter: PersistedSourceAdapter,
     ) -> SchemaSnapshot:
-        return await self._registry[adapter.kind].introspect_schema(adapter)
+        return await self._get_adapter(adapter).introspect_schema(adapter)
 
     async def observe_traffic(
         self,
@@ -283,7 +376,7 @@ class SourceAdapterService:
         *,
         since: datetime | None = None,
     ) -> TrafficObservationResult:
-        return await self._registry[adapter.kind].observe_traffic(adapter, since=since)
+        return await self._get_adapter(adapter).observe_traffic(adapter, since=since)
 
     async def execute_query(
         self,
@@ -293,7 +386,7 @@ class SourceAdapterService:
         max_rows: int | None = None,
         probe_target: str | None = None,
     ) -> QueryResult:
-        return await self._registry[adapter.kind].execute_query(
+        return await self._get_adapter(adapter).execute_query(
             adapter,
             sql,
             max_rows=max_rows,

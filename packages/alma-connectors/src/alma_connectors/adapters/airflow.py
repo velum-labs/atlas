@@ -132,10 +132,21 @@ class AirflowAdapter(BaseAdapterV2):
         self._username = username
         self._password = password
         self._timeout_seconds = timeout_seconds
+        self._client: httpx.AsyncClient | None = None
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient()
+        return self._client
+
+    async def close(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     def _auth_headers(self) -> dict[str, str]:
         """Return Authorization header dict for the configured auth method."""
@@ -152,13 +163,15 @@ class AirflowAdapter(BaseAdapterV2):
     ) -> Any:
         """Execute a single GET request against ``/api/v1/{path}``."""
         url = f"{self._base_url}/api/v1/{path}"
-        async with httpx.AsyncClient(
+        client = await self._get_client()
+        resp = await client.get(
+            url,
             headers=self._auth_headers(),
+            params=params,
             timeout=self._timeout_seconds,
-        ) as client:
-            resp = await client.get(url, params=params)
-            resp.raise_for_status()
-            return resp.json()
+        )
+        resp.raise_for_status()
+        return resp.json()
 
     async def _api_get_all(
         self, path: str, list_key: str, *, extra_params: dict[str, Any] | None = None

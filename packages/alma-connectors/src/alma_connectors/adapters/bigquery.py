@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
 import json
@@ -91,7 +92,7 @@ def _validate_bq_location(location: str) -> None:
 _T = TypeVar("_T")
 
 
-def _retry_with_backoff(  # noqa: UP047
+async def _retry_with_backoff(  # noqa: UP047
     fn: Callable[[], _T],
     *,
     max_attempts: int = 3,
@@ -116,7 +117,7 @@ def _retry_with_backoff(  # noqa: UP047
                     exc,
                     delay,
                 )
-                time.sleep(delay)
+                await asyncio.sleep(delay)
     raise last_exc  # type: ignore[misc]
 
 
@@ -712,7 +713,7 @@ class BigQueryAdapter(SourceAdapter):
             "BigQuery query started: capability=traffic adapter=%s", adapter.key
         )
         _t0 = time.perf_counter()
-        rows = _retry_with_backoff(
+        rows = await _retry_with_backoff(
             lambda: [_row_to_dict(row) for row in client.query(jobs_sql, job_config=job_config).result()],
             retryable=_is_bq_retryable,
             max_attempts=3,
@@ -1084,7 +1085,7 @@ class BigQueryAdapter(SourceAdapter):
         )
         _t0_col = time.perf_counter()
         try:
-            col_rows = _retry_with_backoff(
+            col_rows = await _retry_with_backoff(
                 lambda: [_row_to_dict(r) for r in client.query(columns_sql, job_config=column_config).result()],
                 retryable=_is_bq_retryable,
                 max_attempts=3,

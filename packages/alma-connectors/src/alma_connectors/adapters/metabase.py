@@ -158,7 +158,12 @@ class MetabaseAdapter(BaseAdapterV2):
                 timeout=self._timeout_seconds,
             )
             resp.raise_for_status()
-            self._session_token = resp.json()["id"]
+            token = resp.json().get("id")
+            if token is None:
+                raise ValueError(
+                    "Metabase session endpoint did not return an 'id' — check credentials"
+                )
+            self._session_token = token
         return {"X-Metabase-Session": self._session_token}
 
     async def _api_get(self, path: str, *, params: dict[str, Any] | None = None) -> Any:

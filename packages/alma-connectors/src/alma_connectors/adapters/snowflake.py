@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
@@ -89,7 +90,7 @@ def _validate_sf_name(value: str, field_name: str) -> None:
 _T = TypeVar("_T")
 
 
-def _retry_with_backoff(  # noqa: UP047
+async def _retry_with_backoff(  # noqa: UP047
     fn: Callable[[], _T],
     *,
     max_attempts: int = 3,
@@ -114,7 +115,7 @@ def _retry_with_backoff(  # noqa: UP047
                     exc,
                     delay,
                 )
-                time.sleep(delay)
+                await asyncio.sleep(delay)
     raise last_exc  # type: ignore[misc]
 
 
@@ -286,7 +287,7 @@ class SnowflakeAdapter:
         config = self._get_config(adapter)
         self._validate_config(config)
         try:
-            conn = _retry_with_backoff(
+            conn = await _retry_with_backoff(
                 lambda: self._connect(config),
                 retryable=_is_sf_retryable,
                 max_attempts=3,
@@ -349,7 +350,7 @@ WHERE TABLE_SCHEMA NOT IN ('INFORMATION_SCHEMA')
         exclude_upper = frozenset(s.upper() for s in config.exclude_schemas)
         include_upper = frozenset(s.upper() for s in config.include_schemas) if config.include_schemas else None
 
-        conn = _retry_with_backoff(
+        conn = await _retry_with_backoff(
             lambda: self._connect(config),
             retryable=_is_sf_retryable,
             max_attempts=3,
@@ -459,7 +460,7 @@ ORDER BY START_TIME DESC
 LIMIT {max_rows}
 """
 
-        conn = _retry_with_backoff(
+        conn = await _retry_with_backoff(
             lambda: self._connect(config),
             retryable=_is_sf_retryable,
             max_attempts=3,
@@ -536,7 +537,7 @@ LIMIT {max_rows}
         self._validate_config(config)
         start = time.monotonic()
         try:
-            conn = _retry_with_backoff(
+            conn = await _retry_with_backoff(
                 lambda: self._connect(config),
                 retryable=_is_sf_retryable,
                 max_attempts=3,
@@ -642,7 +643,7 @@ LIMIT {max_rows}
         )
         results: list[CapabilityProbeResult] = []
 
-        conn = _retry_with_backoff(
+        conn = await _retry_with_backoff(
             lambda: self._connect(config),
             retryable=_is_sf_retryable,
             max_attempts=3,
@@ -763,7 +764,7 @@ LIMIT {max_rows}
         captured_at = datetime.now(UTC)
         logger.debug("Snowflake discover started: adapter=%s account=%s", adapter.key, config.account)
 
-        conn = _retry_with_backoff(
+        conn = await _retry_with_backoff(
             lambda: self._connect(config),
             retryable=_is_sf_retryable,
             max_attempts=3,
@@ -907,7 +908,7 @@ FROM {db_prefix}INFORMATION_SCHEMA.PROCEDURES
 WHERE PROCEDURE_SCHEMA NOT IN ('INFORMATION_SCHEMA')
 """
 
-        conn = _retry_with_backoff(
+        conn = await _retry_with_backoff(
             lambda: self._connect(config),
             retryable=_is_sf_retryable,
             max_attempts=3,
@@ -1110,7 +1111,7 @@ WHERE FUNCTION_SCHEMA NOT IN ('INFORMATION_SCHEMA')
 
         definitions: list[ObjectDefinition] = []
 
-        conn = _retry_with_backoff(
+        conn = await _retry_with_backoff(
             lambda: self._connect(config),
             retryable=_is_sf_retryable,
             max_attempts=3,
@@ -1261,7 +1262,7 @@ LIMIT {max_rows}
         )
 
         try:
-            conn = _retry_with_backoff(
+            conn = await _retry_with_backoff(
                 lambda: self._connect(config),
                 retryable=_is_sf_retryable,
                 max_attempts=3,
