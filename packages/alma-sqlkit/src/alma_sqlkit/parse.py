@@ -6,6 +6,8 @@ structural information such as referenced table names.
 
 from __future__ import annotations
 
+import warnings
+
 import sqlglot
 import sqlglot.expressions as exp
 
@@ -23,7 +25,9 @@ def parse_sql(sql: str, dialect: Dialect | str | None = None) -> list[exp.Expres
         List of parsed expression trees, one per statement.
     """
     dialect_str = dialect.name if isinstance(dialect, Dialect) else dialect
-    return sqlglot.parse(sql, dialect=dialect_str, error_level=sqlglot.ErrorLevel.WARN)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*contains unsupported syntax.*")
+        return sqlglot.parse(sql, dialect=dialect_str, error_level=sqlglot.ErrorLevel.WARN)
 
 
 def extract_tables(sql: str, dialect: Dialect | str | None = None) -> list[str]:

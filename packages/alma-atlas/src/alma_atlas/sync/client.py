@@ -142,7 +142,7 @@ class SyncClient:
                 last_exc = exc
                 if attempt < _MAX_RETRIES:
                     wait = _BACKOFF_BASE * (2 ** attempt)
-                    log.warning(
+                    log.debug(
                         "[sync] POST %s network error (attempt %d/%d), retrying in %.1fs: %s",
                         path, attempt + 1, _MAX_RETRIES, wait, exc,
                     )
@@ -199,7 +199,7 @@ class SyncClient:
                 last_exc = exc
                 if attempt < _MAX_RETRIES:
                     wait = _BACKOFF_BASE * (2 ** attempt)
-                    log.warning(
+                    log.debug(
                         "[sync] GET %s network error (attempt %d/%d), retrying in %.1fs: %s",
                         path, attempt + 1, _MAX_RETRIES, wait, exc,
                     )

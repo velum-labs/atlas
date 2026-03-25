@@ -605,7 +605,7 @@ class BigQueryAdapter(SourceAdapter):
             rows = [_row_to_dict(row) for row in query.result()]
         except Exception as _col_exc:
             if _is_403(_col_exc):
-                logger.warning(
+                logger.debug(
                     "Region-level INFORMATION_SCHEMA.COLUMNS failed (%s). "
                     "Falling back to per-dataset queries.",
                     _col_exc,
@@ -670,7 +670,7 @@ class BigQueryAdapter(SourceAdapter):
                     "size_bytes": int(sb) if sb is not None else 0,
                 }
         except Exception as exc:
-            logger.warning(
+            logger.debug(
                 "BigQueryAdapter.introspect_schema: TABLE_STORAGE query failed, "
                 "row_count/size_bytes will be omitted. adapter=%s error=%s",
                 adapter.key,
@@ -1022,7 +1022,7 @@ class BigQueryAdapter(SourceAdapter):
             except Exception as exc:
                 if _is_403(exc):
                     # Try per-dataset fallback: if any dataset is queryable, SCHEMA works at dataset scope
-                    logger.warning(
+                    logger.debug(
                         "Region-level INFORMATION_SCHEMA.COLUMNS probe failed (%s). "
                         "Probing per-dataset scope.",
                         exc,
@@ -1218,7 +1218,7 @@ class BigQueryAdapter(SourceAdapter):
             )
         except Exception as _col_exc:
             if _is_403(_col_exc):
-                logger.warning(
+                logger.debug(
                     "Region-level INFORMATION_SCHEMA.COLUMNS failed (%s). "
                     "Falling back to per-dataset queries. adapter=%s",
                     _col_exc,
@@ -1292,7 +1292,7 @@ class BigQueryAdapter(SourceAdapter):
                     "last_modified": _normalize_timestamp(sdict.get("last_modified_time")),
                 }
         except Exception as exc:
-            logger.warning(
+            logger.debug(
                 "BigQueryAdapter.extract_schema: TABLE_STORAGE query failed, "
                 "row_count/size_bytes/last_modified will be omitted. adapter=%s error=%s",
                 adapter.key,

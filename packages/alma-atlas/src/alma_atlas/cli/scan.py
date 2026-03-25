@@ -26,6 +26,7 @@ def scan(
     source: Annotated[str | None, typer.Option("--source", "-s", help="Scan a specific source ID.")] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Print what would be scanned without writing.")] = False,
     no_sync: Annotated[bool, typer.Option("--no-sync", help="Skip automatic team sync after scan.")] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show verbose output including warnings.")] = False,
 ) -> None:
     """Scan data sources and populate the Atlas asset graph."""
     if ctx.invoked_subcommand is not None:
@@ -98,7 +99,8 @@ def scan(
                     asyncio.run(client.full_sync(db, cfg))
                 rprint("[dim]Team sync complete.[/dim]")
             except Exception as exc:
-                rprint(f"[yellow]Team sync failed (continuing):[/yellow] {exc}")
+                if verbose:
+                    rprint(f"[yellow]Team sync failed (continuing):[/yellow] {exc}")
 
     # Exit codes: 0 = all succeeded, 1 = partial (some sources failed), 3 = complete failure
     if scan_error is not None:
