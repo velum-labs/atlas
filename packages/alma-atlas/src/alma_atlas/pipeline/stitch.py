@@ -26,6 +26,16 @@ logger = logging.getLogger(__name__)
 _WS_RE = re.compile(r"\s+")
 
 
+def _normalize_ref(ref: str) -> str:
+    """Strip SQL identifier quoting (double-quotes) from table references."""
+    return ref.replace('"', '')
+
+
+def _is_system_table(ref: str) -> bool:
+    """Return True for BigQuery system tables (INFORMATION_SCHEMA, etc.)."""
+    return "INFORMATION_SCHEMA" in ref.upper()
+
+
 def _fingerprint(sql: str) -> str:
     """Return a 16-char hex fingerprint of normalised SQL."""
     normalised = _WS_RE.sub(" ", sql.strip().lower())
@@ -86,11 +96,17 @@ def stitch(
             continue
 
         for ae in derived:
-            upstream = f"{source_id}::{ae.upstream_id}"
+            upstream_ref = _normalize_ref(ae.upstream_id)
+            downstream_ref = _normalize_ref(ae.downstream_id)
+
+            if _is_system_table(upstream_ref) or _is_system_table(downstream_ref):
+                continue
+
+            upstream = f"{source_id}::{upstream_ref}"
             downstream = (
-                ae.downstream_id
+                consumer_id
                 if ae.downstream_id == consumer_id
-                else f"{source_id}::{ae.downstream_id}"
+                else f"{source_id}::{downstream_ref}"
             )
             # Ensure both endpoints exist as assets (query traffic may reference
             # tables not yet captured during schema introspection).
@@ -98,14 +114,14 @@ def stitch(
                 id=upstream,
                 source=source_id,
                 kind="table",
-                name=ae.upstream_id,
+                name=upstream_ref,
             ))
             if downstream != consumer_id:
                 asset_repo.upsert(Asset(
                     id=downstream,
                     source=source_id,
                     kind="table",
-                    name=ae.downstream_id,
+                    name=downstream_ref,
                 ))
             edge_repo.upsert(
                 Edge(
@@ -117,7 +133,11 @@ def stitch(
             edges_written += 1
 
         if derived:
-            tables = [f"{source_id}::{ae.upstream_id}" for ae in derived]
+            tables = [
+                f"{source_id}::{_normalize_ref(ae.upstream_id)}"
+                for ae in derived
+                if not _is_system_table(ae.upstream_id)
+            ]
             query_repo.upsert(
                 QueryObservation(
                     fingerprint=_fingerprint(event.sql),
