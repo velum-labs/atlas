@@ -101,7 +101,7 @@ class SyncClient:
 
         if self._http_client is None:
             self._http_client = httpx.AsyncClient(
-                timeout=httpx.Timeout(connect=30.0, read=120.0)
+                timeout=httpx.Timeout(30.0, connect=30.0, read=120.0)
             )
             self._owns_client = True
         return self
@@ -117,7 +117,7 @@ class SyncClient:
 
         if self._http_client is None:
             self._http_client = httpx.AsyncClient(
-                timeout=httpx.Timeout(connect=30.0, read=120.0)
+                timeout=httpx.Timeout(30.0, connect=30.0, read=120.0)
             )
             self._owns_client = True
         return self._http_client

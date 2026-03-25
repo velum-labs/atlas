@@ -15,6 +15,7 @@ import hashlib
 import logging
 import re
 
+from alma_atlas_store.asset_repository import Asset, AssetRepository
 from alma_atlas_store.db import Database
 from alma_atlas_store.edge_repository import Edge, EdgeRepository
 from alma_atlas_store.query_repository import QueryObservation, QueryRepository
@@ -53,6 +54,7 @@ def stitch(
     from alma_analysis.edges import extract_edges
     from alma_sqlkit.dialect import Dialect
 
+    asset_repo = AssetRepository(db)
     edge_repo = EdgeRepository(db)
     query_repo = QueryRepository(db)
 
@@ -65,6 +67,13 @@ def stitch(
             continue
 
         consumer_id = f"{source_id}::query::{event.database_user or 'unknown'}"
+        # Ensure the consumer (query actor) asset exists so FK constraints are satisfied.
+        asset_repo.upsert(Asset(
+            id=consumer_id,
+            source=source_id,
+            kind="query",
+            name=event.database_user or "unknown",
+        ))
 
         try:
             derived: list[AnalysisEdge] = extract_edges(
@@ -77,10 +86,31 @@ def stitch(
             continue
 
         for ae in derived:
+            upstream = f"{source_id}::{ae.upstream_id}"
+            downstream = (
+                ae.downstream_id
+                if ae.downstream_id == consumer_id
+                else f"{source_id}::{ae.downstream_id}"
+            )
+            # Ensure both endpoints exist as assets (query traffic may reference
+            # tables not yet captured during schema introspection).
+            asset_repo.upsert(Asset(
+                id=upstream,
+                source=source_id,
+                kind="table",
+                name=ae.upstream_id,
+            ))
+            if downstream != consumer_id:
+                asset_repo.upsert(Asset(
+                    id=downstream,
+                    source=source_id,
+                    kind="table",
+                    name=ae.downstream_id,
+                ))
             edge_repo.upsert(
                 Edge(
-                    upstream_id=ae.upstream_id,
-                    downstream_id=ae.downstream_id,
+                    upstream_id=upstream,
+                    downstream_id=downstream,
                     kind=ae.kind,
                 )
             )
