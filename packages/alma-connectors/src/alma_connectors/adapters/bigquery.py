@@ -127,6 +127,58 @@ def _is_bq_retryable(exc: Exception) -> bool:
     return any(c in msg for c in codes)
 
 
+def _is_403(exc: Exception) -> bool:
+    msg = str(exc)
+    return "403" in msg or "Access Denied" in msg or "Forbidden" in msg
+
+
+def _fetch_columns_per_dataset(
+    client: Any,
+    project_id: str,
+    bigquery: Any,
+    max_rows: int,
+) -> list[dict[str, Any]]:
+    """Query INFORMATION_SCHEMA.COLUMNS per dataset when the region-level query fails (403)."""
+    datasets = list(client.list_datasets(project=project_id))
+    all_rows: list[dict[str, Any]] = []
+    remaining = max_rows
+    for ds in datasets:
+        dataset_id = _get_dataset_id(ds)
+        if not dataset_id or remaining <= 0:
+            break
+        per_ds_sql = f"""
+            SELECT
+              table_schema,
+              table_name,
+              column_name,
+              data_type,
+              is_nullable,
+              ordinal_position,
+              is_partitioning_column,
+              clustering_ordinal_position
+            FROM {quote_bq_identifier(project_id)}.{quote_bq_identifier(dataset_id)}.INFORMATION_SCHEMA.COLUMNS
+            WHERE table_schema <> 'INFORMATION_SCHEMA'
+            ORDER BY table_name, ordinal_position
+            LIMIT @max_rows
+        """
+        per_ds_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("max_rows", "INT64", remaining),
+            ]
+        )
+        try:
+            batch = [_row_to_dict(row) for row in client.query(per_ds_sql, job_config=per_ds_config).result()]
+            all_rows.extend(batch)
+            remaining -= len(batch)
+        except Exception as exc:
+            logger.warning(
+                "Per-dataset COLUMNS query failed for dataset=%s error=%s; skipping.",
+                dataset_id,
+                exc,
+            )
+    return all_rows
+
+
 def _get_bigquery_module() -> Any:
     try:
         from google.cloud import bigquery  # type: ignore[import-untyped]
@@ -548,8 +600,21 @@ class BigQueryAdapter(SourceAdapter):
                 bigquery.ScalarQueryParameter("max_rows", "INT64", config.max_column_rows),
             ]
         )
-        query = client.query(columns_sql, job_config=column_config)
-        rows = [_row_to_dict(row) for row in query.result()]
+        try:
+            query = client.query(columns_sql, job_config=column_config)
+            rows = [_row_to_dict(row) for row in query.result()]
+        except Exception as _col_exc:
+            if _is_403(_col_exc):
+                logger.warning(
+                    "Region-level INFORMATION_SCHEMA.COLUMNS failed (%s). "
+                    "Falling back to per-dataset queries.",
+                    _col_exc,
+                )
+                rows = _fetch_columns_per_dataset(
+                    client, config.project_id, bigquery, config.max_column_rows
+                )
+            else:
+                raise
 
         grouped: dict[tuple[str, str], list[SourceColumnSchema]] = defaultdict(list)
         # partition_col: first column with is_partitioning_column = 'YES'
@@ -713,12 +778,35 @@ class BigQueryAdapter(SourceAdapter):
             "BigQuery query started: capability=traffic adapter=%s", adapter.key
         )
         _t0 = time.perf_counter()
-        rows = await _retry_with_backoff(
-            lambda: [_row_to_dict(row) for row in client.query(jobs_sql, job_config=job_config).result()],
-            retryable=_is_bq_retryable,
-            max_attempts=3,
-            base_delay=2.0,
-        )
+        try:
+            rows = await _retry_with_backoff(
+                lambda: [_row_to_dict(row) for row in client.query(jobs_sql, job_config=job_config).result()],
+                retryable=_is_bq_retryable,
+                max_attempts=3,
+                base_delay=2.0,
+            )
+        except Exception as _jobs_exc:
+            if _is_403(_jobs_exc):
+                logger.warning(
+                    "JOBS_BY_PROJECT query failed (%s). "
+                    "Falling back to INFORMATION_SCHEMA.JOBS. adapter=%s",
+                    _jobs_exc,
+                    adapter.key,
+                )
+                jobs_view_fallback = (
+                    f"{quote_bq_identifier(config.project_id)}"
+                    f".{quote_bq_identifier(f'region-{config.location}')}"
+                    f".INFORMATION_SCHEMA.JOBS"
+                )
+                jobs_sql_fallback = jobs_sql.replace(jobs_view, jobs_view_fallback)
+                rows = await _retry_with_backoff(
+                    lambda: [_row_to_dict(row) for row in client.query(jobs_sql_fallback, job_config=job_config).result()],
+                    retryable=_is_bq_retryable,
+                    max_attempts=3,
+                    base_delay=2.0,
+                )
+            else:
+                raise
         logger.debug(
             "BigQuery query finished: capability=traffic adapter=%s duration_ms=%.1f rows=%d",
             adapter.key,
@@ -932,14 +1020,51 @@ class BigQueryAdapter(SourceAdapter):
                     scope_context=scope_ctx,
                 ))
             except Exception as exc:
-                results.append(CapabilityProbeResult(
-                    capability=AdapterCapability.SCHEMA,
-                    available=False,
-                    scope=ExtractionScope.REGION,
-                    scope_context=scope_ctx,
-                    message=str(exc),
-                    permissions_missing=_missing_permissions_from_exc(exc),
-                ))
+                if _is_403(exc):
+                    # Try per-dataset fallback: if any dataset is queryable, SCHEMA works at dataset scope
+                    logger.warning(
+                        "Region-level INFORMATION_SCHEMA.COLUMNS probe failed (%s). "
+                        "Probing per-dataset scope.",
+                        exc,
+                    )
+                    _ds_available = False
+                    _ds_exc: Exception | None = exc
+                    try:
+                        _datasets = list(client.list_datasets(project=project_id))
+                        for _ds in _datasets:
+                            _ds_id = _get_dataset_id(_ds)
+                            if not _ds_id:
+                                continue
+                            _ds_probe_sql = (
+                                f"SELECT 1 FROM {quote_bq_identifier(project_id)}"
+                                f".{quote_bq_identifier(_ds_id)}"
+                                f".INFORMATION_SCHEMA.COLUMNS LIMIT 1"
+                            )
+                            try:
+                                client.query(_ds_probe_sql, job_config=bigquery.QueryJobConfig()).result()
+                                _ds_available = True
+                                break
+                            except Exception:
+                                continue
+                    except Exception as _list_exc:
+                        _ds_exc = _list_exc
+                    results.append(CapabilityProbeResult(
+                        capability=AdapterCapability.SCHEMA,
+                        available=_ds_available,
+                        scope=ExtractionScope.REGION,
+                        scope_context=scope_ctx,
+                        message=None if _ds_available else str(_ds_exc),
+                        permissions_missing=() if _ds_available else _missing_permissions_from_exc(exc),
+                    ))
+                else:
+                    results.append(CapabilityProbeResult(
+                        capability=AdapterCapability.SCHEMA,
+                        available=False,
+                        scope=ExtractionScope.REGION,
+                        scope_context=scope_ctx,
+                        message=str(exc),
+                        permissions_missing=_missing_permissions_from_exc(exc),
+                    ))
 
         if AdapterCapability.TRAFFIC in caps:
             jobs_view = (
@@ -1092,12 +1217,23 @@ class BigQueryAdapter(SourceAdapter):
                 base_delay=2.0,
             )
         except Exception as _col_exc:
-            logger.error(
-                "BigQuery query failed: capability=schema adapter=%s error=%s",
-                adapter.key,
-                _col_exc,
-            )
-            raise
+            if _is_403(_col_exc):
+                logger.warning(
+                    "Region-level INFORMATION_SCHEMA.COLUMNS failed (%s). "
+                    "Falling back to per-dataset queries. adapter=%s",
+                    _col_exc,
+                    adapter.key,
+                )
+                col_rows = _fetch_columns_per_dataset(
+                    client, project_id, bigquery, config.max_column_rows
+                )
+            else:
+                logger.error(
+                    "BigQuery query failed: capability=schema adapter=%s error=%s",
+                    adapter.key,
+                    _col_exc,
+                )
+                raise
         logger.debug(
             "BigQuery query finished: capability=schema adapter=%s duration_ms=%.1f rows=%d",
             adapter.key,
