@@ -12,7 +12,7 @@ import sqlglot
 from alma_sqlkit.dialect import Dialect
 
 
-def normalize_sql(sql: str, dialect: Dialect | str = Dialect.ANSI) -> str:
+def normalize_sql(sql: str, dialect: Dialect | str | None = None) -> str:
     """Normalize a SQL string to a canonical, comparable form.
 
     Transformations applied:
@@ -22,13 +22,14 @@ def normalize_sql(sql: str, dialect: Dialect | str = Dialect.ANSI) -> str:
 
     Args:
         sql: Raw SQL string.
-        dialect: SQL dialect for parsing. Defaults to ANSI.
+        dialect: SQL dialect for parsing. Defaults to None (sqlglot generic/ANSI mode).
 
     Returns:
         Normalized SQL string. Returns the original string on parse error.
     """
     try:
-        statements = sqlglot.parse(sql, dialect=str(dialect), error_level=sqlglot.ErrorLevel.WARN)
+        dialect_str = dialect.name if isinstance(dialect, Dialect) else dialect
+        statements = sqlglot.parse(sql, dialect=dialect_str, error_level=sqlglot.ErrorLevel.WARN)
         normalized_parts: list[str] = []
         for stmt in statements:
             if stmt is None:
@@ -38,7 +39,7 @@ def normalize_sql(sql: str, dialect: Dialect | str = Dialect.ANSI) -> str:
                 if isinstance(node, sqlglot.exp.Literal):
                     node.args["this"] = "?"
                     node.args["is_string"] = False
-            normalized_parts.append(stmt.sql(dialect=str(dialect), pretty=False))
+            normalized_parts.append(stmt.sql(dialect=dialect_str, pretty=False))
         return "; ".join(normalized_parts)
     except Exception:
         return sql

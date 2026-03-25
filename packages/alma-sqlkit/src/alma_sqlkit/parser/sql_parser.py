@@ -395,11 +395,8 @@ class SQLParser:
 
             # Handle IN (subquery) vs IN (value_list)
             if subquery_expr is not None:
-                # IN (SELECT ...) - subquery case
-                # For now, convert to a placeholder - full subquery support is complex
-                right = Literal(value="__subquery__", data_type="subquery")
-                op = ComparisonOp.NOT_IN if is_negated else ComparisonOp.IN
-                return AtomicPredicate(left=left, op=op, right=right)
+                # IN (SELECT ...) - subquery case is not yet supported
+                raise ValueError("IN (SELECT ...) subqueries are not yet supported")
 
             # IN (value1, value2, ...) - preserve as list of values
             values = []

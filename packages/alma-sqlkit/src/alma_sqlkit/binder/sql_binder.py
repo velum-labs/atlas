@@ -544,7 +544,7 @@ class SQLBinder:
             return BoundIn(
                 expression=bound_expr,
                 values=values,
-                negated=False,
+                negated=bool(expr.args.get("not", False)),
                 upstream_columns=upstream,
             )
 

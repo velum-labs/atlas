@@ -12,27 +12,28 @@ import sqlglot.expressions as exp
 from alma_sqlkit.dialect import Dialect
 
 
-def parse_sql(sql: str, dialect: Dialect | str = Dialect.ANSI) -> list[exp.Expression]:
+def parse_sql(sql: str, dialect: Dialect | str | None = None) -> list[exp.Expression]:
     """Parse a SQL string into a list of sqlglot expression trees.
 
     Args:
         sql: Raw SQL string (may contain multiple statements).
-        dialect: SQL dialect for parsing. Defaults to ANSI.
+        dialect: SQL dialect for parsing. Defaults to None (sqlglot generic/ANSI mode).
 
     Returns:
         List of parsed expression trees, one per statement.
     """
-    return sqlglot.parse(sql, dialect=str(dialect), error_level=sqlglot.ErrorLevel.WARN)
+    dialect_str = dialect.name if isinstance(dialect, Dialect) else dialect
+    return sqlglot.parse(sql, dialect=dialect_str, error_level=sqlglot.ErrorLevel.WARN)
 
 
-def extract_tables(sql: str, dialect: Dialect | str = Dialect.ANSI) -> list[str]:
+def extract_tables(sql: str, dialect: Dialect | str | None = None) -> list[str]:
     """Extract all referenced table/view names from a SQL string.
 
     Returns fully-qualified names where available (e.g. ``project.dataset.table``).
 
     Args:
         sql: Raw SQL string.
-        dialect: SQL dialect for parsing.
+        dialect: SQL dialect for parsing. Defaults to None (sqlglot generic/ANSI mode).
 
     Returns:
         Deduplicated list of table name strings in the order they appear.

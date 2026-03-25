@@ -525,7 +525,7 @@ class SQLEmitter:
             from_=exp.From(this=main_ast.subquery()),
         )
         with_clause = exp.With(expressions=cte_exprs, recursive=is_recursive)
-        select.set("with", with_clause)
+        select.set("with_", with_clause)
         return select
 
     def _expression_to_ast(self, expr: Any) -> exp.Expression:
