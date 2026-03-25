@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import re
+import warnings
 from dataclasses import dataclass
 
 import sqlglot
@@ -238,7 +239,9 @@ def extract_tables_from_sql(
         return []
 
     try:
-        parsed = sqlglot.parse_one(sql, dialect=dialect)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*contains unsupported syntax.*")
+            parsed = sqlglot.parse_one(sql, dialect=dialect)
     except (sqlglot.errors.ParseError, sqlglot.errors.TokenError):
         logger.debug("sqlglot parse failed, falling back to regex: %.80s", sql)
         if dialect == "bigquery":

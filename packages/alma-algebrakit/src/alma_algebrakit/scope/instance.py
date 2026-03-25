@@ -7,11 +7,16 @@ with different aliases.
 
 from __future__ import annotations
 
+import warnings
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from alma_algebrakit.schema.catalog import TableSchema
+
+# Suppress pydantic warning about "schema" field shadowing BaseModel attribute.
+# The field name is intentional and ConfigDict(protected_namespaces=()) handles it.
+warnings.filterwarnings("ignore", category=UserWarning, message=".*shadows an attribute.*")
 
 
 class RelationInstance(BaseModel):

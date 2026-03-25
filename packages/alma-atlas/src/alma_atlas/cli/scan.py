@@ -32,6 +32,12 @@ def scan(
     if ctx.invoked_subcommand is not None:
         return
 
+    import logging as _logging
+
+    if not verbose:
+        # Suppress noisy sqlglot parse warnings (e.g. TRUNCATE unsupported syntax)
+        _logging.getLogger("sqlglot").setLevel(_logging.ERROR)
+
     cfg = get_config()
     sources = cfg.load_sources()
 

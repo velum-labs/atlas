@@ -25,6 +25,7 @@ Not in scope for this version
 from __future__ import annotations
 
 import logging
+import warnings
 from dataclasses import dataclass
 from typing import Literal
 
@@ -110,7 +111,9 @@ class LineageResult:
 def _extract_target_table(sql: str, dialect: str) -> str | None:
     """Return the canonical name of the write target, or ``None`` for plain SELECT."""
     try:
-        parsed = sqlglot.parse_one(sql, dialect=dialect)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*contains unsupported syntax.*")
+            parsed = sqlglot.parse_one(sql, dialect=dialect)
     except (sqlglot.errors.ParseError, sqlglot.errors.TokenError):
         return None
 
@@ -142,7 +145,9 @@ def _extract_target_table(sql: str, dialect: str) -> str | None:
 def _extract_select_sql(sql: str, dialect: str) -> str | None:
     """For INSERT / CREATE AS SELECT, return just the SELECT part as SQL text."""
     try:
-        parsed = sqlglot.parse_one(sql, dialect=dialect)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*contains unsupported syntax.*")
+            parsed = sqlglot.parse_one(sql, dialect=dialect)
     except (sqlglot.errors.ParseError, sqlglot.errors.TokenError):
         return None
 
