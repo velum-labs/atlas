@@ -15,11 +15,11 @@ class ConfigurationError(AtlasError):
     """Invalid adapter or pipeline configuration."""
 
 
-class ConnectionError(AtlasError):
+class AdapterConnectionError(AtlasError):
     """Failed to connect to a data source."""
 
 
-class AuthenticationError(ConnectionError):
+class AuthenticationError(AdapterConnectionError):
     """Authentication or authorization failed."""
 
 
@@ -27,7 +27,7 @@ class ExtractionError(AtlasError):
     """Failed to extract data from a source."""
 
 
-class TimeoutError(AtlasError):
+class AdapterTimeoutError(AtlasError):
     """Operation exceeded its timeout."""
 
 
@@ -42,10 +42,10 @@ class EnforcementError(AtlasError):
 __all__ = [
     "AtlasError",
     "ConfigurationError",
-    "ConnectionError",
+    "AdapterConnectionError",
     "AuthenticationError",
     "ExtractionError",
-    "TimeoutError",
+    "AdapterTimeoutError",
     "SyncError",
     "EnforcementError",
 ]

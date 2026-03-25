@@ -20,22 +20,22 @@ runner = CliRunner()
 
 def test_error_hierarchy_imports() -> None:
     from alma_ports.errors import (
+        AdapterConnectionError,
+        AdapterTimeoutError,
         AtlasError,
         AuthenticationError,
         ConfigurationError,
-        ConnectionError,
         EnforcementError,
         ExtractionError,
         SyncError,
-        TimeoutError,
     )
 
     assert issubclass(ConfigurationError, AtlasError)
-    assert issubclass(ConnectionError, AtlasError)
-    assert issubclass(AuthenticationError, ConnectionError)
+    assert issubclass(AdapterConnectionError, AtlasError)
+    assert issubclass(AuthenticationError, AdapterConnectionError)
     assert issubclass(AuthenticationError, AtlasError)
     assert issubclass(ExtractionError, AtlasError)
-    assert issubclass(TimeoutError, AtlasError)
+    assert issubclass(AdapterTimeoutError, AtlasError)
     assert issubclass(SyncError, AtlasError)
     assert issubclass(EnforcementError, AtlasError)
 
@@ -48,10 +48,10 @@ def test_atlas_error_is_exception() -> None:
 
 
 def test_authentication_error_is_connection_error() -> None:
-    from alma_ports.errors import AuthenticationError, ConnectionError
+    from alma_ports.errors import AdapterConnectionError, AuthenticationError
 
     err = AuthenticationError("auth failed")
-    assert isinstance(err, ConnectionError)
+    assert isinstance(err, AdapterConnectionError)
 
 
 # ---------------------------------------------------------------------------
