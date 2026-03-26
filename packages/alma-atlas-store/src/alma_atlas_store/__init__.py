@@ -14,6 +14,7 @@ from alma_atlas_store.consumer_repository import ConsumerRepository
 from alma_atlas_store.contract_repository import ContractRepository
 from alma_atlas_store.db import Database
 from alma_atlas_store.edge_repository import EdgeRepository
+from alma_atlas_store.graph_export import AtlasExport, build_atlas_export
 from alma_atlas_store.query_repository import QueryRepository
 from alma_atlas_store.schema_repository import SchemaRepository
 
@@ -23,6 +24,8 @@ __all__ = [
     "ContractRepository",
     "Database",
     "EdgeRepository",
+    "AtlasExport",
     "QueryRepository",
     "SchemaRepository",
+    "build_atlas_export",
 ]

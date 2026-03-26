@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 
 [tool.uv.workspace]
 members = [
+    "packages/alma-graph",
     "packages/alma-ports",
     "packages/alma-sqlkit",
     "packages/alma-algebrakit",
@@ -17,6 +18,7 @@ members = [
 ]
 
 [tool.uv.sources]
+alma-graph = { workspace = true }
 alma-ports = { workspace = true }
 alma-sqlkit = { workspace = true }
 alma-algebrakit = { workspace = true }
@@ -50,6 +52,7 @@ ignore = ["E501"]  # line length handled by formatter
 
 [tool.ruff.lint.isort]
 known-first-party = [
+    "alma_graph",
     "alma_ports",
     "alma_sqlkit",
     "alma_algebrakit",
