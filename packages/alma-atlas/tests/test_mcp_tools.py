@@ -6,6 +6,9 @@ from pathlib import Path
 
 from alma_atlas.config import AtlasConfig
 from alma_atlas.mcp.tools import (
+    _handle_analysis_run,
+    _handle_analysis_snapshot,
+    _handle_analysis_summary,
     _handle_check_contract,
     _handle_get_asset,
     _handle_get_query_patterns,
@@ -16,6 +19,7 @@ from alma_atlas.mcp.tools import (
     _handle_status,
     _handle_suggest_tables,
 )
+from alma_atlas.testing.analysis_seed import seed_analysis_data
 from alma_atlas_store.asset_repository import Asset, AssetRepository
 from alma_atlas_store.contract_repository import Contract, ContractRepository
 from alma_atlas_store.db import Database
@@ -335,6 +339,52 @@ def test_get_query_patterns_shows_tables(tmp_path: Path) -> None:
         )
     result = _handle_get_query_patterns(cfg, {})
     assert "pg::public.orders" in result[0].text
+
+
+# ---------------------------------------------------------------------------
+# Atlas analysis snapshot / summary / run
+# ---------------------------------------------------------------------------
+
+
+def test_analysis_snapshot_returns_json(tmp_path: Path) -> None:
+    cfg = _make_cfg(tmp_path)
+    seed_analysis_data(cfg.db_path)
+
+    result = _handle_analysis_snapshot(cfg, {"source": "postgres:demo"})
+
+    import json
+
+    payload = json.loads(result[0].text)
+    assert payload["source_filter"] == "postgres:demo"
+    assert payload["traffic_summary"]["query_fingerprint_count"] == 2
+    assert len(payload["graph"]["queries"]) == 2
+
+
+def test_analysis_summary_returns_json(tmp_path: Path) -> None:
+    cfg = _make_cfg(tmp_path)
+    seed_analysis_data(cfg.db_path)
+
+    result = _handle_analysis_summary(cfg, {"source": "postgres:demo"})
+
+    import json
+
+    payload = json.loads(result[0].text)
+    assert payload["query_fingerprint_count"] == 2
+    assert payload["total_query_executions"] == 3
+
+
+def test_analysis_run_returns_candidates(tmp_path: Path) -> None:
+    cfg = _make_cfg(tmp_path)
+    seed_analysis_data(cfg.db_path)
+
+    result = _handle_analysis_run(cfg, {"source": "postgres:demo"})
+
+    import json
+
+    payload = json.loads(result[0].text)
+    assert payload["parsed_query_count"] == 2
+    assert payload["cluster_count"] >= 1
+    assert payload["candidate_count"] >= 1
 
 
 # ---------------------------------------------------------------------------

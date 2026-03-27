@@ -12,6 +12,9 @@ Tool catalogue:
     - atlas_get_schema          Get the latest schema snapshot for an asset
     - atlas_impact              Analyse downstream impact of changes to an asset
     - atlas_get_query_patterns  Show top SQL query patterns by execution count
+    - atlas_analysis_snapshot   Export the Atlas analysis snapshot as JSON
+    - atlas_analysis_summary    Return Atlas traffic summary JSON
+    - atlas_analysis_run        Run Atlas-native clustering and candidate derivation
     - atlas_suggest_tables      Suggest relevant tables for a search query
     - atlas_check_contract      Validate schema against data contract spec
     - atlas_list_violations     List recent enforcement violations from the store
@@ -114,6 +117,63 @@ def register(server: Server, cfg: AtlasConfig) -> None:
                 },
             ),
             Tool(
+                name="atlas_analysis_snapshot",
+                description="Export a machine-readable Atlas analysis snapshot with graph records, query observations, and traffic summary.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "source": {
+                            "type": "string",
+                            "description": "Optional source ID filter",
+                        },
+                        "top_n": {
+                            "type": "integer",
+                            "description": "Number of top tables and fingerprints to include",
+                            "default": 10,
+                        },
+                    },
+                },
+            ),
+            Tool(
+                name="atlas_analysis_summary",
+                description="Return Atlas traffic summary JSON, including top tables and fingerprints.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "source": {
+                            "type": "string",
+                            "description": "Optional source ID filter",
+                        },
+                        "top_n": {
+                            "type": "integer",
+                            "description": "Number of top tables and fingerprints to include",
+                            "default": 10,
+                        },
+                    },
+                },
+            ),
+            Tool(
+                name="atlas_analysis_run",
+                description="Run Atlas-native clustering and candidate derivation over stored query traffic.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "source": {
+                            "type": "string",
+                            "description": "Optional source ID filter",
+                        },
+                        "similarity_threshold": {
+                            "type": "number",
+                            "description": "Optional clustering similarity threshold override",
+                        },
+                        "min_cluster_size": {
+                            "type": "integer",
+                            "description": "Optional minimum cluster size override",
+                        },
+                    },
+                },
+            ),
+            Tool(
                 name="atlas_suggest_tables",
                 description="Suggest relevant data tables for a search query, ranked by name relevance and column overlap.",
                 inputSchema={
@@ -179,6 +239,15 @@ def register(server: Server, cfg: AtlasConfig) -> None:
 
         if name == "atlas_get_query_patterns":
             return _handle_get_query_patterns(cfg, arguments)
+
+        if name == "atlas_analysis_snapshot":
+            return _handle_analysis_snapshot(cfg, arguments)
+
+        if name == "atlas_analysis_summary":
+            return _handle_analysis_summary(cfg, arguments)
+
+        if name == "atlas_analysis_run":
+            return _handle_analysis_run(cfg, arguments)
 
         if name == "atlas_suggest_tables":
             return _handle_suggest_tables(cfg, arguments)
@@ -385,7 +454,7 @@ def _handle_impact(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextCont
     # Count query executions touching each downstream asset
     query_counts: dict[str, int] = {}
     for q in all_queries:
-        for table in q.tables:
+        for table in set(q.tables):
             if table in downstream:
                 query_counts[table] = query_counts.get(table, 0) + q.execution_count
 
@@ -431,6 +500,51 @@ def _handle_get_query_patterns(cfg: AtlasConfig, arguments: dict[str, Any]) -> l
         lines.append("")
 
     return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _handle_analysis_snapshot(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
+    from alma_atlas.analysis import build_analysis_snapshot
+    from alma_atlas_store.db import Database
+
+    source = arguments.get("source")
+    top_n = arguments.get("top_n", 10)
+
+    with Database(cfg.db_path) as db:
+        snapshot = build_analysis_snapshot(db, source=source, top_n=top_n)
+
+    return [TextContent(type="text", text=snapshot.to_json())]
+
+
+def _handle_analysis_summary(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
+    from alma_atlas.analysis import build_analysis_snapshot
+    from alma_atlas_store.db import Database
+
+    source = arguments.get("source")
+    top_n = arguments.get("top_n", 10)
+
+    with Database(cfg.db_path) as db:
+        snapshot = build_analysis_snapshot(db, source=source, top_n=top_n)
+
+    return [TextContent(type="text", text=snapshot.traffic_summary.to_json())]
+
+
+def _handle_analysis_run(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
+    from alma_atlas.analysis import build_analysis_snapshot, run_analysis
+    from alma_atlas_store.db import Database
+
+    source = arguments.get("source")
+    similarity_threshold = arguments.get("similarity_threshold")
+    min_cluster_size = arguments.get("min_cluster_size")
+
+    with Database(cfg.db_path) as db:
+        snapshot = build_analysis_snapshot(db, source=source)
+        result = run_analysis(
+            snapshot,
+            similarity_threshold=similarity_threshold,
+            min_cluster_size=min_cluster_size,
+        )
+
+    return [TextContent(type="text", text=result.to_json())]
 
 
 def _handle_suggest_tables(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:

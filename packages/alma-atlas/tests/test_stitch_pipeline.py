@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from alma_atlas.pipeline.stitch import stitch
 from alma_atlas_store.asset_repository import Asset, AssetRepository
@@ -95,6 +97,30 @@ def test_stitch_writes_query_observation(db: Database) -> None:
     stitch(traffic, db, source_id="pg:test", source_kind="postgres")
     observations = QueryRepository(db).list_all()
     assert len(observations) >= 1
+
+
+def test_stitch_deduplicates_tables_in_query_observation(db: Database) -> None:
+    _seed_assets(db, "pg:test::public.orders", "pg:test::query::analyst")
+    traffic = _traffic("SELECT * FROM public.orders o1 JOIN public.orders o2 ON o1.parent_id = o2.id")
+
+    duplicate_edges = [
+        SimpleNamespace(
+            upstream_id="public.orders",
+            downstream_id="pg:test::query::analyst",
+            kind="reads",
+        ),
+        SimpleNamespace(
+            upstream_id="public.orders",
+            downstream_id="pg:test::query::analyst",
+            kind="reads",
+        ),
+    ]
+
+    with patch("alma_analysis.edges.extract_edges", return_value=duplicate_edges):
+        stitch(traffic, db, source_id="pg:test", source_kind="postgres")
+
+    observation = QueryRepository(db).list_all()[0]
+    assert observation.tables == ["pg:test::public.orders"]
 
 
 def test_stitch_insert_into_uses_target_as_downstream(db: Database) -> None:
