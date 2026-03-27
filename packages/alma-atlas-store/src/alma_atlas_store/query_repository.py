@@ -60,10 +60,68 @@ class QueryRepository:
         ).fetchall()
         return [self._row_to_query(r) for r in rows if asset_id in json.loads(r["tables"])]
 
-    def list_all(self) -> list[QueryObservation]:
+    def list_for_source(self, source: str) -> list[QueryObservation]:
+        """Return all queries observed for a specific source ID."""
+        return self.list_all(source=source)
+
+    def list_all(self, source: str | None = None) -> list[QueryObservation]:
         """Return all known query observations."""
-        rows = self._db.conn.execute("SELECT * FROM queries ORDER BY execution_count DESC").fetchall()
+        if source is None:
+            rows = self._db.conn.execute(
+                "SELECT * FROM queries ORDER BY execution_count DESC"
+            ).fetchall()
+        else:
+            rows = self._db.conn.execute(
+                "SELECT * FROM queries WHERE source = ? ORDER BY execution_count DESC",
+                (source,),
+            ).fetchall()
         return [self._row_to_query(r) for r in rows]
+
+    def list_top(
+        self,
+        *,
+        limit: int = 20,
+        source: str | None = None,
+    ) -> list[QueryObservation]:
+        """Return the highest-volume query observations."""
+        limit = max(1, limit)
+        if source is None:
+            rows = self._db.conn.execute(
+                "SELECT * FROM queries ORDER BY execution_count DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        else:
+            rows = self._db.conn.execute(
+                "SELECT * FROM queries WHERE source = ? ORDER BY execution_count DESC LIMIT ?",
+                (source, limit),
+            ).fetchall()
+        return [self._row_to_query(r) for r in rows]
+
+    def count_all(self, source: str | None = None) -> int:
+        """Return the total number of stored query fingerprints."""
+        if source is None:
+            row = self._db.conn.execute(
+                "SELECT COUNT(*) AS count FROM queries"
+            ).fetchone()
+        else:
+            row = self._db.conn.execute(
+                "SELECT COUNT(*) AS count FROM queries WHERE source = ?",
+                (source,),
+            ).fetchone()
+        return int(row["count"]) if row else 0
+
+    def sum_execution_count(self, source: str | None = None) -> int:
+        """Return the sum of execution counts across stored fingerprints."""
+        if source is None:
+            row = self._db.conn.execute(
+                "SELECT COALESCE(SUM(execution_count), 0) AS total FROM queries"
+            ).fetchone()
+        else:
+            row = self._db.conn.execute(
+                "SELECT COALESCE(SUM(execution_count), 0) AS total FROM queries WHERE source = ?",
+                (source,),
+            ).fetchone()
+        return int(row["total"]) if row else 0
 
     def _row_to_query(self, row: sqlite3.Row) -> QueryObservation:
         return QueryObservation(

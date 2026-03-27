@@ -138,6 +138,7 @@ def stitch(
                 for ae in derived
                 if not _is_system_table(ae.upstream_id)
             ]
+            tables = list(dict.fromkeys(tables))
             query_repo.upsert(
                 QueryObservation(
                     fingerprint=_fingerprint(event.sql),
