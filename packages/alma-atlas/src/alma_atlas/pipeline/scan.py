@@ -310,6 +310,9 @@ def _run_enforcement(snapshot: SchemaSnapshot, source_id: str, db: object) -> bo
         ]
         current = StoreSnapshot(asset_id=asset_id, columns=current_cols)
 
+        # Persist the current snapshot so future scans can detect drift.
+        schema_repo.upsert(current)
+
         report = detector.detect(asset_id, previous, current)
         if not report.has_violations:
             continue

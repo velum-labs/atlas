@@ -35,11 +35,14 @@ class ViolationRepository:
         self._db = db
 
     def insert(self, violation: Violation) -> None:
-        """Persist a new violation record."""
+        """Persist a new violation record (upserts on conflict)."""
         self._db.conn.execute(
             """
             INSERT INTO violations (id, asset_id, violation_type, severity, details)
             VALUES (:id, :asset_id, :violation_type, :severity, :details)
+            ON CONFLICT(id) DO UPDATE SET
+                severity = excluded.severity,
+                details  = excluded.details
             """,
             {
                 "id": violation.id,
