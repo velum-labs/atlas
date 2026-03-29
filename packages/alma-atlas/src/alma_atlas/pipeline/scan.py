@@ -212,8 +212,9 @@ async def _run_scan_impl(
         t_enforce = time.monotonic()
         logger.info("[scan/%s] Phase: enforcement", source.id)
         enforcement_blocked = False
+        enforcement_violations = False
         try:
-            enforcement_blocked = _run_enforcement(snapshot, source.id, db)
+            enforcement_blocked, enforcement_violations = _run_enforcement(snapshot, source.id, db)
         except Exception as exc:
             logger.exception("Enforcement check failed for source %s: %s", source.id, exc)
         logger.info(
@@ -237,6 +238,25 @@ async def _run_scan_impl(
     )
     if enforcement_blocked:
         result.warnings.append("enforcement_blocked: schema violations detected in enforce mode")
+
+    # Fire drift_detected hooks if any violations were found.
+    if enforcement_violations and cfg.hooks:
+        from datetime import UTC, datetime
+
+        from alma_atlas.hooks import HookEvent, HookExecutor
+
+        executor = HookExecutor(cfg.hooks)
+        event = HookEvent(
+            event_type="drift_detected",
+            source_id=source.id,
+            timestamp=datetime.now(UTC).isoformat(),
+            data={
+                "blocked": enforcement_blocked,
+                "asset_count": len(snapshot.objects),
+            },
+        )
+        await executor.fire(event)
+
     return result
 
 
@@ -259,7 +279,7 @@ def run_scan(
     return asyncio.run(run_scan_async(source, cfg, timeout=timeout))
 
 
-def _run_enforcement(snapshot: SchemaSnapshot, source_id: str, db: object) -> bool:
+def _run_enforcement(snapshot: SchemaSnapshot, source_id: str, db: object) -> tuple[bool, bool]:
     """Run drift detection + enforcement for any assets that have contracts.
 
     Silently skips assets without contracts.  Enforcement violations are
@@ -273,7 +293,9 @@ def _run_enforcement(snapshot: SchemaSnapshot, source_id: str, db: object) -> bo
         db:        Open Database connection (shared from the caller).
 
     Returns:
-        True if any contract in enforce mode was blocked; False otherwise.
+        Tuple of (any_blocked, has_violations) where any_blocked is True if a
+        contract in enforce mode was violated, and has_violations is True if any
+        drift violations were detected across all modes.
     """
     import logging
 
@@ -291,6 +313,7 @@ def _run_enforcement(snapshot: SchemaSnapshot, source_id: str, db: object) -> bo
     engine = EnforcementEngine(db)
 
     any_blocked = False
+    has_violations = False
 
     for obj in snapshot.objects:
         asset_id = f"{source_id}::{obj.schema_name}.{obj.object_name}"
@@ -317,6 +340,7 @@ def _run_enforcement(snapshot: SchemaSnapshot, source_id: str, db: object) -> bo
         if not report.has_violations:
             continue
 
+        has_violations = True
         for contract in contracts:
             result = engine.enforce(report, contract.mode)
             if result.blocked:
@@ -328,7 +352,7 @@ def _run_enforcement(snapshot: SchemaSnapshot, source_id: str, db: object) -> bo
                     report.error_count,
                 )
 
-    return any_blocked
+    return any_blocked, has_violations
 
 
 async def _run_scan_all_async(
