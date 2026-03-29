@@ -12,8 +12,8 @@ from typing import Annotated
 
 import typer
 from rich import print as rprint
-from rich.table import Table
 from rich.console import Console
+from rich.table import Table
 
 from alma_atlas.config import get_config
 

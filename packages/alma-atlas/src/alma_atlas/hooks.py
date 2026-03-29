@@ -13,7 +13,6 @@ import asyncio
 import json
 import logging
 import socket
-import sys
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -73,7 +72,7 @@ class HookExecutor:
         raw = await asyncio.gather(*tasks, return_exceptions=True)
 
         results: list[HookResult] = []
-        for hook, outcome in zip(matching, raw):
+        for hook, outcome in zip(matching, raw, strict=True):
             if isinstance(outcome, BaseException):
                 logger.warning("Hook %r raised unexpected error: %s", hook.name, outcome)
                 results.append(HookResult(hook_name=hook.name, success=False, error=str(outcome)))
