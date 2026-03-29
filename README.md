@@ -21,7 +21,10 @@ Atlas gives your AI the context a senior data engineer carries in their head: li
 ## Quickstart
 
 ```bash
-pip install alma-atlas
+uv add alma-atlas
+
+# Or install from ghcr.io (pre-release / latest tagged builds):
+# uv add alma-atlas --index velum=https://pyoci.com/ghcr.io/velum-labs/
 
 # Connect a source (pick one or more)
 alma-atlas connect bigquery --project my-gcp-project
