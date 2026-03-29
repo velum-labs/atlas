@@ -14,6 +14,13 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from alma_atlas.agents.repo_scanner import (
+    _MAX_FILE_CHARS,  # re-exported for callers that reference it directly  # noqa: F401
+    _MAX_FILES,  # noqa: F401
+    _SCAN_GLOBS,  # noqa: F401
+    _SKIP_DIRS,  # noqa: F401
+    collect_repo_files as _collect_repo_files,  # backward-compat alias
+)
 from alma_atlas.agents.schemas import EdgeEnrichment, PipelineAnalysisResult
 
 if TYPE_CHECKING:
@@ -21,23 +28,6 @@ if TYPE_CHECKING:
     from alma_atlas_store.edge_repository import Edge
 
 logger = logging.getLogger(__name__)
-
-# Maximum characters of file content included per file (avoids token overruns).
-_MAX_FILE_CHARS = 4_000
-# Maximum number of files to include in a single prompt.
-_MAX_FILES = 40
-# Glob patterns used to discover relevant pipeline code.
-_SCAN_GLOBS: tuple[str, ...] = (
-    "dags/**/*.py",
-    "pipelines/**/*.py",
-    "models/**/*.sql",
-    "**/*.py",
-    "**/*.sql",
-)
-# Directory names that are always skipped during scanning.
-_SKIP_DIRS: frozenset[str] = frozenset(
-    {".git", "__pycache__", ".venv", "node_modules", ".tox", "dist", "build", ".mypy_cache"}
-)
 
 _SYSTEM_PROMPT = """\
 You are an expert data engineer analyzing a code repository to understand how data \
@@ -65,36 +55,6 @@ Rules:
 - Do not fabricate values or guess beyond what the code shows.
 - Agents are READ-ONLY: never suggest modifying the repository.\
 """
-
-
-def _collect_repo_files(repo_path: Path) -> list[tuple[Path, str]]:
-    """Return (path, content) pairs for relevant files found in *repo_path*.
-
-    Files are collected in priority order defined by :data:`_SCAN_GLOBS` and
-    capped at :data:`_MAX_FILES` total.  Each file's content is capped at
-    :data:`_MAX_FILE_CHARS` characters.
-    """
-    results: list[tuple[Path, str]] = []
-    seen: set[Path] = set()
-
-    def _is_skipped(p: Path) -> bool:
-        return any(part in _SKIP_DIRS for part in p.parts)
-
-    for pattern in _SCAN_GLOBS:
-        for file_path in sorted(repo_path.glob(pattern)):
-            if file_path in seen or not file_path.is_file() or _is_skipped(file_path):
-                continue
-            seen.add(file_path)
-            try:
-                content = file_path.read_text(errors="replace")[:_MAX_FILE_CHARS]
-            except OSError as exc:
-                logger.debug("pipeline_analyzer: skipping %s: %s", file_path, exc)
-                continue
-            results.append((file_path, content))
-            if len(results) >= _MAX_FILES:
-                return results
-
-    return results
 
 
 def _build_user_prompt(
@@ -131,6 +91,8 @@ async def analyze_edges(
     edges: list[Edge],
     repo_path: Path,
     provider: LLMProvider,
+    *,
+    pre_filtered_files: list[tuple[Path, str]] | None = None,
 ) -> list[EdgeEnrichment]:
     """Analyze a batch of edges against a repository and return enrichment data.
 
@@ -139,10 +101,13 @@ async def analyze_edges(
     list is returned so the caller can decide how to proceed.
 
     Args:
-        edges:     Unenriched :class:`~alma_atlas_store.edge_repository.Edge`
-                   objects to analyse.
-        repo_path: Filesystem path to the code repository to scan.
-        provider:  Configured :class:`~alma_atlas.agents.provider.LLMProvider`.
+        edges:               Unenriched :class:`~alma_atlas_store.edge_repository.Edge`
+                             objects to analyse.
+        repo_path:           Filesystem path to the code repository to scan.
+        provider:            Configured :class:`~alma_atlas.agents.provider.LLMProvider`.
+        pre_filtered_files:  Optional pre-selected ``(path, content)`` pairs from the
+                             codebase explorer.  When provided, file scanning is skipped.
+                             When ``None``, the standard glob scan is used.
 
     Returns:
         Zero or more :class:`EdgeEnrichment` instances as returned by the agent.
@@ -150,7 +115,11 @@ async def analyze_edges(
     if not edges:
         return []
 
-    repo_files = _collect_repo_files(repo_path)
+    if pre_filtered_files is not None:
+        repo_files = pre_filtered_files
+    else:
+        repo_files = _collect_repo_files(repo_path)
+
     logger.debug(
         "pipeline_analyzer: %d edge(s), %d repo file(s) from %s",
         len(edges),

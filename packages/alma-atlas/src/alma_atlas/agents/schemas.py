@@ -48,3 +48,18 @@ class AssetEnrichmentResult(BaseModel):
 
     annotations: list[AssetAnnotation]
     repo_summary: str | None = None
+
+
+class FileRelevance(BaseModel):
+    """Relevance score for a single repository file, as returned by the codebase explorer."""
+
+    path: str  # relative path within the repository
+    relevance_score: float  # 0.0 (not relevant) to 1.0 (highly relevant)
+    reason: str
+
+
+class ExplorerResult(BaseModel):
+    """Full result returned by the codebase explorer agent."""
+
+    files: list[FileRelevance]
+    repo_structure_summary: str

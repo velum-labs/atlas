@@ -22,6 +22,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from alma_atlas.agents.repo_scanner import collect_repo_files as _collect_repo_files
 from alma_atlas.agents.schemas import AssetAnnotation, AssetEnrichmentResult
 
 if TYPE_CHECKING:
@@ -78,14 +79,19 @@ async def analyze_assets(
     assets: list[dict[str, Any]],
     repo_path: Path,
     provider: LLMProvider,
+    *,
+    pre_filtered_files: list[tuple[Path, str]] | None = None,
 ) -> list[AssetAnnotation]:
     """Analyze a batch of assets against a repository and return annotations.
 
     Args:
-        assets:     List of JSON-serializable dicts (asset context) produced by
-                   the orchestrator. Each entry must include at least asset_id.
-        repo_path:  Filesystem path to the code repository to scan.
-        provider:   Configured LLM provider.
+        assets:              List of JSON-serializable dicts (asset context) produced by
+                             the orchestrator. Each entry must include at least asset_id.
+        repo_path:           Filesystem path to the code repository to scan.
+        provider:            Configured LLM provider.
+        pre_filtered_files:  Optional pre-selected ``(path, content)`` pairs from the
+                             codebase explorer.  When provided, file scanning is skipped.
+                             When ``None``, the standard glob scan is used.
 
     Returns:
         Zero or more AssetAnnotation objects.
@@ -93,10 +99,10 @@ async def analyze_assets(
     if not assets:
         return []
 
-    # Reuse the same repo file scanning strategy as pipeline_analyzer.
-    from alma_atlas.agents.pipeline_analyzer import _collect_repo_files  # local import
-
-    repo_files = _collect_repo_files(repo_path)
+    if pre_filtered_files is not None:
+        repo_files = pre_filtered_files
+    else:
+        repo_files = _collect_repo_files(repo_path)
     logger.debug(
         "asset_enricher: %d asset(s), %d repo file(s) from %s",
         len(assets),

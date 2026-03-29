@@ -37,14 +37,50 @@ def default_config_dir() -> Path:
 
 
 @dataclass
-class EnrichmentConfig:
-    """Configuration for the pipeline analysis enrichment agent."""
+class AgentConfig:
+    """Configuration for a single enrichment agent."""
 
+    provider: str = "anthropic"  # anthropic | openai | mock
+    model: str = "claude-sonnet-4-20250514"
+    api_key_env: str = "ANTHROPIC_API_KEY"  # env var name containing the key
+    timeout: int = 120
+    max_tokens: int = 4096
+
+
+@dataclass
+class EnrichmentConfig:
+    """Configuration for the enrichment pipeline agents.
+
+    Supports two formats in ``atlas.yml``:
+
+    *Flat (legacy)*: top-level ``provider``, ``model``, etc. fields are applied
+    to all three agents for backward compatibility.
+
+    *Nested (per-agent)*: ``explorer``, ``pipeline_analyzer``, and
+    ``asset_enricher`` sub-sections each carry their own :class:`AgentConfig`.
+    """
+
+    # Flat fields — preserved for backward compatibility.
     provider: str = "mock"  # anthropic | openai | mock
     model: str = "claude-sonnet-4-20250514"
     api_key_env: str = "ANTHROPIC_API_KEY"  # env var name containing the key
     timeout: int = 120
     max_tokens: int = 4096
+
+    # Per-agent configs.  When the flat YAML format is used these are
+    # populated from the flat fields by ``load_atlas_yml``.
+    explorer: AgentConfig = field(
+        default_factory=lambda: AgentConfig(
+            provider="mock",
+            model="claude-haiku-4-20250514",
+        )
+    )
+    pipeline_analyzer: AgentConfig = field(
+        default_factory=lambda: AgentConfig(provider="mock")
+    )
+    asset_enricher: AgentConfig = field(
+        default_factory=lambda: AgentConfig(provider="mock")
+    )
 
 
 @dataclass
@@ -274,12 +310,51 @@ def load_atlas_yml(path: Path | str) -> AtlasConfig:
     # Parse enrichment settings.
     enrichment = data.get("enrichment", {})
     if enrichment:
-        cfg.enrichment = EnrichmentConfig(
-            provider=enrichment.get("provider", "mock"),
-            model=enrichment.get("model", "claude-sonnet-4-20250514"),
-            api_key_env=enrichment.get("api_key_env", "ANTHROPIC_API_KEY"),
-            timeout=int(enrichment.get("timeout", 120)),
-            max_tokens=int(enrichment.get("max_tokens", 4096)),
-        )
+        _per_agent_keys = frozenset({"explorer", "pipeline_analyzer", "asset_enricher"})
+        has_nested = bool(set(enrichment) & _per_agent_keys)
+
+        if has_nested:
+            # Nested per-agent format: each sub-key is an AgentConfig.
+            def _parse_agent(sub: dict) -> AgentConfig:
+                return AgentConfig(
+                    provider=sub.get("provider", "anthropic"),
+                    model=sub.get("model", "claude-sonnet-4-20250514"),
+                    api_key_env=sub.get("api_key_env", "ANTHROPIC_API_KEY"),
+                    timeout=int(sub.get("timeout", 120)),
+                    max_tokens=int(sub.get("max_tokens", 4096)),
+                )
+
+            cfg.enrichment = EnrichmentConfig(
+                explorer=_parse_agent(enrichment.get("explorer", {})),
+                pipeline_analyzer=_parse_agent(enrichment.get("pipeline_analyzer", {})),
+                asset_enricher=_parse_agent(enrichment.get("asset_enricher", {})),
+            )
+        else:
+            # Flat (legacy) format: apply the same values to all agents.
+            flat_provider = enrichment.get("provider", "mock")
+            flat_model = enrichment.get("model", "claude-sonnet-4-20250514")
+            flat_api_key_env = enrichment.get("api_key_env", "ANTHROPIC_API_KEY")
+            flat_timeout = int(enrichment.get("timeout", 120))
+            flat_max_tokens = int(enrichment.get("max_tokens", 4096))
+
+            def _flat_agent() -> AgentConfig:
+                return AgentConfig(
+                    provider=flat_provider,
+                    model=flat_model,
+                    api_key_env=flat_api_key_env,
+                    timeout=flat_timeout,
+                    max_tokens=flat_max_tokens,
+                )
+
+            cfg.enrichment = EnrichmentConfig(
+                provider=flat_provider,
+                model=flat_model,
+                api_key_env=flat_api_key_env,
+                timeout=flat_timeout,
+                max_tokens=flat_max_tokens,
+                explorer=_flat_agent(),
+                pipeline_analyzer=_flat_agent(),
+                asset_enricher=_flat_agent(),
+            )
 
     return cfg
