@@ -144,6 +144,11 @@ async def _run_scan_impl(
     with Database(cfg.db_path) as db:  # type: ignore[arg-type]
         repo = AssetRepository(db)
 
+        from alma_atlas_store.schema_repository import ColumnInfo, SchemaRepository
+        from alma_atlas_store.schema_repository import SchemaSnapshot as StoreSnapshot
+
+        schema_repo = SchemaRepository(db)
+
         asset_id_map: dict[tuple[str, str], str] = {}
         for obj in snapshot.objects:
             asset_id = f"{source.id}::{obj.schema_name}.{obj.object_name}"
@@ -156,6 +161,22 @@ async def _run_scan_impl(
                 )
             )
             asset_id_map[(obj.schema_name, obj.object_name)] = asset_id
+
+            # Persist schema snapshot (column-level info) for every asset —
+            # enables atlas_get_schema, atlas_check_contract, and drift detection.
+            if obj.columns:
+                store_snapshot = StoreSnapshot(
+                    asset_id=asset_id,
+                    columns=[
+                        ColumnInfo(
+                            name=c.name,
+                            type=getattr(c, "data_type", None) or getattr(c, "type", "unknown"),
+                            nullable=getattr(c, "nullable", True),
+                        )
+                        for c in obj.columns
+                    ],
+                )
+                schema_repo.upsert(store_snapshot)
 
         # Persist schema-level dependency edges (e.g. from dbt manifest lineage).
         dep_edge_count = 0
