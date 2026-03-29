@@ -26,6 +26,10 @@ inputs:
     description: "Optional inline JSON/YAML or file path containing Atlas source configs"
     required: false
     default: ""
+  install-from-source:
+    description: "Install alma-atlas from the local checkout instead of PyPI (for self-testing)"
+    required: false
+    default: "false"
   github-api-url:
     description: "GitHub API base URL used for check runs and comments"
     required: false
@@ -63,7 +67,12 @@ runs:
       run: |
         set -euo pipefail
         python -m pip install --upgrade pip
-        python -m pip install alma-atlas
+        if [[ "${{ inputs.install-from-source }}" == "true" ]]; then
+          python -m pip install pyyaml
+          python -m pip install -e packages/alma-ports -e packages/alma-sqlkit -e packages/alma-algebrakit -e packages/alma-atlas-store -e packages/alma-connectors -e packages/alma-analysis -e packages/alma-atlas
+        else
+          python -m pip install alma-atlas
+        fi
 
     - name: Prepare runtime paths
       id: prepare

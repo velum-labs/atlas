@@ -18,11 +18,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check connections configured
+        id: check-connections
+        shell: bash
+        run: |
+          if [[ -z "${{ secrets.ALMA_ATLAS_CONNECTIONS }}" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping Alma CI — ALMA_ATLAS_CONNECTIONS secret not configured"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Run Alma contract CI
+        if: steps.check-connections.outputs.skip != 'true'
         id: alma-ci
         uses: ./.github/actions/alma-ci
         with:
           python-version: "3.12"
+          install-from-source: "true"
           contract-paths: |
             contracts/**/*.yaml
           enforce-mode: warn
@@ -32,6 +45,7 @@ jobs:
           alma-api-token: ${{ secrets.ALMA_API_TOKEN }}
 
       - name: Print Alma CI outputs
+        if: steps.check-connections.outputs.skip != 'true'
         shell: bash
         run: |
           echo "status=${{ steps.alma-ci.outputs.status }}"
