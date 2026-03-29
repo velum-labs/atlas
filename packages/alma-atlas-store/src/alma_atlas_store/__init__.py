@@ -9,6 +9,7 @@ logic lives in alma-analysis and alma-atlas.
 
 __version__ = "0.1.0"
 
+from alma_atlas_store.annotation_repository import AnnotationRepository
 from alma_atlas_store.asset_repository import AssetRepository
 from alma_atlas_store.consumer_repository import ConsumerRepository
 from alma_atlas_store.contract_repository import ContractRepository
@@ -18,6 +19,7 @@ from alma_atlas_store.query_repository import QueryRepository
 from alma_atlas_store.schema_repository import SchemaRepository
 
 __all__ = [
+    "AnnotationRepository",
     "AssetRepository",
     "ConsumerRepository",
     "ContractRepository",

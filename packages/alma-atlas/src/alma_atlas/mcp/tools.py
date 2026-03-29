@@ -7,6 +7,7 @@ lookup, and status summaries.
 Tool catalogue:
     - atlas_search              Search for assets by name or keyword
     - atlas_get_asset           Get a specific asset by ID
+    - atlas_get_annotations     Get agent-generated asset annotations
     - atlas_lineage             Get upstream or downstream lineage for an asset
     - atlas_status              Summarise the current graph (counts by kind)
     - atlas_get_schema          Get the latest schema snapshot for an asset
@@ -56,6 +57,17 @@ def register(server: Server, cfg: AtlasConfig) -> None:
                         "asset_id": {"type": "string", "description": "Fully-qualified asset ID"},
                     },
                     "required": ["asset_id"],
+                },
+            ),
+            Tool(
+                name="atlas_get_annotations",
+                description="Retrieve agent-generated business metadata annotations for an asset (ownership, granularity, join keys, freshness).",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "asset_id": {"type": "string", "description": "Optional asset ID to fetch annotations for"},
+                        "limit": {"type": "integer", "description": "Max records when listing all", "default": 100},
+                    },
                 },
             ),
             Tool(
@@ -165,6 +177,9 @@ def register(server: Server, cfg: AtlasConfig) -> None:
         if name == "atlas_get_asset":
             return _handle_get_asset(cfg, arguments)
 
+        if name == "atlas_get_annotations":
+            return _handle_get_annotations(cfg, arguments)
+
         if name == "atlas_lineage":
             return _handle_lineage(cfg, arguments)
 
@@ -240,6 +255,55 @@ def _handle_get_asset(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextC
             ),
         )
     ]
+
+
+def _handle_get_annotations(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
+    """Return asset annotations from the store.
+
+    If asset_id is provided, returns that annotation (or a not-found message).
+    Otherwise returns up to `limit` most recent annotations.
+    """
+    from alma_atlas_store.annotation_repository import AnnotationRepository
+    from alma_atlas_store.db import Database
+
+    asset_id = arguments.get("asset_id")
+    limit = int(arguments.get("limit", 100))
+
+    with Database(cfg.db_path) as db:
+        repo = AnnotationRepository(db)
+        if asset_id:
+            ann = repo.get(asset_id)
+            if ann is None:
+                return [TextContent(type="text", text=f"No annotation found for asset: {asset_id}")]
+            payload = {
+                "asset_id": ann.asset_id,
+                "ownership": ann.ownership,
+                "granularity": ann.granularity,
+                "join_keys": ann.join_keys,
+                "freshness_guarantee": ann.freshness_guarantee,
+                "business_logic_summary": ann.business_logic_summary,
+                "sensitivity": ann.sensitivity,
+                "annotated_at": ann.annotated_at,
+                "annotated_by": ann.annotated_by,
+            }
+            return [TextContent(type="text", text=json.dumps(payload, indent=2))]
+
+        records = repo.list_all(limit=limit)
+        payload = [
+            {
+                "asset_id": ann.asset_id,
+                "ownership": ann.ownership,
+                "granularity": ann.granularity,
+                "join_keys": ann.join_keys,
+                "freshness_guarantee": ann.freshness_guarantee,
+                "business_logic_summary": ann.business_logic_summary,
+                "sensitivity": ann.sensitivity,
+                "annotated_at": ann.annotated_at,
+                "annotated_by": ann.annotated_by,
+            }
+            for ann in records
+        ]
+        return [TextContent(type="text", text=json.dumps({"annotations": payload}, indent=2))]
 
 
 def _handle_lineage(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:

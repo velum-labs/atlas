@@ -14,6 +14,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from alma_atlas_store.asset_repository import AssetRepository
 from alma_atlas_store.edge_repository import Edge, EdgeRepository
 
 if TYPE_CHECKING:
@@ -148,3 +149,133 @@ async def run_enrichment(
 
     logger.info("run_enrichment: %d edge(s) enriched", enriched_count)
     return enriched_count
+
+
+def get_unannotated_assets(db: Database, *, limit: int = 100) -> list[str]:
+    """Return asset IDs that have no annotation record yet."""
+    from alma_atlas_store.annotation_repository import AnnotationRepository
+
+    return AnnotationRepository(db).list_unannotated(limit=limit)
+
+
+async def run_asset_enrichment(
+    db: Database,
+    repo_path: Path,
+    provider: LLMProvider,
+    *,
+    provider_name: str,
+    model: str,
+    limit: int = 100,
+    batch_size: int = 20,
+) -> int:
+    """Enrich assets with supplementary business metadata annotations.
+
+    This is the P2 "Codex enrichment" path. It selects assets that have not yet
+    been annotated, builds a context payload per asset (schema + basic lineage),
+    calls the asset enrichment agent, and persists results to the store.
+
+    Args:
+        db:            Open Atlas database.
+        repo_path:      Filesystem path to the code repository.
+        provider:       Configured LLM provider.
+        provider_name:  Provider identifier (e.g. 'anthropic'). Used for provenance.
+        model:          Model identifier. Used for provenance.
+        limit:          Max assets to annotate in this run.
+        batch_size:     Max assets per LLM call.
+
+    Returns:
+        Number of assets successfully annotated.
+    """
+    from alma_atlas.agents.asset_enricher import analyze_assets
+    from alma_atlas_store.annotation_repository import AnnotationRecord, AnnotationRepository
+    from alma_atlas_store.edge_repository import EdgeRepository
+    from alma_atlas_store.schema_repository import SchemaRepository
+
+    asset_ids = get_unannotated_assets(db, limit=limit)
+    if not asset_ids:
+        logger.info("run_asset_enrichment: no unannotated assets found")
+        return 0
+
+    asset_repo = AssetRepository(db)
+    edge_repo = EdgeRepository(db)
+    schema_repo = SchemaRepository(db)
+    ann_repo = AnnotationRepository(db)
+
+    # Preload edges once; we only need immediate neighbors.
+    edges = edge_repo.list_all()
+    upstream_by_asset: dict[str, list[str]] = {}
+    downstream_by_asset: dict[str, list[str]] = {}
+    for e in edges:
+        downstream_by_asset.setdefault(e.upstream_id, []).append(e.downstream_id)
+        upstream_by_asset.setdefault(e.downstream_id, []).append(e.upstream_id)
+
+    annotated_by = f"agent:{provider_name}:{model}"
+    annotated_count = 0
+
+    # Batch asset contexts to respect context limits.
+    for i in range(0, len(asset_ids), batch_size):
+        batch_ids = asset_ids[i : i + batch_size]
+        contexts: list[dict] = []
+        for asset_id in batch_ids:
+            asset = asset_repo.get(asset_id)
+            if asset is None:
+                continue
+            schema = schema_repo.get_latest(asset_id)
+            contexts.append(
+                {
+                    "asset_id": asset.id,
+                    "source": asset.source,
+                    "kind": asset.kind,
+                    "name": asset.name,
+                    "description": asset.description,
+                    "tags": asset.tags,
+                    "schema": (
+                        {
+                            "fingerprint": schema.fingerprint,
+                            "columns": [
+                                {"name": c.name, "type": c.type, "nullable": c.nullable}
+                                for c in (schema.columns[:50] if schema else [])
+                            ],
+                        }
+                        if schema
+                        else None
+                    ),
+                    "lineage": {
+                        "upstream": upstream_by_asset.get(asset_id, [])[:25],
+                        "downstream": downstream_by_asset.get(asset_id, [])[:25],
+                    },
+                }
+            )
+
+        if not contexts:
+            continue
+
+        annotations = await analyze_assets(contexts, repo_path, provider)
+        if not annotations:
+            continue
+
+        for ann in annotations:
+            # Persist with provenance.
+            try:
+                ann_repo.upsert(
+                    AnnotationRecord(
+                        asset_id=ann.asset_id,
+                        ownership=ann.ownership,
+                        granularity=ann.granularity,
+                        join_keys=ann.join_keys,
+                        freshness_guarantee=ann.freshness_guarantee,
+                        business_logic_summary=ann.business_logic_summary,
+                        sensitivity=ann.sensitivity,
+                        annotated_by=annotated_by,
+                    )
+                )
+                annotated_count += 1
+            except Exception as exc:
+                logger.warning(
+                    "run_asset_enrichment: failed to persist annotation for %s: %s",
+                    ann.asset_id,
+                    exc,
+                )
+
+    logger.info("run_asset_enrichment: %d asset(s) annotated", annotated_count)
+    return annotated_count
