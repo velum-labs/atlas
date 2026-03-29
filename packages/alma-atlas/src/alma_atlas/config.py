@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 # Known top-level keys for atlas.yml.  Unknown keys are rejected (fail-closed).
-_KNOWN_ATLAS_YML_KEYS = frozenset({"version", "sources", "team", "scan", "hooks"})
+_KNOWN_ATLAS_YML_KEYS = frozenset({"version", "sources", "team", "scan", "hooks", "enrichment"})
 
 # Keys whose values must be redacted in __repr__ output.
 _SECRET_PARAM_KEYS = frozenset({"dsn", "password", "api_key", "api_secret", "client_secret", "auth_token"})
@@ -34,6 +34,17 @@ def default_config_dir() -> Path:
     if env:
         return Path(env)
     return Path.home() / ".alma"
+
+
+@dataclass
+class EnrichmentConfig:
+    """Configuration for the pipeline analysis enrichment agent."""
+
+    provider: str = "mock"  # anthropic | openai | mock
+    model: str = "claude-sonnet-4-20250514"
+    api_key_env: str = "ANTHROPIC_API_KEY"  # env var name containing the key
+    timeout: int = 120
+    max_tokens: int = 4096
 
 
 @dataclass
@@ -74,6 +85,7 @@ class AtlasConfig:
     team_server_url: str | None = None
     team_api_key: str | None = None
     team_id: str | None = None
+    enrichment: EnrichmentConfig = field(default_factory=EnrichmentConfig)
 
     def __post_init__(self) -> None:
         if self.db_path is None:
@@ -258,5 +270,16 @@ def load_atlas_yml(path: Path | str) -> AtlasConfig:
             cfg.team_api_key = os.environ.get(api_key_env)
         else:
             cfg.team_api_key = team.get("api_key")
+
+    # Parse enrichment settings.
+    enrichment = data.get("enrichment", {})
+    if enrichment:
+        cfg.enrichment = EnrichmentConfig(
+            provider=enrichment.get("provider", "mock"),
+            model=enrichment.get("model", "claude-sonnet-4-20250514"),
+            api_key_env=enrichment.get("api_key_env", "ANTHROPIC_API_KEY"),
+            timeout=int(enrichment.get("timeout", 120)),
+            max_tokens=int(enrichment.get("max_tokens", 4096)),
+        )
 
     return cfg
