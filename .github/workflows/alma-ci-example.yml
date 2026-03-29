@@ -1,0 +1,39 @@
+name: Alma CI Example
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+jobs:
+  alma-contract-ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Alma contract CI
+        id: alma-ci
+        uses: ./.github/actions/alma-ci
+        with:
+          python-version: "3.12"
+          contract-paths: |
+            contracts/**/*.yaml
+          enforce-mode: warn
+          # Inline JSON/YAML or a file path relative to the repo root are both supported.
+          connections: ${{ secrets.ALMA_ATLAS_CONNECTIONS }}
+          alma-api-url: ${{ secrets.ALMA_API_URL }}
+          alma-api-token: ${{ secrets.ALMA_API_TOKEN }}
+
+      - name: Print Alma CI outputs
+        shell: bash
+        run: |
+          echo "status=${{ steps.alma-ci.outputs.status }}"
+          echo "run-id=${{ steps.alma-ci.outputs.run-id }}"
+          echo "report-url=${{ steps.alma-ci.outputs.report-url }}"

@@ -15,6 +15,7 @@ from rich import print as rprint
 from rich.console import Console
 from rich.table import Table
 
+from alma_atlas.ci_support import split_contract_patterns, validate_contracts, write_payload
 from alma_atlas.config import get_config
 
 app = typer.Typer(help="Manage enforcement modes and inspect drift violations.")
@@ -170,3 +171,84 @@ def status() -> None:
         )
 
     console.print(table)
+
+
+@app.command("validate")
+def validate(
+    contracts: Annotated[
+        str,
+        typer.Option(
+            "--contracts",
+            help="Comma/newline-separated glob patterns for contract YAML files.",
+        ),
+    ] = "contracts/**/*.yaml",
+    mode: Annotated[
+        str,
+        typer.Option("--mode", "-m", help="Validation mode: shadow, warn, or enforce."),
+    ] = "warn",
+    output_format: Annotated[
+        str,
+        typer.Option("--format", help="Output format: text or json."),
+    ] = "text",
+    output: Annotated[
+        str | None,
+        typer.Option("--output", "-o", help="Write JSON output to a file."),
+    ] = None,
+) -> None:
+    """Validate contract YAML files against the latest scanned schema snapshots."""
+
+    normalized_mode = mode.strip().lower()
+    if normalized_mode not in {"shadow", "warn", "enforce"}:
+        rprint("[red]Invalid mode.[/red] Must be one of: shadow, warn, enforce")
+        raise typer.Exit(1)
+
+    normalized_output_format = output_format.strip().lower()
+    if normalized_output_format not in {"json", "text"}:
+        rprint("[red]Invalid format.[/red] Must be one of: text, json")
+        raise typer.Exit(1)
+
+    cfg = get_config()
+    try:
+        payload = validate_contracts(
+            cfg=cfg,
+            contract_patterns=split_contract_patterns(contracts),
+            mode=normalized_mode,  # type: ignore[arg-type]
+        )
+    except ValueError as exc:
+        if normalized_output_format == "json":
+            write_payload({"status": "failed", "error": str(exc)}, output=output)
+        else:
+            rprint(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    if normalized_output_format == "json":
+        write_payload(payload, output=output)
+    else:
+        rprint(
+            "[bold]Contract validation complete[/bold] "
+            f"({payload['passed']} passed, {payload['failed']} failed, mode={normalized_mode})"
+        )
+        details = payload.get("details", [])
+        if isinstance(details, list):
+            for detail in details:
+                if not isinstance(detail, dict):
+                    continue
+                status_label = (
+                    "[green]PASS[/green]"
+                    if detail.get("status") == "passed"
+                    else "[red]FAIL[/red]"
+                )
+                asset_id = str(detail.get("asset_id", ""))
+                rprint(
+                    f"  {status_label} {detail.get('contract_id', 'unknown')} "
+                    f"({asset_id or 'unknown asset'})"
+                )
+                issues = detail.get("issues", [])
+                if isinstance(issues, list):
+                    for issue in issues:
+                        if not isinstance(issue, dict):
+                            continue
+                        rprint(f"    - {issue.get('message', 'Unknown contract validation issue')}")
+
+    if payload["status"] == "failed" and normalized_mode == "enforce":
+        raise typer.Exit(1)
