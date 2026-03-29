@@ -72,7 +72,7 @@ class EnrichmentConfig:
     explorer: AgentConfig = field(
         default_factory=lambda: AgentConfig(
             provider="mock",
-            model="claude-haiku-4-20250514",
+            model="claude-haiku-4-5-20251001",
         )
     )
     pipeline_analyzer: AgentConfig = field(

@@ -40,7 +40,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Edge kinds that are candidates for pipeline enrichment.
-_ENRICHABLE_KINDS: frozenset[str] = frozenset({"schema_match", "dbt_source_ref"})
+#
+# We include `depends_on` because dbt/SQL lineage edges are often the ones that have
+# meaningful transport metadata (schedule, strategy, owner) in the surrounding pipeline code.
+_ENRICHABLE_KINDS: frozenset[str] = frozenset({"schema_match", "dbt_source_ref", "depends_on"})
 
 
 def _provider_from_agent_config(agent_cfg: AgentConfig) -> LLMProvider:
@@ -77,6 +80,8 @@ def get_unenriched_edges(db: Database) -> list[Edge]:
         e
         for e in repo.list_all()
         if e.kind in _ENRICHABLE_KINDS
+        # Skip identity edges like pg::raw.users -> dbt::raw.users; there's no "transport" to infer.
+        and e.upstream_id.split("::", 1)[-1] != e.downstream_id.split("::", 1)[-1]
         and e.metadata.get("enrichment_status") != "enriched"
     ]
 
