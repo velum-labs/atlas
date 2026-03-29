@@ -131,7 +131,7 @@ jobs:
 
       - name: Build package
         working-directory: packages/${{ matrix.package }}
-        run: uv build
+        run: uv build -o dist --clear
 
       - name: Check wheel metadata (twine check)
         working-directory: packages/${{ matrix.package }}

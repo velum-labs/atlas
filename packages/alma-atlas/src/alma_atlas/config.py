@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 # Known top-level keys for atlas.yml.  Unknown keys are rejected (fail-closed).
-_KNOWN_ATLAS_YML_KEYS = frozenset({"version", "sources", "team", "scan"})
+_KNOWN_ATLAS_YML_KEYS = frozenset({"version", "sources", "team", "scan", "hooks"})
 
 # Keys whose values must be redacted in __repr__ output.
 _SECRET_PARAM_KEYS = frozenset({"dsn", "password", "api_key", "api_secret", "client_secret", "auth_token"})
@@ -34,6 +34,17 @@ def default_config_dir() -> Path:
     if env:
         return Path(env)
     return Path.home() / ".alma"
+
+
+@dataclass
+class PostScanHook:
+    """Configuration for a post-scan hook."""
+
+    name: str
+    type: str  # 'webhook' | 'log'
+    events: list[str]
+    url: str | None = None  # required for webhook
+    headers: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -58,6 +69,7 @@ class AtlasConfig:
 
     config_dir: Path = field(default_factory=default_config_dir)
     sources: list[SourceConfig] = field(default_factory=list)
+    hooks: list[PostScanHook] = field(default_factory=list)
     db_path: Path | None = None
     team_server_url: str | None = None
     team_api_key: str | None = None
@@ -214,6 +226,18 @@ def load_atlas_yml(path: Path | str) -> AtlasConfig:
                 id=raw_source["id"],
                 kind=raw_source["kind"],
                 params=raw_source.get("params", {}),
+            )
+        )
+
+    # Parse post-scan hooks.
+    for raw_hook in data.get("hooks", {}).get("post_scan", []):
+        cfg.hooks.append(
+            PostScanHook(
+                name=raw_hook["name"],
+                type=raw_hook["type"],
+                events=raw_hook.get("events", []),
+                url=raw_hook.get("url"),
+                headers=raw_hook.get("headers", {}),
             )
         )
 

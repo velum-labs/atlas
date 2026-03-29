@@ -113,6 +113,7 @@ def scan(
     cfg.ensure_dir()
     failed_sources: list[str] = []
     scan_error: str | None = None
+    all_result = None
 
     if normalized_output_format == "json":
         try:
@@ -150,6 +151,36 @@ def scan(
                 progress.update(task, description=f"[red]Scan failed:[/red] {e}")
             finally:
                 progress.stop_task(task)
+
+    # Fire post-scan hooks for each source result.
+    if cfg.hooks and all_result is not None:
+        import asyncio as _asyncio
+        from datetime import UTC, datetime
+
+        from alma_atlas.hooks import HookEvent, HookExecutor
+
+        executor = HookExecutor(cfg.hooks)
+
+        async def _fire_all_hooks() -> None:
+            for result in all_result.results:  # type: ignore[union-attr]
+                event_type = "scan_error" if result.error else "scan_complete"
+                data: dict = {"asset_count": result.asset_count, "edge_count": result.edge_count}
+                if result.error:
+                    data["error"] = result.error
+                if result.warnings:
+                    data["warnings"] = list(result.warnings)
+                event = HookEvent(
+                    event_type=event_type,
+                    source_id=result.source_id,
+                    timestamp=datetime.now(UTC).isoformat(),
+                    data=data,
+                )
+                hook_results = await executor.fire(event)
+                for hr in hook_results:
+                    if not hr.success and normalized_output_format != "json":
+                        rprint(f"[yellow]Hook {hr.hook_name!r} failed (continuing):[/yellow] {hr.error}")
+
+        _asyncio.run(_fire_all_hooks())
 
     # Auto-sync if team is configured and --no-sync not passed
     if not no_sync:

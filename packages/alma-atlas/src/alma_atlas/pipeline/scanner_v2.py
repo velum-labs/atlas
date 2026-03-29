@@ -246,13 +246,45 @@ class ScannerV2:
         # v1 fallback
         logger.debug("Adapter %r does not implement SourceAdapterV2; using v1 path", source.kind)
         v1_result = run_scan(source, self._cfg)
-        return ScanResultV2(
+        wrapped = ScanResultV2(
             source_id=v1_result.source_id,
             asset_count=v1_result.asset_count,
             edge_count=v1_result.edge_count,
             error=v1_result.error,
             warnings=list(v1_result.warnings),
         )
+
+        # Fire post-scan hooks (v1 path; drift hooks are fired inside run_scan already).
+        if self._cfg.hooks:
+            self._fire_hooks(wrapped)
+
+        return wrapped
+
+    def _fire_hooks(self, result: ScanResultV2) -> None:
+        """Fire post-scan hooks for a completed v2 scan result."""
+        import asyncio as _asyncio
+        from datetime import UTC, datetime
+
+        from alma_atlas.hooks import HookEvent, HookExecutor
+
+        event_type = "scan_error" if result.error else "scan_complete"
+        data: dict = {"asset_count": result.asset_count, "edge_count": result.edge_count}
+        if result.error:
+            data["error"] = result.error
+        if result.warnings:
+            data["warnings"] = list(result.warnings)
+
+        event = HookEvent(
+            event_type=event_type,
+            source_id=result.source_id,
+            timestamp=datetime.now(UTC).isoformat(),
+            data=data,
+        )
+        executor = HookExecutor(self._cfg.hooks)
+        try:
+            _asyncio.run(executor.fire(event))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to fire hooks for source %s: %s", result.source_id, exc)
 
     def _scan_v2(
         self,
@@ -299,7 +331,7 @@ class ScannerV2:
             logger.warning("Failed to store extraction results for source %s: %s", source.id, exc)
             store_warnings.append(f"ExtractionError: Failed to store extraction results: {exc}")
 
-        return ScanResultV2(
+        scan_result = ScanResultV2(
             source_id=source.id,
             capabilities_run=list(results.keys()),
             capabilities_skipped=plan.skipped,
@@ -308,6 +340,12 @@ class ScannerV2:
             warnings=extraction_warnings + store_warnings,
             results=results,
         )
+
+        # Fire post-scan hooks.
+        if self._cfg.hooks:
+            self._fire_hooks(scan_result)
+
+        return scan_result
 
 
 # ---------------------------------------------------------------------------
