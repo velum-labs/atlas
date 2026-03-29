@@ -67,11 +67,15 @@ class AnthropicProvider(LLMProvider):
         resolved_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         self._model = model
         self._max_tokens = max_tokens
+        # Tool use requires the `anthropic-beta` header on some API keys / model families.
+        # Without it the API may return a generic 400 error.
         self._client = httpx.AsyncClient(
             base_url=self._API_BASE,
             headers={
                 "x-api-key": resolved_key,
                 "anthropic-version": self._API_VERSION,
+                # https://docs.anthropic.com/en/docs/build-with-claude/tool-use
+                "anthropic-beta": "tools-2024-04-04",
                 "content-type": "application/json",
             },
             timeout=timeout,

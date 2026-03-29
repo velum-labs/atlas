@@ -7,6 +7,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "real_e2e: marks tests that hit real external services (Postgres + Anthropic API)",
+    )
+
 from alma_atlas.config import AtlasConfig, SourceConfig
 from alma_atlas_store.db import Database
 
