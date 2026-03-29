@@ -384,8 +384,12 @@ def _store_v2_results(
 
         # Derived: assets from SCHEMA
         if AdapterCapability.SCHEMA in results:
+            from alma_atlas_store.schema_repository import ColumnInfo, SchemaRepository
+            from alma_atlas_store.schema_repository import SchemaSnapshot as StoreSnapshot
+
             schema_result: SchemaSnapshotV2 = results[AdapterCapability.SCHEMA]
             repo = AssetRepository(db)
+            schema_repo = SchemaRepository(db)
             for obj in schema_result.objects:
                 asset_id = f"{source.id}::{obj.schema_name}.{obj.object_name}"
                 repo.upsert(
@@ -397,6 +401,21 @@ def _store_v2_results(
                     )
                 )
                 asset_count += 1
+
+                # Persist column-level schema snapshot for MCP tools and drift detection.
+                if obj.columns:
+                    store_snapshot = StoreSnapshot(
+                        asset_id=asset_id,
+                        columns=[
+                            ColumnInfo(
+                                name=c.name,
+                                type=getattr(c, "data_type", None) or getattr(c, "type", "unknown"),
+                                nullable=getattr(c, "nullable", True),
+                            )
+                            for c in obj.columns
+                        ],
+                    )
+                    schema_repo.upsert(store_snapshot)
 
             # Schema-level object dependencies
             if schema_result.dependencies:
