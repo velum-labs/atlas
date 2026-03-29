@@ -19,7 +19,7 @@ from rich.table import Table
 
 from alma_atlas.config import get_config
 
-app = typer.Typer(help="Enrich cross-system edges with pipeline transport metadata.")
+app = typer.Typer(help="Enrich edges and assets with agent-inferred metadata.")
 console = Console()
 logger = logging.getLogger(__name__)
 
@@ -38,9 +38,16 @@ def enrich(
             resolve_path=True,
         ),
     ] = None,
+    assets: Annotated[
+        bool,
+        typer.Option(
+            "--assets",
+            help="Enrich assets (business metadata annotations) instead of edges.",
+        ),
+    ] = False,
     dry_run: Annotated[
         bool,
-        typer.Option("--dry-run", help="Show unenriched edges without calling the LLM."),
+        typer.Option("--dry-run", help="Show unenriched items without calling the LLM."),
     ] = False,
 ) -> None:
     """Enrich cross-system edges with pipeline transport metadata.
@@ -52,11 +59,41 @@ def enrich(
     if ctx.invoked_subcommand is not None:
         return
 
-    from alma_atlas.pipeline.enrich import get_unenriched_edges
     from alma_atlas_store.db import Database
 
     cfg = get_config()
     assert cfg.db_path is not None, "db_path must be configured"
+
+    if assets:
+        from alma_atlas.pipeline.enrich import get_unannotated_assets
+
+        with Database(cfg.db_path) as db:
+            unannotated = get_unannotated_assets(db)
+
+        if not unannotated:
+            console.print("[green]No unannotated assets found.[/green]")
+            return
+
+        if dry_run:
+            table = Table(title=f"Unannotated assets ({len(unannotated)})")
+            table.add_column("Asset ID", style="cyan")
+            for asset_id in unannotated:
+                table.add_row(asset_id)
+            console.print(table)
+            return
+
+        if repo is None:
+            console.print(
+                "[red]Error:[/red] --repo is required when enriching assets.\n"
+                "Run [bold]atlas enrich --help[/bold] for usage."
+            )
+            raise typer.Exit(code=1)
+
+        _run_asset_enrichment(cfg, repo)
+        return
+
+    # Default: edge enrichment
+    from alma_atlas.pipeline.enrich import get_unenriched_edges
 
     with Database(cfg.db_path) as db:
         unenriched = get_unenriched_edges(db)
@@ -85,11 +122,8 @@ def enrich(
     _run_enrichment(cfg, repo)
 
 
-def _run_enrichment(cfg, repo_path: Path) -> None:
-    """Synchronous wrapper — resolves the provider and runs the async enrichment."""
+def _make_provider_from_cfg(cfg):
     from alma_atlas.agents.provider import make_provider
-    from alma_atlas.pipeline.enrich import run_enrichment
-    from alma_atlas_store.db import Database
 
     enrichment_cfg = cfg.enrichment
     api_key: str | None = None
@@ -103,8 +137,38 @@ def _run_enrichment(cfg, repo_path: Path) -> None:
         timeout=float(enrichment_cfg.timeout),
         max_tokens=enrichment_cfg.max_tokens,
     )
+    return provider
+
+
+def _run_enrichment(cfg, repo_path: Path) -> None:
+    """Synchronous wrapper — resolves the provider and runs the async edge enrichment."""
+    from alma_atlas.pipeline.enrich import run_enrichment
+    from alma_atlas_store.db import Database
+
+    provider = _make_provider_from_cfg(cfg)
 
     with Database(cfg.db_path) as db:
         count = asyncio.run(run_enrichment(db, repo_path, provider))
 
     console.print(f"[green]Enriched {count} edge(s).[/green]")
+
+
+def _run_asset_enrichment(cfg, repo_path: Path) -> None:
+    """Synchronous wrapper — resolves the provider and runs the async asset enrichment."""
+    from alma_atlas.pipeline.enrich import run_asset_enrichment
+    from alma_atlas_store.db import Database
+
+    provider = _make_provider_from_cfg(cfg)
+
+    with Database(cfg.db_path) as db:
+        count = asyncio.run(
+            run_asset_enrichment(
+                db,
+                repo_path,
+                provider,
+                provider_name=cfg.enrichment.provider,
+                model=cfg.enrichment.model,
+            )
+        )
+
+    console.print(f"[green]Annotated {count} asset(s).[/green]")

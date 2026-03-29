@@ -186,9 +186,9 @@ class MockProvider(LLMProvider):
             self._fixed_result, response_schema
         ):
             return self._fixed_result  # type: ignore[return-value]
-        # Return a minimal valid instance for PipelineAnalysisResult.
-        from alma_atlas.agents.schemas import PipelineAnalysisResult
+        from alma_atlas.agents.schemas import AssetEnrichmentResult, PipelineAnalysisResult
 
+        # Return a minimal valid instance for known result schemas.
         if issubclass(response_schema, PipelineAnalysisResult):
             return response_schema.model_validate(  # type: ignore[return-value]
                 {
@@ -196,6 +196,15 @@ class MockProvider(LLMProvider):
                     "repo_summary": "Mock provider: no analysis performed",
                 }
             )
+
+        if issubclass(response_schema, AssetEnrichmentResult):
+            return response_schema.model_validate(  # type: ignore[return-value]
+                {
+                    "annotations": [],
+                    "repo_summary": "Mock provider: no enrichment performed",
+                }
+            )
+
         return response_schema.model_validate({})
 
 

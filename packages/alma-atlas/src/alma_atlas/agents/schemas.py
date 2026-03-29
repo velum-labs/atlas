@@ -29,3 +29,22 @@ class PipelineAnalysisResult(BaseModel):
 
     edges: list[EdgeEnrichment]
     repo_summary: str | None = None
+
+
+class AssetAnnotation(BaseModel):
+    """Business metadata annotation inferred by the asset enrichment agent for one asset."""
+
+    asset_id: str
+    ownership: str | None = None          # team or person
+    granularity: str | None = None        # 'one row per user per day'
+    join_keys: list[str] = []             # ['user_id', 'date']
+    freshness_guarantee: str | None = None  # 'updated hourly' / 'SLA: 6h'
+    business_logic_summary: str | None = None  # 1-2 sentence description
+    sensitivity: str | None = None        # 'PII', 'financial', 'public'
+
+
+class AssetEnrichmentResult(BaseModel):
+    """Full result returned by the asset enrichment agent for a batch of assets."""
+
+    annotations: list[AssetAnnotation]
+    repo_summary: str | None = None

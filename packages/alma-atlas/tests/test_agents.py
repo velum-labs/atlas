@@ -24,12 +24,19 @@ from alma_atlas.agents.pipeline_analyzer import (
     analyze_edges,
 )
 from alma_atlas.agents.provider import MockProvider, make_provider
-from alma_atlas.agents.schemas import EdgeEnrichment, PipelineAnalysisResult
+from alma_atlas.agents.schemas import AssetAnnotation, AssetEnrichmentResult, EdgeEnrichment, PipelineAnalysisResult
 from alma_atlas.config import AtlasConfig, EnrichmentConfig, load_atlas_yml
-from alma_atlas.pipeline.enrich import get_unenriched_edges, run_enrichment
+from alma_atlas.pipeline.enrich import (
+    get_unannotated_assets,
+    get_unenriched_edges,
+    run_asset_enrichment,
+    run_enrichment,
+)
+from alma_atlas_store.annotation_repository import AnnotationRecord, AnnotationRepository
 from alma_atlas_store.asset_repository import Asset, AssetRepository
 from alma_atlas_store.db import Database
 from alma_atlas_store.edge_repository import Edge, EdgeRepository
+from alma_atlas_store.schema_repository import ColumnInfo, SchemaRepository, SchemaSnapshot
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -160,6 +167,14 @@ async def test_mock_provider_returns_empty_result() -> None:
     assert isinstance(result, PipelineAnalysisResult)
     assert result.edges == []
     assert result.repo_summary == "Mock provider: no analysis performed"
+
+
+async def test_mock_provider_returns_empty_asset_enrichment_result() -> None:
+    provider = MockProvider()
+    result = await provider.analyze("sys", "usr", AssetEnrichmentResult)
+    assert isinstance(result, AssetEnrichmentResult)
+    assert result.annotations == []
+    assert result.repo_summary == "Mock provider: no enrichment performed"
 
 
 async def test_mock_provider_returns_fixed_result() -> None:
@@ -415,6 +430,75 @@ async def test_run_enrichment_unmatched_edge_not_updated(db: Database, tmp_path:
 
 
 # ---------------------------------------------------------------------------
+# Asset enrichment orchestrator (P2)
+# ---------------------------------------------------------------------------
+
+
+async def test_get_unannotated_assets_returns_assets_without_annotations(db: Database) -> None:
+    AssetRepository(db).upsert(Asset(id="pg::public.orders", source="pg:test", kind="table", name="public.orders"))
+    AssetRepository(db).upsert(Asset(id="pg::public.users", source="pg:test", kind="table", name="public.users"))
+
+    # Annotate one of them
+    AnnotationRepository(db).upsert(
+        AnnotationRecord(
+            asset_id="pg::public.orders",
+            ownership="data",
+            join_keys=["order_id"],
+            annotated_by="agent:mock",
+        )
+    )
+
+    unannotated = get_unannotated_assets(db)
+    assert "pg::public.users" in unannotated
+    assert "pg::public.orders" not in unannotated
+
+
+async def test_run_asset_enrichment_persists_annotations(db: Database, tmp_path: Path) -> None:
+    # Seed one asset + schema
+    asset_id = "pg::public.orders"
+    AssetRepository(db).upsert(Asset(id=asset_id, source="pg:test", kind="table", name="public.orders"))
+    SchemaRepository(db).upsert(
+        SchemaSnapshot(
+            asset_id=asset_id,
+            columns=[ColumnInfo(name="order_id", type="int"), ColumnInfo(name="user_id", type="int")],
+        )
+    )
+
+    fixed = AssetEnrichmentResult(
+        annotations=[
+            AssetAnnotation(
+                asset_id=asset_id,
+                ownership="data",
+                granularity="one row per order",
+                join_keys=["order_id"],
+                freshness_guarantee="hourly",
+                business_logic_summary="orders table",
+                sensitivity="financial",
+            )
+        ],
+        repo_summary="ok",
+    )
+    provider = MockProvider(fixed_result=fixed)
+
+    count = await run_asset_enrichment(
+        db,
+        tmp_path,
+        provider,
+        provider_name="mock",
+        model="test",
+        limit=10,
+        batch_size=20,
+    )
+    assert count == 1
+
+    record = AnnotationRepository(db).get(asset_id)
+    assert record is not None
+    assert record.ownership == "data"
+    assert record.join_keys == ["order_id"]
+    assert record.annotated_by == "agent:mock:test"
+
+
+# ---------------------------------------------------------------------------
 # CLI — dry-run
 # ---------------------------------------------------------------------------
 
@@ -448,6 +532,44 @@ def test_cli_enrich_dry_run_no_edges(tmp_path: Path) -> None:
 
     assert result.exit_code == 0
     assert "No unenriched edges" in result.output
+
+
+def test_cli_enrich_assets_dry_run_no_assets(tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+
+    from alma_atlas.cli.main import app
+
+    db_path = tmp_path / "atlas.db"
+    with Database(db_path):
+        pass
+
+    cfg = AtlasConfig(config_dir=tmp_path, db_path=db_path)
+
+    runner = CliRunner()
+    with patch("alma_atlas.cli.enrich.get_config", return_value=cfg):
+        result = runner.invoke(app, ["enrich", "--assets", "--dry-run"])
+
+    assert result.exit_code == 0
+    assert "No unannotated assets" in result.output
+
+
+def test_cli_enrich_assets_dry_run_shows_assets(tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+
+    from alma_atlas.cli.main import app
+
+    db_path = tmp_path / "atlas.db"
+    with Database(db_path) as db:
+        AssetRepository(db).upsert(Asset(id="pg::public.orders", source="pg:test", kind="table", name="public.orders"))
+
+    cfg = AtlasConfig(config_dir=tmp_path, db_path=db_path)
+
+    runner = CliRunner()
+    with patch("alma_atlas.cli.enrich.get_config", return_value=cfg):
+        result = runner.invoke(app, ["enrich", "--assets", "--dry-run"])
+
+    assert result.exit_code == 0
+    assert "pg::public.orders" in result.output
 
 
 def test_cli_enrich_dry_run_shows_edges(tmp_path: Path) -> None:
