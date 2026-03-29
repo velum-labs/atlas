@@ -14,6 +14,12 @@ from rich import print as rprint
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
+from alma_atlas.ci_support import (
+    resolve_runtime_sources,
+    serialize_dry_run_sources,
+    serialize_scan_result,
+    write_payload,
+)
 from alma_atlas.config import get_config
 
 app = typer.Typer(help="Scan registered data sources to discover assets and lineage.")
@@ -27,10 +33,28 @@ def scan(
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Print what would be scanned without writing.")] = False,
     no_sync: Annotated[bool, typer.Option("--no-sync", help="Skip automatic team sync after scan.")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show verbose output including warnings.")] = False,
+    output_format: Annotated[str, typer.Option("--format", help="Output format: text or json.")] = "text",
+    output: Annotated[str | None, typer.Option("--output", "-o", help="Write JSON output to a file.")] = None,
+    config_file: Annotated[
+        str | None,
+        typer.Option("--config-file", help="Optional path to atlas.yml for runtime source loading."),
+    ] = None,
+    connections: Annotated[
+        str | None,
+        typer.Option(
+            "--connections",
+            help="Inline JSON/YAML or a path to JSON/YAML defining runtime source configs.",
+        ),
+    ] = None,
 ) -> None:
     """Scan data sources and populate the Atlas asset graph."""
     if ctx.invoked_subcommand is not None:
         return
+
+    normalized_output_format = output_format.strip().lower()
+    if normalized_output_format not in {"json", "text"}:
+        rprint("[red]Invalid format.[/red] Must be one of: text, json")
+        raise typer.Exit(1)
 
     import logging as _logging
 
@@ -38,55 +62,94 @@ def scan(
         # Suppress noisy sqlglot parse warnings (e.g. TRUNCATE unsupported syntax)
         _logging.getLogger("sqlglot").setLevel(_logging.ERROR)
 
-    cfg = get_config()
-    sources = cfg.load_sources()
+    if config_file is None and connections is None:
+        cfg = get_config()
+        sources = cfg.load_sources()
+    else:
+        cfg, sources = resolve_runtime_sources(
+            config_file=config_file,
+            connections=connections,
+        )
 
     if not sources:
-        rprint("[yellow]No sources registered. Run [bold]alma-atlas connect[/bold] first.[/yellow]")
+        if normalized_output_format == "json":
+            write_payload(
+                {
+                    "status": "failed",
+                    "error": "No sources registered. Run `alma-atlas connect` first.",
+                },
+                output=output,
+            )
+        else:
+            rprint("[yellow]No sources registered. Run [bold]alma-atlas connect[/bold] first.[/yellow]")
         raise typer.Exit(1)
 
     if source:
         sources = [s for s in sources if s.id == source]
         if not sources:
-            rprint(f"[red]Source not found:[/red] {source}")
+            if normalized_output_format == "json":
+                write_payload(
+                    {
+                        "status": "failed",
+                        "error": f"Source not found: {source}",
+                    },
+                    output=output,
+                )
+            else:
+                rprint(f"[red]Source not found:[/red] {source}")
             raise typer.Exit(1)
 
     if dry_run:
-        rprint("[dim]Dry run — no changes will be written.[/dim]")
-        for s in sources:
-            rprint(f"  Would scan: [cyan]{s.id}[/cyan] ([magenta]{s.kind}[/magenta])")
+        if normalized_output_format == "json":
+            write_payload(serialize_dry_run_sources(sources), output=output)
+        else:
+            rprint("[dim]Dry run — no changes will be written.[/dim]")
+            for s in sources:
+                rprint(f"  Would scan: [cyan]{s.id}[/cyan] ([magenta]{s.kind}[/magenta])")
         return
 
     from alma_atlas.pipeline.scan import run_scan_all
 
+    cfg.ensure_dir()
     failed_sources: list[str] = []
     scan_error: str | None = None
 
-    with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=console) as progress:
-        task = progress.add_task(f"Scanning {len(sources)} source(s)...", total=None)
+    if normalized_output_format == "json":
         try:
             all_result = run_scan_all(sources, cfg)
             for result in all_result.results:
                 if result.error:
-                    rprint(f"  [red]Failed:[/red] {result.source_id} — {result.error}")
                     failed_sources.append(result.source_id)
-                else:
-                    rprint(
-                        f"  [green]Done:[/green] {result.source_id} — "
-                        f"{result.asset_count} assets, {result.edge_count} edges"
-                    )
-            progress.update(
-                task,
-                description=(
-                    f"[green]Scan complete[/green] — "
-                    f"{all_result.cross_system_edge_count} cross-system edge(s) discovered"
-                ),
-            )
+            write_payload(serialize_scan_result(all_result), output=output)
         except Exception as e:
             scan_error = str(e)
-            progress.update(task, description=f"[red]Scan failed:[/red] {e}")
-        finally:
-            progress.stop_task(task)
+            write_payload({"status": "failed", "error": str(e)}, output=output)
+    else:
+        with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=console) as progress:
+            task = progress.add_task(f"Scanning {len(sources)} source(s)...", total=None)
+            try:
+                all_result = run_scan_all(sources, cfg)
+                for result in all_result.results:
+                    if result.error:
+                        rprint(f"  [red]Failed:[/red] {result.source_id} — {result.error}")
+                        failed_sources.append(result.source_id)
+                    else:
+                        rprint(
+                            f"  [green]Done:[/green] {result.source_id} — "
+                            f"{result.asset_count} assets, {result.edge_count} edges"
+                        )
+                progress.update(
+                    task,
+                    description=(
+                        f"[green]Scan complete[/green] — "
+                        f"{all_result.cross_system_edge_count} cross-system edge(s) discovered"
+                    ),
+                )
+            except Exception as e:
+                scan_error = str(e)
+                progress.update(task, description=f"[red]Scan failed:[/red] {e}")
+            finally:
+                progress.stop_task(task)
 
     # Auto-sync if team is configured and --no-sync not passed
     if not no_sync:
@@ -103,9 +166,10 @@ def scan(
                 client = SyncClient(cfg.team_server_url, auth, cfg.team_id or "default")
                 with Database(cfg.db_path) as db:
                     asyncio.run(client.full_sync(db, cfg))
-                rprint("[dim]Team sync complete.[/dim]")
+                if normalized_output_format != "json":
+                    rprint("[dim]Team sync complete.[/dim]")
             except Exception as exc:
-                if verbose:
+                if verbose and normalized_output_format != "json":
                     rprint(f"[yellow]Team sync failed (continuing):[/yellow] {exc}")
 
     # Exit codes: 0 = all succeeded, 1 = partial (some sources failed), 3 = complete failure

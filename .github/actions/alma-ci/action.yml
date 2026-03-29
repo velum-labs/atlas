@@ -1,0 +1,266 @@
+name: "Alma Contract CI"
+description: "Scan data stack and enforce contracts using the Atlas CLI"
+
+inputs:
+  alma-api-url:
+    description: "Optional Alma observatory API base URL for CI run reporting"
+    required: false
+    default: ""
+  alma-api-token:
+    description: "Optional shared token for Alma CI run reporting"
+    required: false
+    default: ""
+  python-version:
+    description: "Python version used to install alma-atlas"
+    required: false
+    default: "3.12"
+  contract-paths:
+    description: "Comma or newline separated glob patterns for contract YAML files"
+    required: false
+    default: "contracts/**/*.yaml"
+  enforce-mode:
+    description: "Validation mode: shadow | warn | enforce"
+    required: false
+    default: "warn"
+  connections:
+    description: "Optional inline JSON/YAML or file path containing Atlas source configs"
+    required: false
+    default: ""
+  github-api-url:
+    description: "GitHub API base URL used for check runs and comments"
+    required: false
+    default: "https://api.github.com"
+  create-check-run:
+    description: "Whether to create a GitHub check run"
+    required: false
+    default: "true"
+  post-pr-comment:
+    description: "Whether to post a pull request comment when possible"
+    required: false
+    default: "true"
+
+outputs:
+  run-id:
+    description: "Alma CI run tracking ID"
+    value: ${{ steps.export-outputs.outputs.run_id }}
+  status:
+    description: "Overall contract validation status"
+    value: ${{ steps.export-outputs.outputs.status }}
+  report-url:
+    description: "Optional report URL returned by Alma"
+    value: ${{ steps.export-outputs.outputs.report_url }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install Atlas CLI
+      shell: bash
+      run: |
+        set -euo pipefail
+        python -m pip install --upgrade pip
+        python -m pip install alma-atlas
+
+    - name: Prepare runtime paths
+      id: prepare
+      shell: bash
+      run: |
+        set -euo pipefail
+        runtime_dir="${RUNNER_TEMP}/alma-atlas-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        mkdir -p "$runtime_dir"
+        echo "ALMA_CONFIG_DIR=$runtime_dir" >> "$GITHUB_ENV"
+        echo "ALMA_CI_SCAN_RESULTS=$runtime_dir/scan-results.json" >> "$GITHUB_ENV"
+        echo "ALMA_CI_ENFORCE_RESULTS=$runtime_dir/enforce-results.json" >> "$GITHUB_ENV"
+        echo "ALMA_CI_REPORT_RESPONSE=$runtime_dir/report-response.json" >> "$GITHUB_ENV"
+        started_at_ms="$(python - <<'PY'
+        import time
+        print(int(time.time() * 1000))
+        PY
+        )"
+        echo "ALMA_CI_STARTED_AT_MS=$started_at_ms" >> "$GITHUB_ENV"
+        config_file=""
+        if [[ -z "${{ inputs.connections }}" ]]; then
+          if [[ -f "atlas.yml" ]]; then
+            config_file="atlas.yml"
+          elif [[ -f "atlas.yaml" ]]; then
+            config_file="atlas.yaml"
+          fi
+        fi
+        echo "config_file=$config_file" >> "$GITHUB_OUTPUT"
+
+    - name: Resolve Atlas version
+      id: atlas-version
+      shell: bash
+      run: |
+        set -euo pipefail
+        version="$(python - <<'PY'
+        from alma_atlas import __version__
+
+        print(__version__)
+        PY
+        )"
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+
+    - name: Scan data stack
+      shell: bash
+      run: |
+        set -euo pipefail
+        cmd=(alma-atlas scan --no-sync --format json --output "$ALMA_CI_SCAN_RESULTS")
+        if [[ -n "${{ steps.prepare.outputs.config_file }}" ]]; then
+          cmd+=(--config-file "${{ steps.prepare.outputs.config_file }}")
+        fi
+        if [[ -n "${{ inputs.connections }}" ]]; then
+          cmd+=(--connections "${{ inputs.connections }}")
+        fi
+        "${cmd[@]}"
+
+    - name: Enforce contracts
+      id: enforce
+      shell: bash
+      run: |
+        set +e
+        alma-atlas enforce validate \
+          --contracts "${{ inputs.contract-paths }}" \
+          --mode "${{ inputs.enforce-mode }}" \
+          --format json \
+          --output "$ALMA_CI_ENFORCE_RESULTS"
+        exit_code=$?
+        echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+        exit 0
+
+    - name: Create GitHub check run
+      id: check-run
+      if: ${{ inputs.create-check-run == 'true' }}
+      shell: bash
+      env:
+        GITHUB_ACTION_PATH: ${{ github.action_path }}
+        GITHUB_API_TOKEN: ${{ github.token }}
+        ALMA_CI_ENFORCE_RESULTS: ${{ env.ALMA_CI_ENFORCE_RESULTS }}
+      run: |
+        set -euo pipefail
+        python "$GITHUB_ACTION_PATH/github_reporting.py" check-run \
+          --api-url "${{ inputs.github-api-url }}" \
+          --token "$GITHUB_API_TOKEN" \
+          --repository "$GITHUB_REPOSITORY" \
+          --results-file "$ALMA_CI_ENFORCE_RESULTS" \
+          --branch "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" \
+          --event-path "$GITHUB_EVENT_PATH" \
+          --details-url "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+          --external-id "${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" \
+          --step-output-file "$GITHUB_OUTPUT"
+
+    - name: Report CI run to Alma
+      if: ${{ inputs.alma-api-url != '' && inputs.alma-api-token != '' }}
+      shell: bash
+      env:
+        GITHUB_ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        duration_ms="$(python - <<'PY'
+import os
+import time
+
+started_at_ms = int(os.environ.get("ALMA_CI_STARTED_AT_MS", "0") or "0")
+now_ms = int(time.time() * 1000)
+print(max(0, now_ms - started_at_ms))
+PY
+)"
+        python "$GITHUB_ACTION_PATH/report_ci_run.py" \
+          --api-url "${{ inputs.alma-api-url }}" \
+          --api-token "${{ inputs.alma-api-token }}" \
+          --scan-results "$ALMA_CI_SCAN_RESULTS" \
+          --enforce-results "$ALMA_CI_ENFORCE_RESULTS" \
+          --enforcement-mode "${{ inputs.enforce-mode }}" \
+          --atlas-version "${{ steps.atlas-version.outputs.version }}" \
+          --duration-ms "$duration_ms" \
+          --github-check-run-id "${{ steps.check-run.outputs.check_run_id }}" \
+          --output-file "$ALMA_CI_REPORT_RESPONSE"
+
+    - name: Export action outputs
+      id: export-outputs
+      shell: bash
+      run: |
+        set -euo pipefail
+        status="$(python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+payload = json.loads(Path(os.environ["ALMA_CI_ENFORCE_RESULTS"]).read_text(encoding="utf-8"))
+print(str(payload.get("status", "unknown")))
+PY
+)"
+        run_id=""
+        report_url=""
+        if [[ -f "$ALMA_CI_REPORT_RESPONSE" ]]; then
+          run_id="$(python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+payload = json.loads(Path(os.environ["ALMA_CI_REPORT_RESPONSE"]).read_text(encoding="utf-8"))
+print(str(payload.get("runId", "")))
+PY
+)"
+          report_url="$(python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+payload = json.loads(Path(os.environ["ALMA_CI_REPORT_RESPONSE"]).read_text(encoding="utf-8"))
+print(str(payload.get("reportUrl", "")))
+PY
+)"
+        fi
+        echo "status=$status" >> "$GITHUB_OUTPUT"
+        echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+        echo "report_url=$report_url" >> "$GITHUB_OUTPUT"
+
+    - name: Write step summary
+      shell: bash
+      env:
+        ALMA_CI_REPORT_URL: ${{ steps.export-outputs.outputs.report_url }}
+      run: |
+        set -euo pipefail
+        python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+from alma_atlas.ci_support import render_contract_summary_markdown
+
+payload = json.loads(Path(os.environ["ALMA_CI_ENFORCE_RESULTS"]).read_text(encoding="utf-8"))
+summary = render_contract_summary_markdown(payload)
+report_url = os.environ.get("ALMA_CI_REPORT_URL", "").strip()
+if report_url:
+    summary += f"\n\n[Open Alma report]({report_url})\n"
+
+with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as handle:
+    handle.write(summary)
+    handle.write("\n")
+PY
+
+    - name: Post pull request comment
+      if: ${{ github.event_name == 'pull_request' && inputs.post-pr-comment == 'true' }}
+      shell: bash
+      env:
+        GITHUB_ACTION_PATH: ${{ github.action_path }}
+        GITHUB_API_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        python "$GITHUB_ACTION_PATH/github_reporting.py" comment \
+          --api-url "${{ inputs.github-api-url }}" \
+          --token "$GITHUB_API_TOKEN" \
+          --repository "$GITHUB_REPOSITORY" \
+          --results-file "$ALMA_CI_ENFORCE_RESULTS" \
+          --report-url "${{ steps.export-outputs.outputs.report_url }}" \
+          --event-path "$GITHUB_EVENT_PATH"
+
+    - name: Fail action on enforce violations
+      if: ${{ steps.enforce.outputs.exit_code != '0' }}
+      shell: bash
+      run: exit "${{ steps.enforce.outputs.exit_code }}"

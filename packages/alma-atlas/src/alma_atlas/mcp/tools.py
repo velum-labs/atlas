@@ -533,6 +533,7 @@ async def _handle_team_sync(cfg: AtlasConfig) -> list[TextContent]:
 
 
 def _handle_check_contract(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
+    from alma_atlas.ci_support import validate_contract_columns
     from alma_atlas_store.contract_repository import ContractRepository
     from alma_atlas_store.db import Database
     from alma_atlas_store.schema_repository import SchemaRepository
@@ -550,31 +551,15 @@ def _handle_check_contract(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[
         if not spec_columns:
             continue
 
-        if snapshot is None:
-            violations.append(
-                f"[{contract.id}] No schema snapshot available to validate against contract v{contract.version}"
-            )
-            continue
-
-        actual_cols = {c.name.lower(): c for c in snapshot.columns}
-        for spec_col in spec_columns:
-            col_name = spec_col.get("name", "")
-            if not col_name:
-                continue
-            actual = actual_cols.get(col_name.lower())
-            if actual is None:
-                violations.append(f"[{contract.id}] Missing column: {col_name!r}")
-                continue
-            spec_type = spec_col.get("type", "")
-            if spec_type and actual.type.lower() != spec_type.lower():
-                violations.append(
-                    f"[{contract.id}] Type mismatch for {col_name!r}: expected {spec_type!r}, got {actual.type!r}"
-                )
-            spec_nullable = spec_col.get("nullable", True)
-            if not spec_nullable and actual.nullable:
-                violations.append(
-                    f"[{contract.id}] Nullability violation for {col_name!r}: contract requires NOT NULL but column is nullable"
-                )
+        issues = validate_contract_columns(
+            contract_id=contract.id,
+            columns=spec_columns,
+            snapshot=snapshot,
+        )
+        violations.extend(
+            str(issue.get("message", "Unknown contract validation issue"))
+            for issue in issues
+        )
 
     if not violations:
         lines = [
