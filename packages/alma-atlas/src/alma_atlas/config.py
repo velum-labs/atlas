@@ -185,10 +185,7 @@ def get_config() -> AtlasConfig:
     if _config is None:
         default_dir = default_config_dir()
         yml_path = default_dir / "atlas.yml"
-        if yml_path.exists():
-            _config = load_atlas_yml(yml_path)
-        else:
-            _config = AtlasConfig()
+        _config = load_atlas_yml(yml_path) if yml_path.exists() else AtlasConfig()
     return _config
 
 
