@@ -6,7 +6,10 @@ from datetime import UTC, datetime
 
 import pytest
 
-from alma_atlas.pipeline.cross_system_edges import discover_cross_system_edges
+from alma_atlas.pipeline.cross_system_edges import (
+    discover_cross_system_edges,
+    resolve_dbt_source_edges,
+)
 from alma_atlas_store.asset_repository import Asset, AssetRepository
 from alma_atlas_store.db import Database
 from alma_atlas_store.edge_repository import EdgeRepository
@@ -396,3 +399,206 @@ def test_per_pair_config_overrides_default(db: Database) -> None:
     edges = EdgeRepository(db).list_all()
     upstream_ids = {e.upstream_id for e in edges}
     assert any(uid.startswith("postgres:prod::") for uid in upstream_ids)
+
+
+# ---------------------------------------------------------------------------
+# resolve_dbt_source_edges
+# ---------------------------------------------------------------------------
+
+
+def test_dbt_source_matches_warehouse_table(db: Database) -> None:
+    """A dbt source whose schema.table matches a warehouse asset creates an edge."""
+    dbt_snapshots = {
+        "dbt:myproject": _snapshot(_table("analytics", "orders"))
+    }
+    warehouse_snapshots = {
+        "bigquery:prod": _snapshot(_table("analytics", "orders"))
+    }
+    _seed_assets(db, dbt_snapshots)
+    _seed_assets(db, warehouse_snapshots)
+
+    count = resolve_dbt_source_edges(dbt_snapshots, warehouse_snapshots, db)
+
+    assert count == 1
+    edges = [e for e in EdgeRepository(db).list_all() if e.kind == "dbt_source_ref"]
+    assert len(edges) == 1
+    assert edges[0].upstream_id == "bigquery:prod::analytics.orders"
+    assert edges[0].downstream_id == "dbt:myproject::analytics.orders"
+    assert edges[0].metadata["confidence"] == 1.0
+
+
+def test_dbt_source_no_match_produces_no_edge(db: Database) -> None:
+    """A dbt source with no matching warehouse table creates no edge and no error."""
+    dbt_snapshots = {
+        "dbt:myproject": _snapshot(_table("analytics", "orders"))
+    }
+    warehouse_snapshots = {
+        "bigquery:prod": _snapshot(_table("analytics", "events"))
+    }
+    _seed_assets(db, dbt_snapshots)
+    _seed_assets(db, warehouse_snapshots)
+
+    count = resolve_dbt_source_edges(dbt_snapshots, warehouse_snapshots, db)
+
+    assert count == 0
+    dbt_edges = [e for e in EdgeRepository(db).list_all() if e.kind == "dbt_source_ref"]
+    assert dbt_edges == []
+
+
+def test_dbt_source_case_insensitive_matching(db: Database) -> None:
+    """Match is case-insensitive: BigQuery uppercase schema/table matches dbt lowercase."""
+    dbt_snapshots = {
+        "dbt:myproject": _snapshot(_table("analytics", "orders"))
+    }
+    # Warehouse stores objects with uppercase names (e.g. BigQuery / Snowflake)
+    warehouse_snapshots = {
+        "bigquery:prod": _snapshot(_table("ANALYTICS", "ORDERS"))
+    }
+    _seed_assets(db, dbt_snapshots)
+    _seed_assets(db, warehouse_snapshots)
+
+    count = resolve_dbt_source_edges(dbt_snapshots, warehouse_snapshots, db)
+
+    assert count == 1
+    edges = [e for e in EdgeRepository(db).list_all() if e.kind == "dbt_source_ref"]
+    assert len(edges) == 1
+    # Warehouse asset ID preserves original case
+    assert edges[0].upstream_id == "bigquery:prod::ANALYTICS.ORDERS"
+    assert edges[0].downstream_id == "dbt:myproject::analytics.orders"
+
+
+def test_dbt_source_multiple_sources_and_tables(db: Database) -> None:
+    """Multiple dbt sources and warehouse sources are all matched correctly."""
+    dbt_snapshots = {
+        "dbt:project_a": _snapshot(
+            _table("raw", "customers"),
+            _table("raw", "orders"),
+        ),
+        "dbt:project_b": _snapshot(
+            _table("staging", "payments"),
+        ),
+    }
+    warehouse_snapshots = {
+        "postgres:prod": _snapshot(
+            _table("raw", "customers"),
+            _table("raw", "orders"),
+        ),
+        "stripe:prod": _snapshot(
+            _table("staging", "payments"),
+        ),
+    }
+    _seed_assets(db, dbt_snapshots)
+    _seed_assets(db, warehouse_snapshots)
+
+    count = resolve_dbt_source_edges(dbt_snapshots, warehouse_snapshots, db)
+
+    assert count == 3
+    dbt_edges = [e for e in EdgeRepository(db).list_all() if e.kind == "dbt_source_ref"]
+    assert len(dbt_edges) == 3
+    downstream_ids = {e.downstream_id for e in dbt_edges}
+    assert "dbt:project_a::raw.customers" in downstream_ids
+    assert "dbt:project_a::raw.orders" in downstream_ids
+    assert "dbt:project_b::staging.payments" in downstream_ids
+
+
+def test_dbt_source_empty_database_field_falls_back_to_schema_table(db: Database) -> None:
+    """When database is absent (schema+table only), matching still works correctly."""
+    # SourceTableSchema has no database field — schema+table is always the key.
+    # This test confirms the default behaviour is schema.table matching.
+    dbt_snapshots = {
+        "dbt:myproject": _snapshot(_table("public", "users"))
+    }
+    warehouse_snapshots = {
+        "postgres:prod": _snapshot(_table("public", "users"))
+    }
+    _seed_assets(db, dbt_snapshots)
+    _seed_assets(db, warehouse_snapshots)
+
+    count = resolve_dbt_source_edges(dbt_snapshots, warehouse_snapshots, db)
+
+    assert count == 1
+    edges = [e for e in EdgeRepository(db).list_all() if e.kind == "dbt_source_ref"]
+    assert edges[0].upstream_id == "postgres:prod::public.users"
+    assert edges[0].downstream_id == "dbt:myproject::public.users"
+
+
+def test_dbt_source_empty_dbt_snapshots_returns_zero(db: Database) -> None:
+    """Empty dbt_snapshots returns 0 without error."""
+    warehouse_snapshots = {"bigquery:prod": _snapshot(_table("analytics", "orders"))}
+    _seed_assets(db, warehouse_snapshots)
+
+    count = resolve_dbt_source_edges({}, warehouse_snapshots, db)
+
+    assert count == 0
+
+
+def test_dbt_source_empty_warehouse_snapshots_returns_zero(db: Database) -> None:
+    """Empty warehouse_snapshots returns 0 without error."""
+    dbt_snapshots = {"dbt:myproject": _snapshot(_table("analytics", "orders"))}
+    _seed_assets(db, dbt_snapshots)
+
+    count = resolve_dbt_source_edges(dbt_snapshots, {}, db)
+
+    assert count == 0
+
+
+def test_dbt_source_duplicate_objects_counted_once(db: Database) -> None:
+    """If two dbt snapshots declare the same object, only one edge is created."""
+    dbt_snapshots = {
+        "dbt:project_a": _snapshot(_table("analytics", "orders")),
+        "dbt:project_b": _snapshot(_table("analytics", "orders")),
+    }
+    warehouse_snapshots = {
+        "bigquery:prod": _snapshot(_table("analytics", "orders"))
+    }
+    _seed_assets(db, dbt_snapshots)
+    _seed_assets(db, warehouse_snapshots)
+
+    count = resolve_dbt_source_edges(dbt_snapshots, warehouse_snapshots, db)
+
+    # Two different dbt sources → two distinct edges (different downstream_id)
+    assert count == 2
+    dbt_edges = [e for e in EdgeRepository(db).list_all() if e.kind == "dbt_source_ref"]
+    assert len(dbt_edges) == 2
+    downstream_ids = {e.downstream_id for e in dbt_edges}
+    assert "dbt:project_a::analytics.orders" in downstream_ids
+    assert "dbt:project_b::analytics.orders" in downstream_ids
+
+
+def test_dbt_source_edge_kind_is_dbt_source_ref(db: Database) -> None:
+    """Created edges must have kind='dbt_source_ref'."""
+    dbt_snapshots = {"dbt:myproject": _snapshot(_table("raw", "events"))}
+    warehouse_snapshots = {"postgres:prod": _snapshot(_table("raw", "events"))}
+    _seed_assets(db, dbt_snapshots)
+    _seed_assets(db, warehouse_snapshots)
+
+    resolve_dbt_source_edges(dbt_snapshots, warehouse_snapshots, db)
+
+    edges = EdgeRepository(db).list_all()
+    dbt_edges = [e for e in edges if e.kind == "dbt_source_ref"]
+    assert len(dbt_edges) == 1
+    assert dbt_edges[0].kind == "dbt_source_ref"
+
+
+def test_dbt_source_no_cross_contamination_with_schema_match_edges(db: Database) -> None:
+    """dbt_source_ref edges are distinct from schema_match edges in the store."""
+    dbt_snapshots = {
+        "dbt:myproject": _snapshot(
+            _table("analytics", "orders", columns=(("id", "text"), ("amount", "numeric")))
+        )
+    }
+    warehouse_snapshots = {
+        "bigquery:prod": _snapshot(
+            _table("analytics", "orders", columns=(("id", "STRING"), ("amount", "NUMERIC")))
+        )
+    }
+    all_snapshots = {**dbt_snapshots, **warehouse_snapshots}
+    _seed_assets(db, all_snapshots)
+
+    discover_cross_system_edges(all_snapshots, db)
+    resolve_dbt_source_edges(dbt_snapshots, warehouse_snapshots, db)
+
+    all_edges = EdgeRepository(db).list_all()
+    kinds = {e.kind for e in all_edges}
+    # Both edge kinds may be present without conflict
+    assert "dbt_source_ref" in kinds

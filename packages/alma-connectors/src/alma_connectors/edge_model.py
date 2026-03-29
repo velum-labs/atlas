@@ -141,6 +141,7 @@ class EdgeDiscoveryMethod(StrEnum):
     OPENLINEAGE = "openlineage"
     CONNECTOR_API = "connector_api"
     TRAFFIC_CORRELATION = "traffic_correlation"
+    DBT_SOURCE_REF = "dbt_source_ref"
 
 
 class EdgeStatus(StrEnum):

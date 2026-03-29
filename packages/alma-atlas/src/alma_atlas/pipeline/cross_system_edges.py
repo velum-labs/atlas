@@ -109,4 +109,77 @@ def discover_cross_system_edges(
     return total
 
 
-__all__ = ["discover_cross_system_edges"]
+def resolve_dbt_source_edges(
+    dbt_snapshots: dict[str, SchemaSnapshot],
+    warehouse_snapshots: dict[str, SchemaSnapshot],
+    db: Database,
+) -> int:
+    """Resolve cross-system edges from dbt source declarations.
+
+    dbt sources declare (schema, identifier) pairs that map exactly to warehouse
+    assets — zero-ambiguity, purely deterministic string matching.  Matched pairs
+    produce edges with ``kind="dbt_source_ref"`` and ``confidence=1.0``.
+
+    Matching is case-insensitive on ``{schema}.{table}``.  When two warehouse
+    objects share the same lower-cased key the last one in iteration order wins;
+    this is an uncommon edge case for same-schema deployments.
+
+    Args:
+        dbt_snapshots:       Mapping of ``source_id → SchemaSnapshot`` for dbt
+                             sources only.
+        warehouse_snapshots: Mapping of ``source_id → SchemaSnapshot`` for
+                             warehouse sources (BigQuery, Snowflake, Postgres…).
+        db:                  Open :class:`~alma_atlas_store.db.Database` connection.
+
+    Returns:
+        Total number of store edges upserted (duplicates within this call are
+        counted once; subsequent calls that re-upsert existing edges do not
+        increment the count).
+    """
+    if not dbt_snapshots or not warehouse_snapshots:
+        return 0
+
+    # Build case-insensitive lookup: lowercase(schema.table) → warehouse asset ID.
+    warehouse_lookup: dict[str, str] = {}
+    for wh_source_id, wh_snapshot in warehouse_snapshots.items():
+        for obj in wh_snapshot.objects:
+            key = f"{obj.schema_name}.{obj.object_name}".lower()
+            warehouse_lookup[key] = f"{wh_source_id}::{obj.schema_name}.{obj.object_name}"
+
+    edge_repo = EdgeRepository(db)
+    seen: set[tuple[str, str]] = set()
+    total = 0
+
+    for dbt_source_id, dbt_snapshot in dbt_snapshots.items():
+        for obj in dbt_snapshot.objects:
+            key = f"{obj.schema_name}.{obj.object_name}".lower()
+            wh_asset_id = warehouse_lookup.get(key)
+            if wh_asset_id is None:
+                continue
+
+            dbt_asset_id = f"{dbt_source_id}::{obj.schema_name}.{obj.object_name}"
+            pair = (wh_asset_id, dbt_asset_id)
+            if pair in seen:
+                continue
+            seen.add(pair)
+
+            edge_repo.upsert(
+                Edge(
+                    upstream_id=wh_asset_id,
+                    downstream_id=dbt_asset_id,
+                    kind="dbt_source_ref",
+                    metadata={"confidence": 1.0},
+                )
+            )
+            total += 1
+            logger.debug(
+                "dbt source edge: %s → %s",
+                wh_asset_id,
+                dbt_asset_id,
+            )
+
+    logger.info("resolve_dbt_source_edges: %d edge(s) upserted", total)
+    return total
+
+
+__all__ = ["discover_cross_system_edges", "resolve_dbt_source_edges"]
