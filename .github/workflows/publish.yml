@@ -6,10 +6,11 @@ on:
 
 permissions:
   contents: read
-  id-token: write  # Required for OIDC Trusted Publisher auth with PyPI
+  id-token: write   # Required for OIDC Trusted Publisher auth with PyPI
+  packages: write   # Required for ghcr.io publish via PyOCI
 
 jobs:
-  # Build and publish all packages to PyPI in dependency order
+  # Build and publish all packages in dependency order
   publish:
     runs-on: ubuntu-latest
     environment: release
@@ -58,3 +59,11 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: packages/${{ matrix.package }}/dist/
+
+      - name: Publish to ghcr.io via PyOCI
+        working-directory: packages/${{ matrix.package }}
+        run: |
+          uv publish \
+            --publish-url "https://pyoci.com/ghcr.io/velum-labs/" \
+            --username "${{ github.actor }}" \
+            --password "${{ secrets.GITHUB_TOKEN }}"
