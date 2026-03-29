@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from pathlib import Path
 from typing import Annotated
 
@@ -122,53 +121,23 @@ def enrich(
     _run_enrichment(cfg, repo)
 
 
-def _make_provider_from_cfg(cfg):
-    from alma_atlas.agents.provider import make_provider
-
-    enrichment_cfg = cfg.enrichment
-    api_key: str | None = None
-    if enrichment_cfg.api_key_env:
-        api_key = os.environ.get(enrichment_cfg.api_key_env)
-
-    provider = make_provider(
-        enrichment_cfg.provider,
-        model=enrichment_cfg.model,
-        api_key=api_key,
-        timeout=float(enrichment_cfg.timeout),
-        max_tokens=enrichment_cfg.max_tokens,
-    )
-    return provider
-
-
 def _run_enrichment(cfg, repo_path: Path) -> None:
-    """Synchronous wrapper — resolves the provider and runs the async edge enrichment."""
+    """Synchronous wrapper — runs edge enrichment using the per-agent config."""
     from alma_atlas.pipeline.enrich import run_enrichment
     from alma_atlas_store.db import Database
 
-    provider = _make_provider_from_cfg(cfg)
-
     with Database(cfg.db_path) as db:
-        count = asyncio.run(run_enrichment(db, repo_path, provider))
+        count = asyncio.run(run_enrichment(db, repo_path, config=cfg.enrichment))
 
     console.print(f"[green]Enriched {count} edge(s).[/green]")
 
 
 def _run_asset_enrichment(cfg, repo_path: Path) -> None:
-    """Synchronous wrapper — resolves the provider and runs the async asset enrichment."""
+    """Synchronous wrapper — runs asset enrichment using the per-agent config."""
     from alma_atlas.pipeline.enrich import run_asset_enrichment
     from alma_atlas_store.db import Database
 
-    provider = _make_provider_from_cfg(cfg)
-
     with Database(cfg.db_path) as db:
-        count = asyncio.run(
-            run_asset_enrichment(
-                db,
-                repo_path,
-                provider,
-                provider_name=cfg.enrichment.provider,
-                model=cfg.enrichment.model,
-            )
-        )
+        count = asyncio.run(run_asset_enrichment(db, repo_path, config=cfg.enrichment))
 
     console.print(f"[green]Annotated {count} asset(s).[/green]")

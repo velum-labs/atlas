@@ -6,11 +6,26 @@ repository by the :mod:`alma_atlas.agents.pipeline_analyzer` agent.
 
 Enrichment is idempotent: edges that already carry ``enrichment_status=enriched``
 in their metadata are skipped.
+
+Lead/Specialist pattern
+-----------------------
+When an :class:`~alma_atlas.config.EnrichmentConfig` is provided the orchestrator
+uses a *lead/specialist* multi-agent pattern:
+
+1. The **explorer** agent (cheap model) performs a two-pass file selection to
+   find repository files relevant to the batch of edges or assets.
+2. The **specialist** agent(s) receive only the pre-filtered files, reducing
+   token usage and improving signal.
+
+Both :func:`run_enrichment` and :func:`run_asset_enrichment` accept either a
+single ``provider`` argument (legacy path) **or** a ``config`` keyword argument
+(new path).  Both calling conventions are supported simultaneously.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -19,12 +34,29 @@ from alma_atlas_store.edge_repository import Edge, EdgeRepository
 
 if TYPE_CHECKING:
     from alma_atlas.agents.provider import LLMProvider
+    from alma_atlas.config import AgentConfig, EnrichmentConfig
     from alma_atlas_store.db import Database
 
 logger = logging.getLogger(__name__)
 
 # Edge kinds that are candidates for pipeline enrichment.
 _ENRICHABLE_KINDS: frozenset[str] = frozenset({"schema_match", "dbt_source_ref"})
+
+
+def _provider_from_agent_config(agent_cfg: AgentConfig) -> LLMProvider:
+    """Instantiate an LLMProvider from an :class:`~alma_atlas.config.AgentConfig`."""
+    from alma_atlas.agents.provider import make_provider
+
+    api_key: str | None = None
+    if agent_cfg.api_key_env:
+        api_key = os.environ.get(agent_cfg.api_key_env)
+    return make_provider(
+        agent_cfg.provider,
+        model=agent_cfg.model,
+        api_key=api_key,
+        timeout=float(agent_cfg.timeout),
+        max_tokens=agent_cfg.max_tokens,
+    )
 
 
 def get_unenriched_edges(db: Database) -> list[Edge]:
@@ -57,7 +89,9 @@ def _object_part(asset_id: str) -> str:
 async def run_enrichment(
     db: Database,
     repo_path: Path,
-    provider: LLMProvider,
+    provider: LLMProvider | None = None,
+    *,
+    config: EnrichmentConfig | None = None,
 ) -> int:
     """Enrich unenriched cross-system edges with pipeline transport metadata.
 
@@ -67,10 +101,18 @@ async def run_enrichment(
     left unchanged.  Persistence failures are logged as warnings and do not
     abort the run.
 
+    When *config* is provided the lead/specialist pattern is used:
+    - The explorer agent (``config.explorer``) pre-filters repository files.
+    - The pipeline analyzer (``config.pipeline_analyzer``) receives only
+      the relevant files.
+
     Args:
         db:        Open :class:`~alma_atlas_store.db.Database` connection.
         repo_path: Filesystem path to the code repository to scan.
-        provider:  Configured :class:`~alma_atlas.agents.provider.LLMProvider`.
+        provider:  Configured :class:`~alma_atlas.agents.provider.LLMProvider`
+                   (legacy path, used when *config* is ``None``).
+        config:    Per-agent :class:`~alma_atlas.config.EnrichmentConfig`
+                   (new path; takes precedence over *provider*).
 
     Returns:
         Number of edges successfully enriched and persisted.
@@ -88,7 +130,31 @@ async def run_enrichment(
         repo_path,
     )
 
-    enrichments = await analyze_edges(unenriched, repo_path, provider)
+    if config is not None:
+        # Lead/specialist pattern.
+        from alma_atlas.agents.codebase_explorer import explore_for_edges
+
+        explorer_provider = _provider_from_agent_config(config.explorer)
+        analyzer_provider = _provider_from_agent_config(config.pipeline_analyzer)
+
+        pre_filtered = await explore_for_edges(unenriched, repo_path, explorer_provider)
+        logger.debug(
+            "run_enrichment: explorer pre-filtered %d file(s)",
+            len(pre_filtered),
+        )
+
+        enrichments = await analyze_edges(
+            unenriched,
+            repo_path,
+            analyzer_provider,
+            pre_filtered_files=pre_filtered,
+        )
+    elif provider is not None:
+        # Legacy single-provider path.
+        enrichments = await analyze_edges(unenriched, repo_path, provider)
+    else:
+        raise ValueError("run_enrichment requires either 'provider' or 'config'")
+
     if not enrichments:
         logger.info("run_enrichment: agent returned no enrichment results")
         return 0
@@ -161,10 +227,11 @@ def get_unannotated_assets(db: Database, *, limit: int = 100) -> list[str]:
 async def run_asset_enrichment(
     db: Database,
     repo_path: Path,
-    provider: LLMProvider,
+    provider: LLMProvider | None = None,
     *,
-    provider_name: str,
-    model: str,
+    config: EnrichmentConfig | None = None,
+    provider_name: str | None = None,
+    model: str | None = None,
     limit: int = 100,
     batch_size: int = 20,
 ) -> int:
@@ -174,12 +241,17 @@ async def run_asset_enrichment(
     been annotated, builds a context payload per asset (schema + basic lineage),
     calls the asset enrichment agent, and persists results to the store.
 
+    When *config* is provided the lead/specialist pattern is used:
+    - The explorer agent (``config.explorer``) pre-filters repository files.
+    - The asset enricher (``config.asset_enricher``) receives only relevant files.
+
     Args:
         db:            Open Atlas database.
         repo_path:      Filesystem path to the code repository.
-        provider:       Configured LLM provider.
-        provider_name:  Provider identifier (e.g. 'anthropic'). Used for provenance.
-        model:          Model identifier. Used for provenance.
+        provider:       Configured LLM provider (legacy path).
+        config:         Per-agent EnrichmentConfig (new path; takes precedence).
+        provider_name:  Provider identifier used for provenance (legacy path).
+        model:          Model identifier used for provenance (legacy path).
         limit:          Max assets to annotate in this run.
         batch_size:     Max assets per LLM call.
 
@@ -196,6 +268,18 @@ async def run_asset_enrichment(
         logger.info("run_asset_enrichment: no unannotated assets found")
         return 0
 
+    # Resolve provider and provenance from config or legacy args.
+    if config is not None:
+        enricher_provider = _provider_from_agent_config(config.asset_enricher)
+        _provider_name = config.asset_enricher.provider
+        _model = config.asset_enricher.model
+    elif provider is not None:
+        enricher_provider = provider
+        _provider_name = provider_name or "unknown"
+        _model = model or "unknown"
+    else:
+        raise ValueError("run_asset_enrichment requires either 'provider' or 'config'")
+
     asset_repo = AssetRepository(db)
     edge_repo = EdgeRepository(db)
     schema_repo = SchemaRepository(db)
@@ -209,7 +293,7 @@ async def run_asset_enrichment(
         downstream_by_asset.setdefault(e.upstream_id, []).append(e.downstream_id)
         upstream_by_asset.setdefault(e.downstream_id, []).append(e.upstream_id)
 
-    annotated_by = f"agent:{provider_name}:{model}"
+    annotated_by = f"agent:{_provider_name}:{_model}"
     annotated_count = 0
 
     # Batch asset contexts to respect context limits.
@@ -250,7 +334,26 @@ async def run_asset_enrichment(
         if not contexts:
             continue
 
-        annotations = await analyze_assets(contexts, repo_path, provider)
+        # Run explorer once per batch when using the lead/specialist pattern.
+        if config is not None:
+            from alma_atlas.agents.codebase_explorer import explore_for_assets
+
+            explorer_provider = _provider_from_agent_config(config.explorer)
+            pre_filtered = await explore_for_assets(contexts, repo_path, explorer_provider)
+            logger.debug(
+                "run_asset_enrichment: explorer pre-filtered %d file(s) for batch %d",
+                len(pre_filtered),
+                i // batch_size,
+            )
+            annotations = await analyze_assets(
+                contexts,
+                repo_path,
+                enricher_provider,
+                pre_filtered_files=pre_filtered,
+            )
+        else:
+            annotations = await analyze_assets(contexts, repo_path, enricher_provider)
+
         if not annotations:
             continue
 
