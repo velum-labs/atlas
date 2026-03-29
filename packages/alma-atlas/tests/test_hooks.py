@@ -2,18 +2,14 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
-import sys
-from io import StringIO
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from alma_atlas.config import AtlasConfig, PostScanHook, load_atlas_yml
 from alma_atlas.hooks import HookEvent, HookExecutor, HookResult, make_hook_event
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -287,7 +283,6 @@ async def test_webhook_does_not_retry_on_4xx() -> None:
 
 @pytest.mark.asyncio
 async def test_webhook_retries_on_timeout() -> None:
-    import urllib.error
 
     hook = _webhook_hook()
     executor = HookExecutor([hook])
@@ -458,8 +453,9 @@ def test_post_scan_hook_with_url_and_headers() -> None:
 
 
 def test_hooks_list_with_no_hooks(tmp_path: Path) -> None:
-    from typer.testing import CliRunner
     from unittest.mock import patch
+
+    from typer.testing import CliRunner
 
     from alma_atlas.cli.hooks import app
 
@@ -473,8 +469,9 @@ def test_hooks_list_with_no_hooks(tmp_path: Path) -> None:
 
 
 def test_hooks_list_shows_configured_hooks(tmp_path: Path) -> None:
-    from typer.testing import CliRunner
     from unittest.mock import patch
+
+    from typer.testing import CliRunner
 
     from alma_atlas.cli.hooks import app
 
@@ -500,8 +497,9 @@ def test_hooks_list_shows_configured_hooks(tmp_path: Path) -> None:
 
 
 def test_hooks_test_fires_event(tmp_path: Path) -> None:
-    from typer.testing import CliRunner
     from unittest.mock import patch
+
+    from typer.testing import CliRunner
 
     from alma_atlas.cli.hooks import app
 
@@ -518,8 +516,9 @@ def test_hooks_test_fires_event(tmp_path: Path) -> None:
 
 
 def test_hooks_test_specific_hook(tmp_path: Path) -> None:
-    from typer.testing import CliRunner
     from unittest.mock import patch
+
+    from typer.testing import CliRunner
 
     from alma_atlas.cli.hooks import app
 
@@ -539,8 +538,9 @@ def test_hooks_test_specific_hook(tmp_path: Path) -> None:
 
 
 def test_hooks_test_unknown_hook_exits_1(tmp_path: Path) -> None:
-    from typer.testing import CliRunner
     from unittest.mock import patch
+
+    from typer.testing import CliRunner
 
     from alma_atlas.cli.hooks import app
 
@@ -562,8 +562,9 @@ def test_hooks_test_unknown_hook_exits_1(tmp_path: Path) -> None:
 
 def test_scan_fires_hooks_after_scan_complete(tmp_path: Path) -> None:
     """Scan CLI should call HookExecutor.fire after successful scan."""
-    from typer.testing import CliRunner
     from unittest.mock import patch
+
+    from typer.testing import CliRunner
 
     from alma_atlas.cli.scan import app
     from alma_atlas.config import SourceConfig
@@ -603,8 +604,9 @@ def test_scan_fires_hooks_after_scan_complete(tmp_path: Path) -> None:
 
 def test_scan_fires_scan_error_hook_on_failed_source(tmp_path: Path) -> None:
     """A failed source should fire scan_error hook."""
-    from typer.testing import CliRunner
     from unittest.mock import patch
+
+    from typer.testing import CliRunner
 
     from alma_atlas.cli.scan import app
     from alma_atlas.config import SourceConfig
@@ -636,6 +638,7 @@ def test_scan_fires_scan_error_hook_on_failed_source(tmp_path: Path) -> None:
     ):
         result = runner.invoke(app)
 
+    assert result.exit_code == 1
     assert len(fired_events) == 1
     assert fired_events[0].event_type == "scan_error"
 
