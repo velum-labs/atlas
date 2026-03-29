@@ -384,7 +384,10 @@ async def _run_scan_all_async(
     timeout: float = _DEFAULT_SCAN_TIMEOUT,
 ) -> ScanAllResult:
     """Async implementation of run_scan_all with concurrency control."""
-    from alma_atlas.pipeline.cross_system_edges import discover_cross_system_edges
+    from alma_atlas.pipeline.cross_system_edges import (
+        discover_cross_system_edges,
+        resolve_dbt_source_edges,
+    )
     from alma_atlas_store.db import Database
 
     semaphore = asyncio.Semaphore(max_concurrent)
@@ -410,10 +413,15 @@ async def _run_scan_all_async(
             if raw.snapshot is not None:
                 snapshots[source.id] = raw.snapshot
 
+    kind_by_id = {s.id: s.kind for s in sources}
+    dbt_snapshots = {sid: snap for sid, snap in snapshots.items() if kind_by_id.get(sid) == "dbt"}
+    warehouse_snapshots = {sid: snap for sid, snap in snapshots.items() if kind_by_id.get(sid) != "dbt"}
+
     cross_system_edge_count = 0
     if len(snapshots) >= 2:
         with Database(cfg.db_path) as db:  # type: ignore[arg-type]
             cross_system_edge_count = discover_cross_system_edges(snapshots, db)
+            cross_system_edge_count += resolve_dbt_source_edges(dbt_snapshots, warehouse_snapshots, db)
 
     return ScanAllResult(results=results, cross_system_edge_count=cross_system_edge_count)
 
