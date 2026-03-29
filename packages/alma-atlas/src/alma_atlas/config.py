@@ -176,10 +176,19 @@ _config: AtlasConfig | None = None
 
 
 def get_config() -> AtlasConfig:
-    """Return the global AtlasConfig singleton."""
+    """Return the global AtlasConfig singleton.
+
+    Auto-discovers ``atlas.yml`` in the default config directory when present,
+    so hooks and other YAML-only settings are loaded automatically.
+    """
     global _config
     if _config is None:
-        _config = AtlasConfig()
+        default_dir = default_config_dir()
+        yml_path = default_dir / "atlas.yml"
+        if yml_path.exists():
+            _config = load_atlas_yml(yml_path)
+        else:
+            _config = AtlasConfig()
     return _config
 
 
