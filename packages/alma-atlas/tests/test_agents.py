@@ -618,7 +618,7 @@ def test_cli_enrich_no_repo_exits_nonzero(tmp_path: Path) -> None:
 def test_enrichment_config_defaults() -> None:
     cfg = LearningConfig()
     assert cfg.provider == "mock"
-    assert cfg.model == "claude-opus-4-6-20250529"
+    assert cfg.model == "claude-opus-4-6"
     assert cfg.api_key_env == "ANTHROPIC_API_KEY"
     assert cfg.timeout == 120
     assert cfg.max_tokens == 4096

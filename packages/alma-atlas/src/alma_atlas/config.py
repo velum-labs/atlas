@@ -45,7 +45,7 @@ class AgentConfig:
     """Configuration for a single learning agent."""
 
     provider: str = "anthropic"  # anthropic | openai | mock
-    model: str = "claude-opus-4-6-20250529"
+    model: str = "claude-opus-4-6"
     api_key_env: str = "ANTHROPIC_API_KEY"  # env var name containing the key
     timeout: int = 120
     max_tokens: int = 4096
@@ -66,7 +66,7 @@ class LearningConfig:
 
     # Flat fields — preserved for backward compatibility.
     provider: str = "mock"  # anthropic | openai | mock
-    model: str = "claude-opus-4-6-20250529"
+    model: str = "claude-opus-4-6"
     api_key_env: str = "ANTHROPIC_API_KEY"  # env var name containing the key
     timeout: int = 120
     max_tokens: int = 4096
@@ -339,7 +339,7 @@ def load_atlas_yml(path: Path | str) -> AtlasConfig:
             def _parse_agent(sub: dict) -> AgentConfig:
                 return AgentConfig(
                     provider=sub.get("provider", "anthropic"),
-                    model=sub.get("model", "claude-opus-4-6-20250529"),
+                    model=sub.get("model", "claude-opus-4-6"),
                     api_key_env=sub.get("api_key_env", "ANTHROPIC_API_KEY"),
                     timeout=int(sub.get("timeout", 120)),
                     max_tokens=int(sub.get("max_tokens", 4096)),
@@ -356,7 +356,7 @@ def load_atlas_yml(path: Path | str) -> AtlasConfig:
         else:
             # Flat (legacy) format: apply the same values to all agents.
             flat_provider = learning_raw.get("provider", "mock")
-            flat_model = learning_raw.get("model", "claude-opus-4-6-20250529")
+            flat_model = learning_raw.get("model", "claude-opus-4-6")
             flat_api_key_env = learning_raw.get("api_key_env", "ANTHROPIC_API_KEY")
             flat_timeout = int(learning_raw.get("timeout", 120))
             flat_max_tokens = int(learning_raw.get("max_tokens", 4096))

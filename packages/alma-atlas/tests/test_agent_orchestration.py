@@ -68,7 +68,7 @@ def _seed_edge(db: Database, edge: Edge) -> None:
 def test_agent_config_defaults() -> None:
     cfg = AgentConfig()
     assert cfg.provider == "anthropic"
-    assert cfg.model == "claude-opus-4-6-20250529"
+    assert cfg.model == "claude-opus-4-6"
     assert cfg.api_key_env == "ANTHROPIC_API_KEY"
     assert cfg.timeout == 120
     assert cfg.max_tokens == 4096
@@ -103,7 +103,7 @@ def test_learning_config_flat_fields_still_work() -> None:
     cfg = LearningConfig()
     # Flat (legacy) fields are preserved.
     assert cfg.provider == "mock"
-    assert cfg.model == "claude-opus-4-6-20250529"
+    assert cfg.model == "claude-opus-4-6"
     assert cfg.api_key_env == "ANTHROPIC_API_KEY"
     assert cfg.timeout == 120
     assert cfg.max_tokens == 4096
