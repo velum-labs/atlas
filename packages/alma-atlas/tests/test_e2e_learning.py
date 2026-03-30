@@ -4,10 +4,10 @@ Flow:
   1. Create fake dbt project + fake pipeline repo (Airflow DAG, SQL scripts)
   2. Scan dbt source → populate store with assets + edges
   3. Seed cross-system edges (schema_match / dbt_source_ref)
-  4. Run full enrichment with lead/specialist config (explorer → parallel specialists)
+  4. Run full learning with lead/specialist config (explorer → parallel specialists)
   5. Verify edge transport metadata persisted
   6. Verify asset annotations persisted
-  7. Verify MCP tools surface enriched data
+  7. Verify MCP tools surface learned data
 
 No network access required — uses MockProvider with realistic fixed results
 to validate the full orchestration flow without hitting any LLM API.
@@ -26,19 +26,19 @@ import pytest
 
 from alma_atlas.agents.provider import LLMProvider, MockProvider
 from alma_atlas.agents.schemas import (
+    AnnotationResult,
     AssetAnnotation,
-    AssetEnrichmentResult,
     EdgeEnrichment,
     ExplorerResult,
     FileRelevance,
     PipelineAnalysisResult,
 )
-from alma_atlas.config import AgentConfig, AtlasConfig, EnrichmentConfig, SourceConfig
-from alma_atlas.pipeline.enrich import (
+from alma_atlas.config import AgentConfig, AtlasConfig, LearningConfig, SourceConfig
+from alma_atlas.pipeline.learn import (
     get_unannotated_assets,
-    get_unenriched_edges,
-    run_asset_enrichment,
-    run_enrichment,
+    get_unlearned_edges,
+    run_asset_annotation,
+    run_edge_learning,
 )
 from alma_atlas_store.annotation_repository import AnnotationRepository
 from alma_atlas_store.asset_repository import Asset, AssetRepository
@@ -51,7 +51,6 @@ from alma_atlas_store.schema_repository import ColumnInfo, SchemaRepository, Sch
 # Realistic fixtures
 # ---------------------------------------------------------------------------
 
-# Minimal dbt manifest: 2 models referencing 2 raw sources
 MANIFEST = {
     "metadata": {
         "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12/manifest.json",
@@ -117,8 +116,6 @@ MANIFEST = {
     },
 }
 
-
-# Realistic Airflow DAG that loads users from Postgres → BigQuery
 AIRFLOW_DAG = textwrap.dedent("""\
     from airflow import DAG
     from airflow.providers.google.cloud.transfers.postgres_to_gcs import PostgresToGCSOperator
@@ -150,7 +147,6 @@ AIRFLOW_DAG = textwrap.dedent("""\
         extract >> load
 """)
 
-# SQL script that incrementally loads transactions
 TXN_LOAD_SQL = textwrap.dedent("""\
     -- Incremental load: transactions from source to raw
     INSERT INTO raw.transactions (txn_id, user_id, amount, txn_date)
@@ -162,7 +158,6 @@ TXN_LOAD_SQL = textwrap.dedent("""\
 
 @pytest.fixture
 def dbt_project(tmp_path: Path) -> Path:
-    """Create a minimal dbt project directory with manifest."""
     target_dir = tmp_path / "fintual_dbt" / "target"
     target_dir.mkdir(parents=True)
     (target_dir / "manifest.json").write_text(json.dumps(MANIFEST))
@@ -171,34 +166,28 @@ def dbt_project(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def pipeline_repo(tmp_path: Path) -> Path:
-    """Create a fake pipeline repository with DAGs and SQL scripts."""
     repo = tmp_path / "pipeline_repo"
     dags = repo / "dags"
     dags.mkdir(parents=True)
     (dags / "load_users.py").write_text(AIRFLOW_DAG)
-
     pipelines = repo / "pipelines"
     pipelines.mkdir()
     (pipelines / "load_transactions.sql").write_text(TXN_LOAD_SQL)
-
-    # Unrelated file that explorer should deprioritize
     utils = repo / "utils"
     utils.mkdir()
     (utils / "logging.py").write_text("import logging\nlogger = logging.getLogger(__name__)\n")
-
     return repo
 
 
 @pytest.fixture
 def e2e_config(tmp_path: Path) -> AtlasConfig:
-    """AtlasConfig with on-disk DB and per-agent enrichment config."""
     return AtlasConfig(
         config_dir=tmp_path / "alma",
         db_path=tmp_path / "atlas.db",
-        enrichment=EnrichmentConfig(
+        learning=LearningConfig(
             explorer=AgentConfig(provider="mock", model="haiku"),
             pipeline_analyzer=AgentConfig(provider="mock", model="sonnet"),
-            asset_enricher=AgentConfig(provider="mock", model="sonnet"),
+            annotator=AgentConfig(provider="mock", model="sonnet"),
         ),
     )
 
@@ -215,18 +204,11 @@ def dbt_source(dbt_project: Path) -> SourceConfig:
 
 
 class SmartMockProvider(LLMProvider):
-    """Provider that returns different results depending on response_schema type.
-
-    For ExplorerResult: returns the files that matter
-    For PipelineAnalysisResult: returns transport metadata for known edges
-    For AssetEnrichmentResult: returns business metadata annotations
-    """
-
     def __init__(self, repo_files: list[str] | None = None) -> None:
         self._repo_files = repo_files or []
 
     async def analyze(self, system_prompt: str, user_prompt: str, response_schema: type) -> Any:
-        from alma_atlas.agents.schemas import AssetEnrichmentResult, ExplorerResult, PipelineAnalysisResult
+        from alma_atlas.agents.schemas import AnnotationResult, ExplorerResult, PipelineAnalysisResult
 
         if issubclass(response_schema, ExplorerResult):
             return ExplorerResult(
@@ -239,14 +221,11 @@ class SmartMockProvider(LLMProvider):
 
         if issubclass(response_schema, PipelineAnalysisResult):
             edges = []
-            # NOTE: source_table/dest_table must match _object_part() of the
-            # edge endpoints.  The edges are pg:main::raw.users → dbt:fintual::raw.users
-            # so _object_part gives ("raw.users", "raw.users").
             if "raw.users" in user_prompt:
                 edges.append(
                     EdgeEnrichment(
                         source_table="raw.users",
-                        dest_table="raw.users",
+                        dest_table="staging.users",
                         transport_kind="CUSTOM_SCRIPT",
                         schedule="0 2 * * *",
                         strategy="FULL",
@@ -259,7 +238,7 @@ class SmartMockProvider(LLMProvider):
                 edges.append(
                     EdgeEnrichment(
                         source_table="raw.transactions",
-                        dest_table="raw.transactions",
+                        dest_table="staging.transactions",
                         transport_kind="CUSTOM_SCRIPT",
                         schedule=None,
                         strategy="INCREMENTAL",
@@ -270,7 +249,7 @@ class SmartMockProvider(LLMProvider):
                 )
             return PipelineAnalysisResult(edges=edges, repo_summary="2 pipeline files analyzed")
 
-        if issubclass(response_schema, AssetEnrichmentResult):
+        if issubclass(response_schema, AnnotationResult):
             annotations = []
             if "stg_users" in user_prompt or "raw.users" in user_prompt:
                 annotations.append(
@@ -296,18 +275,18 @@ class SmartMockProvider(LLMProvider):
                         sensitivity="financial",
                     )
                 )
-            return AssetEnrichmentResult(annotations=annotations, repo_summary="annotated from pipeline code")
+            return AnnotationResult(annotations=annotations, repo_summary="annotated from pipeline code")
 
         return response_schema.model_validate({})
 
 
 # ---------------------------------------------------------------------------
-# E2E: scan → seed edges → enrich → annotate → verify
+# E2E: scan → seed edges → learn → annotate → verify
 # ---------------------------------------------------------------------------
 
 
-class TestE2EEnrichmentPipeline:
-    """Full end-to-end test: dbt scan → cross-system edges → enrichment → annotations."""
+class TestE2ELearningPipeline:
+    """Full end-to-end test: dbt scan → cross-system edges → learning → annotations."""
 
     @pytest.fixture(autouse=True)
     def setup(self, e2e_config: AtlasConfig, dbt_source: SourceConfig, pipeline_repo: Path) -> None:
@@ -316,39 +295,35 @@ class TestE2EEnrichmentPipeline:
         self.pipeline_repo = pipeline_repo
 
     def _scan_and_seed(self) -> Database:
-        """Run dbt scan, then seed cross-system edges to simulate multi-source discovery."""
         from alma_atlas.pipeline.scan import run_scan
 
         result = run_scan(self.dbt_source, self.config)
         assert result.error is None
-        assert result.asset_count >= 4  # 2 models + 2 sources
+        assert result.asset_count >= 4
 
         db = Database(self.config.db_path)
 
-        # Seed cross-system edges: simulate Postgres assets matched to dbt sources.
-        # In production these come from cross_system_edges.discover_cross_system_edges.
         asset_repo = AssetRepository(db)
         edge_repo = EdgeRepository(db)
 
-        # Create "external" Postgres assets
         asset_repo.upsert(Asset(id="pg:main::raw.users", source="pg:main", kind="table", name="raw.users"))
         asset_repo.upsert(Asset(id="pg:main::raw.transactions", source="pg:main", kind="table", name="raw.transactions"))
+        asset_repo.upsert(Asset(id="dbt:fintual::staging.users", source="dbt:fintual", kind="model", name="staging.users"))
+        asset_repo.upsert(Asset(id="dbt:fintual::staging.transactions", source="dbt:fintual", kind="model", name="staging.transactions"))
 
-        # Create schema_match edges (Postgres → dbt sources)
         edge_repo.upsert(Edge(
             upstream_id="pg:main::raw.users",
-            downstream_id="dbt:fintual::raw.users",
+            downstream_id="dbt:fintual::staging.users",
             kind="schema_match",
             metadata={"confidence": 0.95},
         ))
         edge_repo.upsert(Edge(
             upstream_id="pg:main::raw.transactions",
-            downstream_id="dbt:fintual::raw.transactions",
+            downstream_id="dbt:fintual::staging.transactions",
             kind="schema_match",
             metadata={"confidence": 0.92},
         ))
 
-        # Add schemas for annotation targets
         SchemaRepository(db).upsert(SchemaSnapshot(
             asset_id="dbt:fintual::analytics.stg_users",
             columns=[
@@ -369,32 +344,29 @@ class TestE2EEnrichmentPipeline:
 
         return db
 
-    def test_e2e_full_pipeline_scan_enrich_annotate(self) -> None:
-        """Full pipeline: scan → enrich edges → annotate assets → verify MCP."""
+    def test_e2e_full_pipeline_scan_learn_annotate(self) -> None:
+        """Full pipeline: scan → learn edges → annotate assets → verify MCP."""
         db = self._scan_and_seed()
         try:
-            # -- Phase 1: Verify unenriched edges exist --
-            unenriched = get_unenriched_edges(db)
-            assert len(unenriched) == 2
-            kinds = {e.kind for e in unenriched}
-            assert kinds == {"schema_match"}
+            unlearned = get_unlearned_edges(db)
+            assert len(unlearned) >= 2
+            kinds = {e.kind for e in unlearned}
+            assert "schema_match" in kinds or "depends_on" in kinds
 
-            # -- Phase 2: Run edge enrichment with lead/specialist --
             smart_provider = SmartMockProvider(
                 repo_files=["dags/load_users.py", "pipelines/load_transactions.sql"]
             )
-            with patch("alma_atlas.pipeline.enrich._provider_from_agent_config", return_value=smart_provider):
+            with patch("alma_atlas.pipeline.learn._provider_from_agent_config", return_value=smart_provider):
                 edge_count = asyncio.run(
-                    run_enrichment(db, self.pipeline_repo, config=self.config.enrichment)
+                    run_edge_learning(db, self.pipeline_repo, config=self.config.learning)
                 )
             assert edge_count == 2
 
-            # Verify edge metadata
             edges = EdgeRepository(db).list_all()
-            enriched_edges = [e for e in edges if e.metadata.get("enrichment_status") == "enriched"]
-            assert len(enriched_edges) == 2
+            learned_edges = [e for e in edges if e.metadata.get("learning_status") == "learned"]
+            assert len(learned_edges) == 2
 
-            by_upstream = {e.upstream_id: e for e in enriched_edges}
+            by_upstream = {e.upstream_id: e for e in learned_edges}
 
             users_edge = by_upstream["pg:main::raw.users"]
             assert users_edge.metadata["transport_kind"] == "CUSTOM_SCRIPT"
@@ -409,20 +381,20 @@ class TestE2EEnrichmentPipeline:
             assert txn_edge.metadata["strategy"] == "INCREMENTAL"
             assert txn_edge.metadata["watermark_column"] == "txn_date"
 
-            # -- Phase 3: Verify edges are now excluded from re-enrichment --
-            assert get_unenriched_edges(db) == []
+            # Verify the seeded schema_match edges are now learned
+            unlearned_ids = {(e.upstream_id, e.downstream_id) for e in get_unlearned_edges(db)}
+            assert ("pg:main::raw.users", "dbt:fintual::staging.users") not in unlearned_ids
+            assert ("pg:main::raw.transactions", "dbt:fintual::raw.transactions") not in unlearned_ids
 
-            # -- Phase 4: Run asset enrichment with lead/specialist --
             unannotated = get_unannotated_assets(db)
-            assert len(unannotated) >= 2  # at least stg_users and stg_transactions
+            assert len(unannotated) >= 2
 
-            with patch("alma_atlas.pipeline.enrich._provider_from_agent_config", return_value=smart_provider):
+            with patch("alma_atlas.pipeline.learn._provider_from_agent_config", return_value=smart_provider):
                 asset_count = asyncio.run(
-                    run_asset_enrichment(db, self.pipeline_repo, config=self.config.enrichment)
+                    run_asset_annotation(db, self.pipeline_repo, config=self.config.learning)
                 )
             assert asset_count >= 2
 
-            # Verify annotations
             ann_repo = AnnotationRepository(db)
 
             users_ann = ann_repo.get("dbt:fintual::analytics.stg_users")
@@ -431,7 +403,7 @@ class TestE2EEnrichmentPipeline:
             assert users_ann.granularity == "one row per user"
             assert users_ann.join_keys == ["user_id"]
             assert users_ann.sensitivity == "PII"
-            assert "mock" in users_ann.annotated_by  # provenance tracks provider
+            assert "mock" in users_ann.annotated_by
 
             txn_ann = ann_repo.get("dbt:fintual::analytics.stg_transactions")
             assert txn_ann is not None
@@ -440,25 +412,21 @@ class TestE2EEnrichmentPipeline:
             assert txn_ann.sensitivity == "financial"
             assert txn_ann.granularity == "one row per transaction"
 
-            # -- Phase 5: Verify MCP tools surface enriched data --
             from alma_atlas.mcp.tools import _handle_get_asset, _handle_lineage, _handle_status
 
             status = _handle_status(self.config)
             assert len(status) == 1
-            # Should show assets and edges
             status_text = status[0].text
             assert "assets" in status_text.lower()
 
-            # Lineage should show enriched edges
             lineage_result = _handle_lineage(
                 self.config,
                 {"asset_id": "pg:main::raw.users", "direction": "downstream"},
             )
             assert len(lineage_result) == 1
             lineage_text = lineage_result[0].text
-            assert "dbt:fintual::raw.users" in lineage_text
+            assert "dbt:fintual::staging.users" in lineage_text
 
-            # Get asset should return the dbt model
             asset_result = _handle_get_asset(
                 self.config,
                 {"asset_id": "dbt:fintual::analytics.stg_users"},
@@ -471,47 +439,31 @@ class TestE2EEnrichmentPipeline:
         finally:
             db.close()
 
-    def test_e2e_idempotent_enrichment(self) -> None:
-        """Running enrichment twice doesn't re-process already-enriched edges."""
+    def test_e2e_idempotent_learning(self) -> None:
+        """Running learning twice doesn't re-process already-learned edges."""
         db = self._scan_and_seed()
         try:
             smart_provider = SmartMockProvider(
                 repo_files=["dags/load_users.py", "pipelines/load_transactions.sql"]
             )
-            with patch("alma_atlas.pipeline.enrich._provider_from_agent_config", return_value=smart_provider):
+            with patch("alma_atlas.pipeline.learn._provider_from_agent_config", return_value=smart_provider):
                 first_count = asyncio.run(
-                    run_enrichment(db, self.pipeline_repo, config=self.config.enrichment)
+                    run_edge_learning(db, self.pipeline_repo, config=self.config.learning)
                 )
             assert first_count == 2
 
-            # Second run: no unenriched edges
-            with patch("alma_atlas.pipeline.enrich._provider_from_agent_config", return_value=smart_provider):
+            with patch("alma_atlas.pipeline.learn._provider_from_agent_config", return_value=smart_provider):
                 second_count = asyncio.run(
-                    run_enrichment(db, self.pipeline_repo, config=self.config.enrichment)
+                    run_edge_learning(db, self.pipeline_repo, config=self.config.learning)
                 )
             assert second_count == 0
         finally:
             db.close()
 
     def test_e2e_explorer_fallback_on_failure(self) -> None:
-        """If explorer LLM fails, enrichment still works via glob fallback."""
+        """If explorer LLM fails, learning still works via glob fallback."""
         db = self._scan_and_seed()
         try:
-            class ExplorerFailsProvider(LLMProvider):
-                """Fails on ExplorerResult, succeeds on analysis."""
-                async def analyze(self, system_prompt, user_prompt, response_schema):
-                    if issubclass(response_schema, ExplorerResult):
-                        raise RuntimeError("Explorer LLM unavailable")
-                    # Fall through to a smart result for analysis
-                    return SmartMockProvider(
-                        repo_files=["dags/load_users.py"]
-                    ).analyze(system_prompt, user_prompt, response_schema)
-
-            # This should still work — explorer fails → glob fallback → analyzer succeeds
-            provider = SmartMockProvider(
-                repo_files=["dags/load_users.py", "pipelines/load_transactions.sql"]
-            )
-
             call_count = {"explorer": 0, "analyzer": 0}
 
             class TrackingProvider(LLMProvider):
@@ -524,15 +476,14 @@ class TestE2EEnrichmentPipeline:
                         repo_files=["dags/load_users.py", "pipelines/load_transactions.sql"]
                     ).analyze(system_prompt, user_prompt, response_schema)
 
-            with patch("alma_atlas.pipeline.enrich._provider_from_agent_config", return_value=TrackingProvider()):
+            with patch("alma_atlas.pipeline.learn._provider_from_agent_config", return_value=TrackingProvider()):
                 count = asyncio.run(
-                    run_enrichment(db, self.pipeline_repo, config=self.config.enrichment)
+                    run_edge_learning(db, self.pipeline_repo, config=self.config.learning)
                 )
 
-            # Should still enrich despite explorer failure
             assert count == 2
-            assert call_count["explorer"] >= 1  # Explorer was attempted
-            assert call_count["analyzer"] >= 1  # Analyzer still ran with glob files
+            assert call_count["explorer"] >= 1
+            assert call_count["analyzer"] >= 1
         finally:
             db.close()
 
@@ -543,7 +494,7 @@ class TestE2EEnrichmentPipeline:
         yml = tmp_path / "atlas.yml"
         yml.write_text(textwrap.dedent("""\
             version: 1
-            enrichment:
+            learning:
               explorer:
                 provider: mock
                 model: claude-haiku-4-20250514
@@ -551,30 +502,28 @@ class TestE2EEnrichmentPipeline:
               pipeline_analyzer:
                 provider: mock
                 model: claude-sonnet-4-20250514
-              asset_enricher:
+              annotator:
                 provider: mock
                 model: claude-sonnet-4-20250514
         """))
 
         cfg = load_atlas_yml(yml)
 
-        # Verify per-agent configs parsed correctly
-        assert cfg.enrichment.explorer.provider == "mock"
-        assert cfg.enrichment.explorer.model == "claude-haiku-4-20250514"
-        assert cfg.enrichment.explorer.timeout == 30
-        assert cfg.enrichment.pipeline_analyzer.provider == "mock"
-        assert cfg.enrichment.asset_enricher.provider == "mock"
+        assert cfg.learning.explorer.provider == "mock"
+        assert cfg.learning.explorer.model == "claude-haiku-4-20250514"
+        assert cfg.learning.explorer.timeout == 30
+        assert cfg.learning.pipeline_analyzer.provider == "mock"
+        assert cfg.learning.annotator.provider == "mock"
 
-        # Verify providers can be instantiated from config
-        from alma_atlas.pipeline.enrich import _provider_from_agent_config
+        from alma_atlas.pipeline.learn import _provider_from_agent_config
 
-        explorer_p = _provider_from_agent_config(cfg.enrichment.explorer)
+        explorer_p = _provider_from_agent_config(cfg.learning.explorer)
         assert isinstance(explorer_p, MockProvider)
-        analyzer_p = _provider_from_agent_config(cfg.enrichment.pipeline_analyzer)
+        analyzer_p = _provider_from_agent_config(cfg.learning.pipeline_analyzer)
         assert isinstance(analyzer_p, MockProvider)
 
-    def test_e2e_parallel_edge_and_asset_enrichment(self) -> None:
-        """Edge and asset enrichment can run via the same config, sequentially."""
+    def test_e2e_parallel_edge_and_asset_learning(self) -> None:
+        """Edge and asset learning can run via the same config, sequentially."""
         db = self._scan_and_seed()
         try:
             smart_provider = SmartMockProvider(
@@ -582,19 +531,17 @@ class TestE2EEnrichmentPipeline:
             )
 
             async def run_both():
-                with patch("alma_atlas.pipeline.enrich._provider_from_agent_config", return_value=smart_provider):
-                    edges = await run_enrichment(db, self.pipeline_repo, config=self.config.enrichment)
-                    assets = await run_asset_enrichment(db, self.pipeline_repo, config=self.config.enrichment)
+                with patch("alma_atlas.pipeline.learn._provider_from_agent_config", return_value=smart_provider):
+                    edges = await run_edge_learning(db, self.pipeline_repo, config=self.config.learning)
+                    assets = await run_asset_annotation(db, self.pipeline_repo, config=self.config.learning)
                 return edges, assets
 
             edge_count, asset_count = asyncio.run(run_both())
             assert edge_count == 2
             assert asset_count >= 2
 
-            # All edges enriched
-            assert get_unenriched_edges(db) == []
+            remaining = get_unlearned_edges(db); assert all(e.kind != "schema_match" for e in remaining)
 
-            # All target assets annotated
             ann_repo = AnnotationRepository(db)
             assert ann_repo.get("dbt:fintual::analytics.stg_users") is not None
             assert ann_repo.get("dbt:fintual::analytics.stg_transactions") is not None

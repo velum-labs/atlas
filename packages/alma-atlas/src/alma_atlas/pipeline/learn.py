@@ -1,15 +1,15 @@
-"""Enrichment orchestrator — identifies unenriched edges and calls the pipeline agent.
+"""Learning orchestrator — identifies unlearned edges and calls the pipeline agent.
 
 After cross-system edge discovery (schema_match / dbt_source_ref edges), this
-module enriches those edges with transport metadata inferred from a code
+module learns those edges with transport metadata inferred from a code
 repository by the :mod:`alma_atlas.agents.pipeline_analyzer` agent.
 
-Enrichment is idempotent: edges that already carry ``enrichment_status=enriched``
+Learning is idempotent: edges that already carry ``learning_status=learned``
 in their metadata are skipped.
 
 Lead/Specialist pattern
 -----------------------
-When an :class:`~alma_atlas.config.EnrichmentConfig` is provided the orchestrator
+When a :class:`~alma_atlas.config.LearningConfig` is provided the orchestrator
 uses a *lead/specialist* multi-agent pattern:
 
 1. The **explorer** agent (cheap model) performs a two-pass file selection to
@@ -17,7 +17,7 @@ uses a *lead/specialist* multi-agent pattern:
 2. The **specialist** agent(s) receive only the pre-filtered files, reducing
    token usage and improving signal.
 
-Both :func:`run_enrichment` and :func:`run_asset_enrichment` accept either a
+Both :func:`run_edge_learning` and :func:`run_asset_annotation` accept either a
 single ``provider`` argument (legacy path) **or** a ``config`` keyword argument
 (new path).  Both calling conventions are supported simultaneously.
 """
@@ -34,16 +34,21 @@ from alma_atlas_store.edge_repository import Edge, EdgeRepository
 
 if TYPE_CHECKING:
     from alma_atlas.agents.provider import LLMProvider
-    from alma_atlas.config import AgentConfig, EnrichmentConfig
+    from alma_atlas.config import AgentConfig, LearningConfig
     from alma_atlas_store.db import Database
 
 logger = logging.getLogger(__name__)
 
-# Edge kinds that are candidates for pipeline enrichment.
+# Edge kinds that are candidates for pipeline learning.
 #
 # We include `depends_on` because dbt/SQL lineage edges are often the ones that have
 # meaningful transport metadata (schedule, strategy, owner) in the surrounding pipeline code.
-_ENRICHABLE_KINDS: frozenset[str] = frozenset({"schema_match", "dbt_source_ref", "depends_on"})
+_LEARNABLE_KINDS: frozenset[str] = frozenset({"schema_match", "dbt_source_ref", "depends_on"})
+
+
+def _is_real_provider(provider_name: str) -> bool:
+    """Return True if the provider is a real (non-mock) LLM provider."""
+    return provider_name != "mock"
 
 
 def _provider_from_agent_config(agent_cfg: AgentConfig) -> LLMProvider:
@@ -62,27 +67,27 @@ def _provider_from_agent_config(agent_cfg: AgentConfig) -> LLMProvider:
     )
 
 
-def get_unenriched_edges(db: Database) -> list[Edge]:
-    """Return edges that have not yet been enriched by the pipeline analysis agent.
+def get_unlearned_edges(db: Database) -> list[Edge]:
+    """Return edges that have not yet been learned by the pipeline analysis agent.
 
     An edge qualifies when its :attr:`~alma_atlas_store.edge_repository.Edge.kind`
-    is one of the enrichable kinds (``schema_match`` or ``dbt_source_ref``) and
-    its metadata does not contain ``enrichment_status: enriched``.
+    is one of the learnable kinds (``schema_match`` or ``dbt_source_ref``) and
+    its metadata does not contain ``learning_status: learned``.
 
     Args:
         db: Open :class:`~alma_atlas_store.db.Database` connection.
 
     Returns:
-        List of unenriched :class:`~alma_atlas_store.edge_repository.Edge` objects.
+        List of unlearned :class:`~alma_atlas_store.edge_repository.Edge` objects.
     """
     repo = EdgeRepository(db)
     return [
         e
         for e in repo.list_all()
-        if e.kind in _ENRICHABLE_KINDS
+        if e.kind in _LEARNABLE_KINDS
         # Skip identity edges like pg::raw.users -> dbt::raw.users; there's no "transport" to infer.
         and e.upstream_id.split("::", 1)[-1] != e.downstream_id.split("::", 1)[-1]
-        and e.metadata.get("enrichment_status") != "enriched"
+        and e.metadata.get("learning_status") != "learned"
     ]
 
 
@@ -91,16 +96,16 @@ def _object_part(asset_id: str) -> str:
     return asset_id.split("::", 1)[-1] if "::" in asset_id else asset_id
 
 
-async def run_enrichment(
+async def run_edge_learning(
     db: Database,
     repo_path: Path,
     provider: LLMProvider | None = None,
     *,
-    config: EnrichmentConfig | None = None,
+    config: LearningConfig | None = None,
 ) -> int:
-    """Enrich unenriched cross-system edges with pipeline transport metadata.
+    """Learn unlearned cross-system edges with pipeline transport metadata.
 
-    Collects all unenriched edges, calls the pipeline analysis agent, and
+    Collects all unlearned edges, calls the pipeline analysis agent, and
     persists the returned :class:`~alma_atlas.agents.schemas.EdgeEnrichment`
     data back to the store.  Edges for which the agent returns no result are
     left unchanged.  Persistence failures are logged as warnings and do not
@@ -116,22 +121,22 @@ async def run_enrichment(
         repo_path: Filesystem path to the code repository to scan.
         provider:  Configured :class:`~alma_atlas.agents.provider.LLMProvider`
                    (legacy path, used when *config* is ``None``).
-        config:    Per-agent :class:`~alma_atlas.config.EnrichmentConfig`
+        config:    Per-agent :class:`~alma_atlas.config.LearningConfig`
                    (new path; takes precedence over *provider*).
 
     Returns:
-        Number of edges successfully enriched and persisted.
+        Number of edges successfully learned and persisted.
     """
     from alma_atlas.agents.pipeline_analyzer import analyze_edges
 
-    unenriched = get_unenriched_edges(db)
-    if not unenriched:
-        logger.info("run_enrichment: no unenriched edges found")
+    unlearned = get_unlearned_edges(db)
+    if not unlearned:
+        logger.info("run_edge_learning: no unlearned edges found")
         return 0
 
     logger.info(
-        "run_enrichment: enriching %d edge(s) from %s",
-        len(unenriched),
+        "run_edge_learning: learning %d edge(s) from %s",
+        len(unlearned),
         repo_path,
     )
 
@@ -142,26 +147,26 @@ async def run_enrichment(
         explorer_provider = _provider_from_agent_config(config.explorer)
         analyzer_provider = _provider_from_agent_config(config.pipeline_analyzer)
 
-        pre_filtered = await explore_for_edges(unenriched, repo_path, explorer_provider)
+        pre_filtered = await explore_for_edges(unlearned, repo_path, explorer_provider)
         logger.debug(
-            "run_enrichment: explorer pre-filtered %d file(s)",
+            "run_edge_learning: explorer pre-filtered %d file(s)",
             len(pre_filtered),
         )
 
         enrichments = await analyze_edges(
-            unenriched,
+            unlearned,
             repo_path,
             analyzer_provider,
             pre_filtered_files=pre_filtered,
         )
     elif provider is not None:
         # Legacy single-provider path.
-        enrichments = await analyze_edges(unenriched, repo_path, provider)
+        enrichments = await analyze_edges(unlearned, repo_path, provider)
     else:
-        raise ValueError("run_enrichment requires either 'provider' or 'config'")
+        raise ValueError("run_edge_learning requires either 'provider' or 'config'")
 
     if not enrichments:
-        logger.info("run_enrichment: agent returned no enrichment results")
+        logger.info("run_edge_learning: agent returned no results")
         return 0
 
     # Index enrichments by (source_table, dest_table) for O(1) lookup.
@@ -170,15 +175,15 @@ async def run_enrichment(
     }
 
     repo = EdgeRepository(db)
-    enriched_count = 0
+    learned_count = 0
 
-    for edge in unenriched:
+    for edge in unlearned:
         src_obj = _object_part(edge.upstream_id)
         dst_obj = _object_part(edge.downstream_id)
         enrichment = enrichment_index.get((src_obj, dst_obj))
         if enrichment is None:
             logger.debug(
-                "run_enrichment: no match for %s → %s",
+                "run_edge_learning: no match for %s → %s",
                 edge.upstream_id,
                 edge.downstream_id,
             )
@@ -193,7 +198,7 @@ async def run_enrichment(
             "watermark_column": enrichment.watermark_column,
             "owner": enrichment.owner,
             "confidence_note": enrichment.confidence_note,
-            "enrichment_status": "enriched",
+            "learning_status": "learned",
         }
         try:
             repo.upsert(
@@ -204,22 +209,22 @@ async def run_enrichment(
                     metadata=updated_metadata,
                 )
             )
-            enriched_count += 1
+            learned_count += 1
             logger.debug(
-                "run_enrichment: persisted enrichment for %s → %s",
+                "run_edge_learning: persisted learning for %s → %s",
                 edge.upstream_id,
                 edge.downstream_id,
             )
         except Exception as exc:
             logger.warning(
-                "run_enrichment: failed to persist enrichment for %s → %s: %s",
+                "run_edge_learning: failed to persist learning for %s → %s: %s",
                 edge.upstream_id,
                 edge.downstream_id,
                 exc,
             )
 
-    logger.info("run_enrichment: %d edge(s) enriched", enriched_count)
-    return enriched_count
+    logger.info("run_edge_learning: %d edge(s) learned", learned_count)
+    return learned_count
 
 
 def get_unannotated_assets(db: Database, *, limit: int = 100) -> list[str]:
@@ -229,32 +234,32 @@ def get_unannotated_assets(db: Database, *, limit: int = 100) -> list[str]:
     return AnnotationRepository(db).list_unannotated(limit=limit)
 
 
-async def run_asset_enrichment(
+async def run_asset_annotation(
     db: Database,
     repo_path: Path,
     provider: LLMProvider | None = None,
     *,
-    config: EnrichmentConfig | None = None,
+    config: LearningConfig | None = None,
     provider_name: str | None = None,
     model: str | None = None,
     limit: int = 100,
     batch_size: int = 20,
 ) -> int:
-    """Enrich assets with supplementary business metadata annotations.
+    """Annotate assets with supplementary business metadata.
 
-    This is the P2 "Codex enrichment" path. It selects assets that have not yet
+    This is the P2 "Codex learning" path. It selects assets that have not yet
     been annotated, builds a context payload per asset (schema + basic lineage),
-    calls the asset enrichment agent, and persists results to the store.
+    calls the annotator agent, and persists results to the store.
 
     When *config* is provided the lead/specialist pattern is used:
     - The explorer agent (``config.explorer``) pre-filters repository files.
-    - The asset enricher (``config.asset_enricher``) receives only relevant files.
+    - The annotator (``config.annotator``) receives only relevant files.
 
     Args:
         db:            Open Atlas database.
         repo_path:      Filesystem path to the code repository.
         provider:       Configured LLM provider (legacy path).
-        config:         Per-agent EnrichmentConfig (new path; takes precedence).
+        config:         Per-agent LearningConfig (new path; takes precedence).
         provider_name:  Provider identifier used for provenance (legacy path).
         model:          Model identifier used for provenance (legacy path).
         limit:          Max assets to annotate in this run.
@@ -263,27 +268,27 @@ async def run_asset_enrichment(
     Returns:
         Number of assets successfully annotated.
     """
-    from alma_atlas.agents.asset_enricher import analyze_assets
+    from alma_atlas.agents.annotator import analyze_assets
     from alma_atlas_store.annotation_repository import AnnotationRecord, AnnotationRepository
     from alma_atlas_store.edge_repository import EdgeRepository
     from alma_atlas_store.schema_repository import SchemaRepository
 
     asset_ids = get_unannotated_assets(db, limit=limit)
     if not asset_ids:
-        logger.info("run_asset_enrichment: no unannotated assets found")
+        logger.info("run_asset_annotation: no unannotated assets found")
         return 0
 
     # Resolve provider and provenance from config or legacy args.
     if config is not None:
-        enricher_provider = _provider_from_agent_config(config.asset_enricher)
-        _provider_name = config.asset_enricher.provider
-        _model = config.asset_enricher.model
+        enricher_provider = _provider_from_agent_config(config.annotator)
+        _provider_name = config.annotator.provider
+        _model = config.annotator.model
     elif provider is not None:
         enricher_provider = provider
         _provider_name = provider_name or "unknown"
         _model = model or "unknown"
     else:
-        raise ValueError("run_asset_enrichment requires either 'provider' or 'config'")
+        raise ValueError("run_asset_annotation requires either 'provider' or 'config'")
 
     asset_repo = AssetRepository(db)
     edge_repo = EdgeRepository(db)
@@ -346,7 +351,7 @@ async def run_asset_enrichment(
             explorer_provider = _provider_from_agent_config(config.explorer)
             pre_filtered = await explore_for_assets(contexts, repo_path, explorer_provider)
             logger.debug(
-                "run_asset_enrichment: explorer pre-filtered %d file(s) for batch %d",
+                "run_asset_annotation: explorer pre-filtered %d file(s) for batch %d",
                 len(pre_filtered),
                 i // batch_size,
             )
@@ -380,10 +385,24 @@ async def run_asset_enrichment(
                 annotated_count += 1
             except Exception as exc:
                 logger.warning(
-                    "run_asset_enrichment: failed to persist annotation for %s: %s",
+                    "run_asset_annotation: failed to persist annotation for %s: %s",
                     ann.asset_id,
                     exc,
                 )
 
-    logger.info("run_asset_enrichment: %d asset(s) annotated", annotated_count)
+    logger.info("run_asset_annotation: %d asset(s) annotated", annotated_count)
     return annotated_count
+
+
+# ---------------------------------------------------------------------------
+# Backward compatibility aliases
+# ---------------------------------------------------------------------------
+
+#: Alias for :func:`get_unlearned_edges` (deprecated).
+get_unenriched_edges = get_unlearned_edges
+
+#: Alias for :func:`run_edge_learning` (deprecated).
+run_enrichment = run_edge_learning
+
+#: Alias for :func:`run_asset_annotation` (deprecated).
+run_asset_enrichment = run_asset_annotation

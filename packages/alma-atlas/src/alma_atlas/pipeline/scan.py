@@ -18,6 +18,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from alma_atlas.config import AtlasConfig, SourceConfig
@@ -382,6 +383,8 @@ async def _run_scan_all_async(
     *,
     max_concurrent: int = _DEFAULT_MAX_CONCURRENT,
     timeout: float = _DEFAULT_SCAN_TIMEOUT,
+    repo_path: Path | None = None,
+    no_learn: bool = False,
 ) -> ScanAllResult:
     """Async implementation of run_scan_all with concurrency control."""
     from alma_atlas.pipeline.cross_system_edges import (
@@ -423,6 +426,15 @@ async def _run_scan_all_async(
             cross_system_edge_count = discover_cross_system_edges(snapshots, db)
             cross_system_edge_count += resolve_dbt_source_edges(dbt_snapshots, warehouse_snapshots, db)
 
+    # Run learning phase if repo_path provided and a real (non-mock) provider is configured.
+    if repo_path is not None and not no_learn and cfg.learning.provider != "mock":
+        from alma_atlas.pipeline.learn import run_asset_annotation, run_edge_learning
+
+        with Database(cfg.db_path) as db:  # type: ignore[arg-type]
+            logger.info("[scan] Running learning phase from %s", repo_path)
+            await run_edge_learning(db, repo_path, config=cfg.learning)
+            await run_asset_annotation(db, repo_path, config=cfg.learning)
+
     return ScanAllResult(results=results, cross_system_edge_count=cross_system_edge_count)
 
 
@@ -432,6 +444,8 @@ def run_scan_all(
     *,
     max_concurrent: int = _DEFAULT_MAX_CONCURRENT,
     timeout: float = _DEFAULT_SCAN_TIMEOUT,
+    repo_path: Path | None = None,
+    no_learn: bool = False,
 ) -> ScanAllResult:
     """Run scans for all sources concurrently, then discover cross-system edges.
 
@@ -439,18 +453,32 @@ def run_scan_all(
     ``asyncio.Semaphore``.  Each source scan is bounded by *timeout* seconds.
     Results for all sources are collected even if individual scans fail.
 
+    When *repo_path* is provided and ``cfg.learning.provider`` is not ``mock``,
+    the learning phase (edge learning + asset annotation) runs automatically
+    after cross-system edge discovery.  Pass ``no_learn=True`` to suppress this.
+
     Args:
         sources:        List of source configurations to scan.
         cfg:            Atlas configuration (used to open the SQLite store).
         max_concurrent: Maximum number of concurrent source scans (default 4).
         timeout:        Per-source scan timeout in seconds (default 300).
+        repo_path:      Optional path to the code repository.  When provided
+                        with a real agent provider, learning runs after scan.
+        no_learn:       Skip the learning phase even when agents are configured.
 
     Returns:
         A :class:`ScanAllResult` aggregating per-source results and the total
         number of cross-system edges discovered.
     """
     return asyncio.run(
-        _run_scan_all_async(sources, cfg, max_concurrent=max_concurrent, timeout=timeout)
+        _run_scan_all_async(
+            sources,
+            cfg,
+            max_concurrent=max_concurrent,
+            timeout=timeout,
+            repo_path=repo_path,
+            no_learn=no_learn,
+        )
     )
 
 

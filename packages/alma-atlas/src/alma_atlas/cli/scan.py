@@ -7,6 +7,7 @@ Usage:
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -46,6 +47,21 @@ def scan(
             help="Inline JSON/YAML or a path to JSON/YAML defining runtime source configs.",
         ),
     ] = None,
+    repo: Annotated[
+        Path | None,
+        typer.Option(
+            "--repo",
+            help="Path to the code repository. When provided with a real agent provider, runs learning after scan.",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=True,
+        ),
+    ] = None,
+    no_learn: Annotated[
+        bool,
+        typer.Option("--no-learn", help="Skip the learning phase even when agents and --repo are configured."),
+    ] = False,
 ) -> None:
     """Scan data sources and populate the Atlas asset graph."""
     if ctx.invoked_subcommand is not None:
@@ -117,7 +133,7 @@ def scan(
 
     if normalized_output_format == "json":
         try:
-            all_result = run_scan_all(sources, cfg)
+            all_result = run_scan_all(sources, cfg, repo_path=repo, no_learn=no_learn)
             for result in all_result.results:
                 if result.error:
                     failed_sources.append(result.source_id)
@@ -129,7 +145,7 @@ def scan(
         with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=console) as progress:
             task = progress.add_task(f"Scanning {len(sources)} source(s)...", total=None)
             try:
-                all_result = run_scan_all(sources, cfg)
+                all_result = run_scan_all(sources, cfg, repo_path=repo, no_learn=no_learn)
                 for result in all_result.results:
                     if result.error:
                         rprint(f"  [red]Failed:[/red] {result.source_id} — {result.error}")

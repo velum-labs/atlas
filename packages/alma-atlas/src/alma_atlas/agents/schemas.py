@@ -1,8 +1,8 @@
 """Pydantic schemas for pipeline analysis agent output.
 
 These models define the structured output contract between the LLM provider
-and the Atlas enrichment pipeline.  All fields are validated before any
-enrichment data is written to the store.
+and the Atlas learning pipeline.  All fields are validated before any
+learning data is written to the store.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ class PipelineAnalysisResult(BaseModel):
 
 
 class AssetAnnotation(BaseModel):
-    """Business metadata annotation inferred by the asset enrichment agent for one asset."""
+    """Business metadata annotation inferred by the annotator agent for one asset."""
 
     asset_id: str
     ownership: str | None = None          # team or person
@@ -43,11 +43,15 @@ class AssetAnnotation(BaseModel):
     sensitivity: str | None = None        # 'PII', 'financial', 'public'
 
 
-class AssetEnrichmentResult(BaseModel):
-    """Full result returned by the asset enrichment agent for a batch of assets."""
+class AnnotationResult(BaseModel):
+    """Full result returned by the annotator agent for a batch of assets."""
 
     annotations: list[AssetAnnotation]
     repo_summary: str | None = None
+
+
+# Backward compatibility alias.
+AssetEnrichmentResult = AnnotationResult
 
 
 class FileRelevance(BaseModel):

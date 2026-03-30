@@ -1,8 +1,8 @@
-"""CLI commands for pipeline enrichment.
+"""CLI commands for pipeline learning.
 
 Usage:
-    atlas enrich --repo /path/to/repo   # Enrich edges using an LLM
-    atlas enrich --dry-run              # List unenriched edges without calling LLM
+    atlas learn --repo /path/to/repo   # Learn edges using an LLM
+    atlas learn --dry-run              # List unlearned edges without calling LLM
 """
 
 from __future__ import annotations
@@ -18,13 +18,13 @@ from rich.table import Table
 
 from alma_atlas.config import get_config
 
-app = typer.Typer(help="Enrich edges and assets with agent-inferred metadata.")
+app = typer.Typer(help="Learn edges and assets with agent-inferred metadata.")
 console = Console()
 logger = logging.getLogger(__name__)
 
 
 @app.callback(invoke_without_command=True)
-def enrich(
+def learn(
     ctx: typer.Context,
     repo: Annotated[
         Path | None,
@@ -41,19 +41,19 @@ def enrich(
         bool,
         typer.Option(
             "--assets",
-            help="Enrich assets (business metadata annotations) instead of edges.",
+            help="Annotate assets (business metadata) instead of edges.",
         ),
     ] = False,
     dry_run: Annotated[
         bool,
-        typer.Option("--dry-run", help="Show unenriched items without calling the LLM."),
+        typer.Option("--dry-run", help="Show unlearned items without calling the LLM."),
     ] = False,
 ) -> None:
-    """Enrich cross-system edges with pipeline transport metadata.
+    """Learn cross-system edges with pipeline transport metadata.
 
     Reads pipeline code from --repo and uses an LLM to fill in transport kind,
-    schedule, copy strategy, and other metadata for unenriched edges.
-    Use --dry-run to preview which edges need enrichment without calling the LLM.
+    schedule, copy strategy, and other metadata for unlearned edges.
+    Use --dry-run to preview which edges need learning without calling the LLM.
     """
     if ctx.invoked_subcommand is not None:
         return
@@ -64,7 +64,7 @@ def enrich(
     assert cfg.db_path is not None, "db_path must be configured"
 
     if assets:
-        from alma_atlas.pipeline.enrich import get_unannotated_assets
+        from alma_atlas.pipeline.learn import get_unannotated_assets
 
         with Database(cfg.db_path) as db:
             unannotated = get_unannotated_assets(db)
@@ -83,30 +83,30 @@ def enrich(
 
         if repo is None:
             console.print(
-                "[red]Error:[/red] --repo is required when enriching assets.\n"
-                "Run [bold]atlas enrich --help[/bold] for usage."
+                "[red]Error:[/red] --repo is required when annotating assets.\n"
+                "Run [bold]atlas learn --help[/bold] for usage."
             )
             raise typer.Exit(code=1)
 
-        _run_asset_enrichment(cfg, repo)
+        _run_asset_annotation(cfg, repo)
         return
 
-    # Default: edge enrichment
-    from alma_atlas.pipeline.enrich import get_unenriched_edges
+    # Default: edge learning
+    from alma_atlas.pipeline.learn import get_unlearned_edges
 
     with Database(cfg.db_path) as db:
-        unenriched = get_unenriched_edges(db)
+        unlearned = get_unlearned_edges(db)
 
-    if not unenriched:
-        console.print("[green]No unenriched edges found.[/green]")
+    if not unlearned:
+        console.print("[green]No unlearned edges found.[/green]")
         return
 
     if dry_run:
-        table = Table(title=f"Unenriched edges ({len(unenriched)})")
+        table = Table(title=f"Unlearned edges ({len(unlearned)})")
         table.add_column("Upstream", style="cyan")
         table.add_column("Downstream", style="magenta")
         table.add_column("Kind", style="yellow")
-        for edge in unenriched:
+        for edge in unlearned:
             table.add_row(edge.upstream_id, edge.downstream_id, edge.kind)
         console.print(table)
         return
@@ -114,30 +114,30 @@ def enrich(
     if repo is None:
         console.print(
             "[red]Error:[/red] --repo is required when not using --dry-run.\n"
-            "Run [bold]atlas enrich --help[/bold] for usage."
+            "Run [bold]atlas learn --help[/bold] for usage."
         )
         raise typer.Exit(code=1)
 
-    _run_enrichment(cfg, repo)
+    _run_edge_learning(cfg, repo)
 
 
-def _run_enrichment(cfg, repo_path: Path) -> None:
-    """Synchronous wrapper — runs edge enrichment using the per-agent config."""
-    from alma_atlas.pipeline.enrich import run_enrichment
+def _run_edge_learning(cfg, repo_path: Path) -> None:
+    """Synchronous wrapper — runs edge learning using the per-agent config."""
+    from alma_atlas.pipeline.learn import run_edge_learning
     from alma_atlas_store.db import Database
 
     with Database(cfg.db_path) as db:
-        count = asyncio.run(run_enrichment(db, repo_path, config=cfg.enrichment))
+        count = asyncio.run(run_edge_learning(db, repo_path, config=cfg.learning))
 
-    console.print(f"[green]Enriched {count} edge(s).[/green]")
+    console.print(f"[green]Learned {count} edge(s).[/green]")
 
 
-def _run_asset_enrichment(cfg, repo_path: Path) -> None:
-    """Synchronous wrapper — runs asset enrichment using the per-agent config."""
-    from alma_atlas.pipeline.enrich import run_asset_enrichment
+def _run_asset_annotation(cfg, repo_path: Path) -> None:
+    """Synchronous wrapper — runs asset annotation using the per-agent config."""
+    from alma_atlas.pipeline.learn import run_asset_annotation
     from alma_atlas_store.db import Database
 
     with Database(cfg.db_path) as db:
-        count = asyncio.run(run_asset_enrichment(db, repo_path, config=cfg.enrichment))
+        count = asyncio.run(run_asset_annotation(db, repo_path, config=cfg.learning))
 
     console.print(f"[green]Annotated {count} asset(s).[/green]")

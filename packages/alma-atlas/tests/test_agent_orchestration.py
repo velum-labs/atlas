@@ -1,7 +1,7 @@
 """Tests for the Atlas lead/specialist agent orchestration pattern.
 
 Covers:
-- AgentConfig and per-agent EnrichmentConfig (defaults + YAML parsing)
+- AgentConfig and per-agent LearningConfig (defaults + YAML parsing)
 - Codebase explorer (two-pass file selection, fallback on failure)
 - Updated orchestrator with config-based path
 - Backward compatibility (old flat config + old provider argument)
@@ -17,19 +17,19 @@ import pytest
 
 from alma_atlas.agents.provider import MockProvider
 from alma_atlas.agents.schemas import (
+    AnnotationResult,
     AssetAnnotation,
-    AssetEnrichmentResult,
     EdgeEnrichment,
     ExplorerResult,
     FileRelevance,
     PipelineAnalysisResult,
 )
-from alma_atlas.config import AgentConfig, AtlasConfig, EnrichmentConfig, load_atlas_yml
-from alma_atlas.pipeline.enrich import (
+from alma_atlas.config import AgentConfig, AtlasConfig, LearningConfig, load_atlas_yml
+from alma_atlas.pipeline.learn import (
     get_unannotated_assets,
-    get_unenriched_edges,
-    run_asset_enrichment,
-    run_enrichment,
+    get_unlearned_edges,
+    run_asset_annotation,
+    run_edge_learning,
 )
 from alma_atlas_store.annotation_repository import AnnotationRecord, AnnotationRepository
 from alma_atlas_store.asset_repository import Asset, AssetRepository
@@ -68,7 +68,7 @@ def _seed_edge(db: Database, edge: Edge) -> None:
 def test_agent_config_defaults() -> None:
     cfg = AgentConfig()
     assert cfg.provider == "anthropic"
-    assert cfg.model == "claude-sonnet-4-20250514"
+    assert cfg.model == "claude-opus-4-6-20250529"
     assert cfg.api_key_env == "ANTHROPIC_API_KEY"
     assert cfg.timeout == 120
     assert cfg.max_tokens == 4096
@@ -83,39 +83,39 @@ def test_agent_config_custom_values() -> None:
 
 
 # ---------------------------------------------------------------------------
-# EnrichmentConfig — per-agent sub-configs
+# LearningConfig — per-agent sub-configs
 # ---------------------------------------------------------------------------
 
 
-def test_enrichment_config_per_agent_defaults() -> None:
-    cfg = EnrichmentConfig()
+def test_learning_config_per_agent_defaults() -> None:
+    cfg = LearningConfig()
     # Per-agent configs default to mock.
     assert isinstance(cfg.explorer, AgentConfig)
     assert cfg.explorer.provider == "mock"
-    assert cfg.explorer.model == "claude-haiku-4-20250514"
+    assert cfg.explorer.model == "claude-haiku-4-5-20251001"
     assert isinstance(cfg.pipeline_analyzer, AgentConfig)
     assert cfg.pipeline_analyzer.provider == "mock"
-    assert isinstance(cfg.asset_enricher, AgentConfig)
-    assert cfg.asset_enricher.provider == "mock"
+    assert isinstance(cfg.annotator, AgentConfig)
+    assert cfg.annotator.provider == "mock"
 
 
-def test_enrichment_config_flat_fields_still_work() -> None:
-    cfg = EnrichmentConfig()
+def test_learning_config_flat_fields_still_work() -> None:
+    cfg = LearningConfig()
     # Flat (legacy) fields are preserved.
     assert cfg.provider == "mock"
-    assert cfg.model == "claude-sonnet-4-20250514"
+    assert cfg.model == "claude-opus-4-6-20250529"
     assert cfg.api_key_env == "ANTHROPIC_API_KEY"
     assert cfg.timeout == 120
     assert cfg.max_tokens == 4096
 
 
-def test_enrichment_config_per_agent_fields_are_independent() -> None:
+def test_learning_config_per_agent_fields_are_independent() -> None:
     explorer_cfg = AgentConfig(provider="openai", model="gpt-4o-mini")
-    analyzer_cfg = AgentConfig(provider="anthropic", model="claude-haiku-4-20250514")
-    cfg = EnrichmentConfig(explorer=explorer_cfg, pipeline_analyzer=analyzer_cfg)
+    analyzer_cfg = AgentConfig(provider="anthropic", model="claude-haiku-4-5-20251001")
+    cfg = LearningConfig(explorer=explorer_cfg, pipeline_analyzer=analyzer_cfg)
     assert cfg.explorer.provider == "openai"
     assert cfg.pipeline_analyzer.provider == "anthropic"
-    assert cfg.asset_enricher.provider == "mock"  # default
+    assert cfg.annotator.provider == "mock"  # default
 
 
 # ---------------------------------------------------------------------------
@@ -138,15 +138,15 @@ def test_load_atlas_yml_flat_format_sets_per_agent_configs(tmp_path: Path) -> No
     )
     cfg = load_atlas_yml(yml)
     # Flat fields preserved.
-    assert cfg.enrichment.provider == "anthropic"
-    assert cfg.enrichment.model == "claude-opus-4-6"
+    assert cfg.learning.provider == "anthropic"
+    assert cfg.learning.model == "claude-opus-4-6"
     # Flat format propagates to all per-agent configs.
-    assert cfg.enrichment.explorer.provider == "anthropic"
-    assert cfg.enrichment.explorer.model == "claude-opus-4-6"
-    assert cfg.enrichment.pipeline_analyzer.provider == "anthropic"
-    assert cfg.enrichment.pipeline_analyzer.model == "claude-opus-4-6"
-    assert cfg.enrichment.asset_enricher.provider == "anthropic"
-    assert cfg.enrichment.asset_enricher.model == "claude-opus-4-6"
+    assert cfg.learning.explorer.provider == "anthropic"
+    assert cfg.learning.explorer.model == "claude-opus-4-6"
+    assert cfg.learning.pipeline_analyzer.provider == "anthropic"
+    assert cfg.learning.pipeline_analyzer.model == "claude-opus-4-6"
+    assert cfg.learning.annotator.provider == "anthropic"
+    assert cfg.learning.annotator.model == "claude-opus-4-6"
 
 
 # ---------------------------------------------------------------------------
@@ -167,19 +167,19 @@ def test_load_atlas_yml_nested_per_agent_format(tmp_path: Path) -> None:
           pipeline_analyzer:
             provider: anthropic
             model: claude-sonnet-4-20250514
-          asset_enricher:
+          annotator:
             provider: openai
             model: gpt-4o
         """)
     )
     cfg = load_atlas_yml(yml)
-    assert cfg.enrichment.explorer.provider == "anthropic"
-    assert cfg.enrichment.explorer.model == "claude-haiku-4-20250514"
-    assert cfg.enrichment.explorer.timeout == 30
-    assert cfg.enrichment.pipeline_analyzer.provider == "anthropic"
-    assert cfg.enrichment.pipeline_analyzer.model == "claude-sonnet-4-20250514"
-    assert cfg.enrichment.asset_enricher.provider == "openai"
-    assert cfg.enrichment.asset_enricher.model == "gpt-4o"
+    assert cfg.learning.explorer.provider == "anthropic"
+    assert cfg.learning.explorer.model == "claude-haiku-4-20250514"
+    assert cfg.learning.explorer.timeout == 30
+    assert cfg.learning.pipeline_analyzer.provider == "anthropic"
+    assert cfg.learning.pipeline_analyzer.model == "claude-sonnet-4-20250514"
+    assert cfg.learning.annotator.provider == "openai"
+    assert cfg.learning.annotator.model == "gpt-4o"
 
 
 def test_load_atlas_yml_nested_partial_uses_defaults(tmp_path: Path) -> None:
@@ -194,10 +194,10 @@ def test_load_atlas_yml_nested_partial_uses_defaults(tmp_path: Path) -> None:
         """)
     )
     cfg = load_atlas_yml(yml)
-    assert cfg.enrichment.explorer.provider == "mock"
-    # pipeline_analyzer and asset_enricher fall back to AgentConfig defaults.
-    assert cfg.enrichment.pipeline_analyzer.provider == "anthropic"
-    assert cfg.enrichment.asset_enricher.provider == "anthropic"
+    assert cfg.learning.explorer.provider == "mock"
+    # pipeline_analyzer and annotator fall back to AgentConfig defaults.
+    assert cfg.learning.pipeline_analyzer.provider == "anthropic"
+    assert cfg.learning.annotator.provider == "anthropic"
 
 
 # ---------------------------------------------------------------------------
@@ -334,12 +334,12 @@ def test_build_file_index_skips_hidden_dirs(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# run_enrichment — new config-based path
+# run_edge_learning — new config-based path
 # ---------------------------------------------------------------------------
 
 
-async def test_run_enrichment_with_config(db: Database, tmp_path: Path) -> None:
-    """run_enrichment(config=...) uses explorer + analyzer pattern."""
+async def test_run_edge_learning_with_config(db: Database, tmp_path: Path) -> None:
+    """run_edge_learning(config=...) uses explorer + analyzer pattern."""
     _seed_edge(db, _make_edge("src::raw.users", "dst::staging.stg_users", kind="schema_match"))
 
     fixed = PipelineAnalysisResult(
@@ -354,23 +354,23 @@ async def test_run_enrichment_with_config(db: Database, tmp_path: Path) -> None:
     )
     provider = MockProvider(fixed_result=fixed)
 
-    with patch("alma_atlas.pipeline.enrich._provider_from_agent_config", return_value=provider):
-        count = await run_enrichment(db, tmp_path, config=EnrichmentConfig())
+    with patch("alma_atlas.pipeline.learn._provider_from_agent_config", return_value=provider):
+        count = await run_edge_learning(db, tmp_path, config=LearningConfig())
 
     assert count == 1
     edges = EdgeRepository(db).list_all()
-    assert edges[0].metadata["enrichment_status"] == "enriched"
+    assert edges[0].metadata["learning_status"] == "learned"
     assert edges[0].metadata["transport_kind"] == "CUSTOM_SCRIPT"
 
 
-async def test_run_enrichment_no_provider_no_config_raises(db: Database, tmp_path: Path) -> None:
+async def test_run_edge_learning_no_provider_no_config_raises(db: Database, tmp_path: Path) -> None:
     _seed_edge(db, _make_edge("src::raw.x", "dst::stg.x"))
     with pytest.raises(ValueError, match="requires either"):
-        await run_enrichment(db, tmp_path)
+        await run_edge_learning(db, tmp_path)
 
 
-async def test_run_enrichment_legacy_provider_still_works(db: Database, tmp_path: Path) -> None:
-    """Old calling convention: run_enrichment(db, path, provider) still works."""
+async def test_run_edge_learning_legacy_provider_still_works(db: Database, tmp_path: Path) -> None:
+    """Old calling convention: run_edge_learning(db, path, provider) still works."""
     _seed_edge(db, _make_edge("src::raw.orders", "dst::stg.orders", kind="schema_match"))
 
     fixed = PipelineAnalysisResult(
@@ -384,17 +384,17 @@ async def test_run_enrichment_legacy_provider_still_works(db: Database, tmp_path
         ]
     )
     provider = MockProvider(fixed_result=fixed)
-    count = await run_enrichment(db, tmp_path, provider)
+    count = await run_edge_learning(db, tmp_path, provider)
     assert count == 1
 
 
 # ---------------------------------------------------------------------------
-# run_asset_enrichment — new config-based path
+# run_asset_annotation — new config-based path
 # ---------------------------------------------------------------------------
 
 
-async def test_run_asset_enrichment_with_config(db: Database, tmp_path: Path) -> None:
-    """run_asset_enrichment(config=...) uses explorer + enricher pattern."""
+async def test_run_asset_annotation_with_config(db: Database, tmp_path: Path) -> None:
+    """run_asset_annotation(config=...) uses explorer + enricher pattern."""
     asset_id = "pg::public.items"
     AssetRepository(db).upsert(Asset(id=asset_id, source="pg:test", kind="table", name="public.items"))
     SchemaRepository(db).upsert(
@@ -404,7 +404,7 @@ async def test_run_asset_enrichment_with_config(db: Database, tmp_path: Path) ->
         )
     )
 
-    fixed = AssetEnrichmentResult(
+    fixed = AnnotationResult(
         annotations=[
             AssetAnnotation(
                 asset_id=asset_id,
@@ -416,8 +416,8 @@ async def test_run_asset_enrichment_with_config(db: Database, tmp_path: Path) ->
     )
     provider = MockProvider(fixed_result=fixed)
 
-    with patch("alma_atlas.pipeline.enrich._provider_from_agent_config", return_value=provider):
-        count = await run_asset_enrichment(db, tmp_path, config=EnrichmentConfig())
+    with patch("alma_atlas.pipeline.learn._provider_from_agent_config", return_value=provider):
+        count = await run_asset_annotation(db, tmp_path, config=LearningConfig())
 
     assert count == 1
     record = AnnotationRepository(db).get(asset_id)
@@ -425,18 +425,18 @@ async def test_run_asset_enrichment_with_config(db: Database, tmp_path: Path) ->
     assert record.ownership == "analytics"
 
 
-async def test_run_asset_enrichment_no_provider_no_config_raises(db: Database, tmp_path: Path) -> None:
+async def test_run_asset_annotation_no_provider_no_config_raises(db: Database, tmp_path: Path) -> None:
     AssetRepository(db).upsert(Asset(id="pg::public.x", source="pg:test", kind="table", name="public.x"))
     with pytest.raises(ValueError, match="requires either"):
-        await run_asset_enrichment(db, tmp_path)
+        await run_asset_annotation(db, tmp_path)
 
 
-async def test_run_asset_enrichment_legacy_provider_still_works(db: Database, tmp_path: Path) -> None:
+async def test_run_asset_annotation_legacy_provider_still_works(db: Database, tmp_path: Path) -> None:
     """Old calling convention still works."""
     asset_id = "pg::public.orders"
     AssetRepository(db).upsert(Asset(id=asset_id, source="pg:test", kind="table", name="public.orders"))
 
-    fixed = AssetEnrichmentResult(
+    fixed = AnnotationResult(
         annotations=[
             AssetAnnotation(
                 asset_id=asset_id,
@@ -446,7 +446,7 @@ async def test_run_asset_enrichment_legacy_provider_still_works(db: Database, tm
         ]
     )
     provider = MockProvider(fixed_result=fixed)
-    count = await run_asset_enrichment(
+    count = await run_asset_annotation(
         db,
         tmp_path,
         provider,

@@ -12,16 +12,20 @@ Configuration can be overridden via environment variables or CLI flags.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 # Known top-level keys for atlas.yml.  Unknown keys are rejected (fail-closed).
-_KNOWN_ATLAS_YML_KEYS = frozenset({"version", "sources", "team", "scan", "hooks", "enrichment"})
+# `enrichment` is kept as a deprecated alias for `learning`.
+_KNOWN_ATLAS_YML_KEYS = frozenset({"version", "sources", "team", "scan", "hooks", "learning", "enrichment"})
 
 # Keys whose values must be redacted in __repr__ output.
 _SECRET_PARAM_KEYS = frozenset({"dsn", "password", "api_key", "api_secret", "client_secret", "auth_token"})
+
+logger = logging.getLogger(__name__)
 
 
 def default_config_dir() -> Path:
@@ -38,18 +42,18 @@ def default_config_dir() -> Path:
 
 @dataclass
 class AgentConfig:
-    """Configuration for a single enrichment agent."""
+    """Configuration for a single learning agent."""
 
     provider: str = "anthropic"  # anthropic | openai | mock
-    model: str = "claude-sonnet-4-20250514"
+    model: str = "claude-opus-4-6-20250529"
     api_key_env: str = "ANTHROPIC_API_KEY"  # env var name containing the key
     timeout: int = 120
     max_tokens: int = 4096
 
 
 @dataclass
-class EnrichmentConfig:
-    """Configuration for the enrichment pipeline agents.
+class LearningConfig:
+    """Configuration for the learning pipeline agents.
 
     Supports two formats in ``atlas.yml``:
 
@@ -57,12 +61,12 @@ class EnrichmentConfig:
     to all three agents for backward compatibility.
 
     *Nested (per-agent)*: ``explorer``, ``pipeline_analyzer``, and
-    ``asset_enricher`` sub-sections each carry their own :class:`AgentConfig`.
+    ``annotator`` sub-sections each carry their own :class:`AgentConfig`.
     """
 
     # Flat fields — preserved for backward compatibility.
     provider: str = "mock"  # anthropic | openai | mock
-    model: str = "claude-sonnet-4-20250514"
+    model: str = "claude-opus-4-6-20250529"
     api_key_env: str = "ANTHROPIC_API_KEY"  # env var name containing the key
     timeout: int = 120
     max_tokens: int = 4096
@@ -78,9 +82,13 @@ class EnrichmentConfig:
     pipeline_analyzer: AgentConfig = field(
         default_factory=lambda: AgentConfig(provider="mock")
     )
-    asset_enricher: AgentConfig = field(
+    annotator: AgentConfig = field(
         default_factory=lambda: AgentConfig(provider="mock")
     )
+
+
+# Backward compatibility alias.
+EnrichmentConfig = LearningConfig
 
 
 @dataclass
@@ -121,7 +129,7 @@ class AtlasConfig:
     team_server_url: str | None = None
     team_api_key: str | None = None
     team_id: str | None = None
-    enrichment: EnrichmentConfig = field(default_factory=EnrichmentConfig)
+    learning: LearningConfig = field(default_factory=LearningConfig)
 
     def __post_init__(self) -> None:
         if self.db_path is None:
@@ -137,6 +145,11 @@ class AtlasConfig:
             f"team_api_key={api_key_repr!r}, "
             f"team_id={self.team_id!r})"
         )
+
+    @property
+    def enrichment(self) -> LearningConfig:
+        """Backward compatibility alias for ``learning``."""
+        return self.learning
 
     @property
     def sources_file(self) -> Path:
@@ -243,6 +256,9 @@ def load_atlas_yml(path: Path | str) -> AtlasConfig:
     Unknown top-level keys are rejected (fail-closed) to prevent silent
     misconfiguration caused by typos or unsupported options.
 
+    Supports both ``learning:`` (current) and ``enrichment:`` (deprecated alias).
+    When both are present, ``learning:`` takes precedence.
+
     Args:
         path: Path to the ``atlas.yml`` file.
 
@@ -307,35 +323,43 @@ def load_atlas_yml(path: Path | str) -> AtlasConfig:
         else:
             cfg.team_api_key = team.get("api_key")
 
-    # Parse enrichment settings.
-    enrichment = data.get("enrichment", {})
-    if enrichment:
-        _per_agent_keys = frozenset({"explorer", "pipeline_analyzer", "asset_enricher"})
-        has_nested = bool(set(enrichment) & _per_agent_keys)
+    # Parse learning/enrichment settings.
+    # `learning:` takes precedence; `enrichment:` is a deprecated alias.
+    learning_raw = data.get("learning") or data.get("enrichment", {})
+    if data.get("enrichment") and not data.get("learning"):
+        logger.warning(
+            "atlas.yml: 'enrichment:' key is deprecated. Rename it to 'learning:' to silence this warning."
+        )
+    if learning_raw:
+        _per_agent_keys = frozenset({"explorer", "pipeline_analyzer", "annotator", "asset_enricher"})
+        has_nested = bool(set(learning_raw) & _per_agent_keys)
 
         if has_nested:
             # Nested per-agent format: each sub-key is an AgentConfig.
             def _parse_agent(sub: dict) -> AgentConfig:
                 return AgentConfig(
                     provider=sub.get("provider", "anthropic"),
-                    model=sub.get("model", "claude-sonnet-4-20250514"),
+                    model=sub.get("model", "claude-opus-4-6-20250529"),
                     api_key_env=sub.get("api_key_env", "ANTHROPIC_API_KEY"),
                     timeout=int(sub.get("timeout", 120)),
                     max_tokens=int(sub.get("max_tokens", 4096)),
                 )
 
-            cfg.enrichment = EnrichmentConfig(
-                explorer=_parse_agent(enrichment.get("explorer", {})),
-                pipeline_analyzer=_parse_agent(enrichment.get("pipeline_analyzer", {})),
-                asset_enricher=_parse_agent(enrichment.get("asset_enricher", {})),
+            # Support both `annotator` and legacy `asset_enricher` keys in YAML.
+            annotator_raw = learning_raw.get("annotator") or learning_raw.get("asset_enricher", {})
+
+            cfg.learning = LearningConfig(
+                explorer=_parse_agent(learning_raw.get("explorer", {})),
+                pipeline_analyzer=_parse_agent(learning_raw.get("pipeline_analyzer", {})),
+                annotator=_parse_agent(annotator_raw),
             )
         else:
             # Flat (legacy) format: apply the same values to all agents.
-            flat_provider = enrichment.get("provider", "mock")
-            flat_model = enrichment.get("model", "claude-sonnet-4-20250514")
-            flat_api_key_env = enrichment.get("api_key_env", "ANTHROPIC_API_KEY")
-            flat_timeout = int(enrichment.get("timeout", 120))
-            flat_max_tokens = int(enrichment.get("max_tokens", 4096))
+            flat_provider = learning_raw.get("provider", "mock")
+            flat_model = learning_raw.get("model", "claude-opus-4-6-20250529")
+            flat_api_key_env = learning_raw.get("api_key_env", "ANTHROPIC_API_KEY")
+            flat_timeout = int(learning_raw.get("timeout", 120))
+            flat_max_tokens = int(learning_raw.get("max_tokens", 4096))
 
             def _flat_agent() -> AgentConfig:
                 return AgentConfig(
@@ -346,7 +370,7 @@ def load_atlas_yml(path: Path | str) -> AtlasConfig:
                     max_tokens=flat_max_tokens,
                 )
 
-            cfg.enrichment = EnrichmentConfig(
+            cfg.learning = LearningConfig(
                 provider=flat_provider,
                 model=flat_model,
                 api_key_env=flat_api_key_env,
@@ -354,7 +378,7 @@ def load_atlas_yml(path: Path | str) -> AtlasConfig:
                 max_tokens=flat_max_tokens,
                 explorer=_flat_agent(),
                 pipeline_analyzer=_flat_agent(),
-                asset_enricher=_flat_agent(),
+                annotator=_flat_agent(),
             )
 
     return cfg
