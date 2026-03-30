@@ -187,8 +187,8 @@ class TestRealE2EPipeline:
 
         # Cross-system edges should have been discovered (schema_match or dbt_source_ref)
         assert result.cross_system_edge_count > 0, (
-            f"Expected cross-system edges, got 0. "
-            f"This usually means schema/table names don't overlap between Postgres and dbt."
+            "Expected cross-system edges, got 0. "
+            "This usually means schema/table names don't overlap between Postgres and dbt."
         )
 
     def test_02_verify_cross_system_edges(self, atlas_cfg: AtlasConfig) -> None:

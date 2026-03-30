@@ -46,7 +46,6 @@ from alma_atlas_store.db import Database
 from alma_atlas_store.edge_repository import Edge, EdgeRepository
 from alma_atlas_store.schema_repository import ColumnInfo, SchemaRepository, SchemaSnapshot
 
-
 # ---------------------------------------------------------------------------
 # Realistic fixtures
 # ---------------------------------------------------------------------------
@@ -208,7 +207,7 @@ class SmartMockProvider(LLMProvider):
         self._repo_files = repo_files or []
 
     async def analyze(self, system_prompt: str, user_prompt: str, response_schema: type) -> Any:
-        from alma_atlas.agents.schemas import AnnotationResult, ExplorerResult, PipelineAnalysisResult
+        from alma_atlas.agents.schemas import ExplorerResult
 
         if issubclass(response_schema, ExplorerResult):
             return ExplorerResult(
@@ -540,7 +539,8 @@ class TestE2ELearningPipeline:
             assert edge_count == 2
             assert asset_count >= 2
 
-            remaining = get_unlearned_edges(db); assert all(e.kind != "schema_match" for e in remaining)
+            remaining = get_unlearned_edges(db)
+            assert all(e.kind != "schema_match" for e in remaining)
 
             ann_repo = AnnotationRepository(db)
             assert ann_repo.get("dbt:fintual::analytics.stg_users") is not None

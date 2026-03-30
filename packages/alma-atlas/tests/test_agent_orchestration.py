@@ -24,19 +24,16 @@ from alma_atlas.agents.schemas import (
     FileRelevance,
     PipelineAnalysisResult,
 )
-from alma_atlas.config import AgentConfig, AtlasConfig, LearningConfig, load_atlas_yml
+from alma_atlas.config import AgentConfig, LearningConfig, load_atlas_yml
 from alma_atlas.pipeline.learn import (
-    get_unannotated_assets,
-    get_unlearned_edges,
     run_asset_annotation,
     run_edge_learning,
 )
-from alma_atlas_store.annotation_repository import AnnotationRecord, AnnotationRepository
+from alma_atlas_store.annotation_repository import AnnotationRepository
 from alma_atlas_store.asset_repository import Asset, AssetRepository
 from alma_atlas_store.db import Database
 from alma_atlas_store.edge_repository import Edge, EdgeRepository
 from alma_atlas_store.schema_repository import ColumnInfo, SchemaRepository, SchemaSnapshot
-
 
 # ---------------------------------------------------------------------------
 # Helpers
