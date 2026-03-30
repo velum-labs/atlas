@@ -567,14 +567,13 @@ def test_provider_from_agent_config_with_agent_process_config_uses_acp() -> None
     assert provider._args == ["--model", "o3"]
 
 
-def test_provider_from_agent_config_without_agent_process_config_uses_legacy() -> None:
-    """AgentConfig without AgentProcessConfig must produce the configured legacy provider."""
-    from alma_atlas.agents.provider import AnthropicProvider
+def test_provider_from_agent_config_without_agent_process_config_raises() -> None:
+    """AgentConfig without AgentProcessConfig and a removed provider must raise ValueError."""
     from alma_atlas.pipeline.learn import _provider_from_agent_config
 
     cfg = AgentConfig(provider="anthropic", model="claude-opus-4-6", agent=None)
-    provider = _provider_from_agent_config(cfg)
-    assert isinstance(provider, AnthropicProvider)
+    with pytest.raises(ValueError, match="no longer supported"):
+        _provider_from_agent_config(cfg)
 
 
 def test_provider_from_agent_config_agent_overrides_provider_field() -> None:

@@ -1,18 +1,19 @@
 """Pluggable LLM provider backends for pipeline analysis.
 
 Providers implement the :class:`LLMProvider` interface and can be selected
-via Atlas configuration.  API keys are resolved from environment variables
-and are never stored in the Atlas database or logged.
+via Atlas configuration.
+
+Supported providers: ``acp`` (any ACP-compatible agent), ``mock`` (tests).
+The legacy ``anthropic`` and ``openai`` raw-HTTP providers have been removed.
+Use ``agent.command: claude-agent-acp`` in atlas.yml instead.
 """
 
 from __future__ import annotations
 
 import abc
 import logging
-import os
 from typing import TypeVar
 
-import httpx
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -43,135 +44,11 @@ class LLMProvider(abc.ABC):
         ...
 
     async def aclose(self) -> None:
-        """Release any held resources (e.g. HTTP connections).
+        """Release any held resources.
 
-        Subclasses that hold open HTTP clients should override this.
+        Subclasses that hold open resources should override this.
         """
         return  # default: nothing to release
-
-
-class AnthropicProvider(LLMProvider):
-    """Anthropic API provider — uses tool_use for schema-enforced structured output."""
-
-    _API_BASE = "https://api.anthropic.com"
-    _API_VERSION = "2023-06-01"
-
-    def __init__(
-        self,
-        *,
-        model: str = "claude-sonnet-4-20250514",
-        api_key: str | None = None,
-        timeout: float = 120.0,
-        max_tokens: int = 4096,
-    ) -> None:
-        resolved_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
-        self._model = model
-        self._max_tokens = max_tokens
-        # Tool use requires the `anthropic-beta` header on some API keys / model families.
-        # Without it the API may return a generic 400 error.
-        self._client = httpx.AsyncClient(
-            base_url=self._API_BASE,
-            headers={
-                "x-api-key": resolved_key,
-                "anthropic-version": self._API_VERSION,
-                # https://docs.anthropic.com/en/docs/build-with-claude/tool-use
-                "anthropic-beta": "tools-2024-04-04",
-                "content-type": "application/json",
-            },
-            timeout=timeout,
-        )
-
-    async def analyze(
-        self,
-        system_prompt: str,
-        user_prompt: str,
-        response_schema: type[T],
-    ) -> T:
-        schema = response_schema.model_json_schema()
-        payload: dict = {
-            "model": self._model,
-            "max_tokens": self._max_tokens,
-            "system": system_prompt,
-            "tools": [
-                {
-                    "name": "report",
-                    "description": "Report the pipeline analysis results.",
-                    "input_schema": schema,
-                }
-            ],
-            "tool_choice": {"type": "tool", "name": "report"},
-            "messages": [{"role": "user", "content": user_prompt}],
-        }
-        response = await self._client.post("/v1/messages", json=payload)
-        response.raise_for_status()
-        data: dict = response.json()
-        for block in data.get("content", []):
-            if block.get("type") == "tool_use" and block.get("name") == "report":
-                return response_schema.model_validate(block["input"])
-        raise ValueError(
-            f"No tool_use block named 'report' in Anthropic response: {data}"
-        )
-
-    async def aclose(self) -> None:
-        await self._client.aclose()
-
-
-class OpenAIProvider(LLMProvider):
-    """OpenAI API provider — uses structured outputs (json_schema response format)."""
-
-    _API_BASE = "https://api.openai.com"
-
-    def __init__(
-        self,
-        *,
-        model: str = "gpt-4o",
-        api_key: str | None = None,
-        timeout: float = 120.0,
-        max_tokens: int = 4096,
-    ) -> None:
-        resolved_key = api_key or os.environ.get("OPENAI_API_KEY", "")
-        self._model = model
-        self._max_tokens = max_tokens
-        self._client = httpx.AsyncClient(
-            base_url=self._API_BASE,
-            headers={
-                "Authorization": f"Bearer {resolved_key}",
-                "content-type": "application/json",
-            },
-            timeout=timeout,
-        )
-
-    async def analyze(
-        self,
-        system_prompt: str,
-        user_prompt: str,
-        response_schema: type[T],
-    ) -> T:
-        schema = response_schema.model_json_schema()
-        payload: dict = {
-            "model": self._model,
-            "max_tokens": self._max_tokens,
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "result",
-                    "strict": True,
-                    "schema": schema,
-                },
-            },
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        }
-        response = await self._client.post("/v1/chat/completions", json=payload)
-        response.raise_for_status()
-        data: dict = response.json()
-        content: str = data["choices"][0]["message"]["content"]
-        return response_schema.model_validate_json(content)
-
-    async def aclose(self) -> None:
-        await self._client.aclose()
 
 
 class MockProvider(LLMProvider):
@@ -235,13 +112,11 @@ def make_provider(
     """Instantiate an LLM provider by name.
 
     Args:
-        provider_name:  One of ``"anthropic"``, ``"openai"``, ``"acp"``, or
-                        ``"mock"``.
-        model:          Model identifier passed to the provider (unused for
-                        ``"acp"`` -- the agent binary controls model choice).
-        api_key:        Optional explicit API key (overrides env var lookup).
-        timeout:        HTTP timeout in seconds (Anthropic/OpenAI only).
-        max_tokens:     Maximum tokens to generate (Anthropic/OpenAI only).
+        provider_name:  One of ``"acp"`` or ``"mock"``.
+        model:          Unused -- the ACP agent binary controls model choice.
+        api_key:        Unused -- pass credentials via agent_env instead.
+        timeout:        Unused (kept for backward-compatible call sites).
+        max_tokens:     Unused (kept for backward-compatible call sites).
         agent_command:  ACP agent binary to spawn (``"acp"`` only).
         agent_args:     Extra CLI arguments for the ACP agent subprocess.
         agent_env:      Extra environment variables for the ACP agent subprocess.
@@ -251,21 +126,15 @@ def make_provider(
         A configured :class:`LLMProvider` instance.
 
     Raises:
-        ValueError: If *provider_name* is not recognised.
+        ValueError: If *provider_name* is not recognised or is a removed provider.
     """
-    if provider_name == "anthropic":
-        return AnthropicProvider(
-            model=model,
-            api_key=api_key,
-            timeout=timeout,
-            max_tokens=max_tokens,
-        )
-    if provider_name == "openai":
-        return OpenAIProvider(
-            model=model,
-            api_key=api_key,
-            timeout=timeout,
-            max_tokens=max_tokens,
+    if provider_name in ("anthropic", "openai"):
+        raise ValueError(
+            f"Provider {provider_name!r} is no longer supported. "
+            "Atlas now uses ACP agents exclusively. "
+            "Update your atlas.yml to use 'learning.agent.command: claude-agent-acp' "
+            "(or any other ACP-compatible binary). "
+            "See the migration guide for details."
         )
     if provider_name == "acp":
         from .acp_provider import ACPProvider
@@ -279,5 +148,5 @@ def make_provider(
     if provider_name == "mock":
         return MockProvider()
     raise ValueError(
-        f"Unknown provider: {provider_name!r}. Choose from: anthropic, openai, acp, mock"
+        f"Unknown provider: {provider_name!r}. Choose from: acp, mock"
     )

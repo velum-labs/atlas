@@ -216,18 +216,14 @@ def test_make_provider_unknown_raises() -> None:
         make_provider("unknown-llm", model="x")
 
 
-def test_make_provider_anthropic_creates_instance() -> None:
-    from alma_atlas.agents.provider import AnthropicProvider
-
-    p = make_provider("anthropic", model="claude-test", api_key="sk-test")
-    assert isinstance(p, AnthropicProvider)
+def test_make_provider_anthropic_raises() -> None:
+    with pytest.raises(ValueError, match="no longer supported"):
+        make_provider("anthropic", model="claude-test", api_key="sk-test")
 
 
-def test_make_provider_openai_creates_instance() -> None:
-    from alma_atlas.agents.provider import OpenAIProvider
-
-    p = make_provider("openai", model="gpt-4o", api_key="sk-test")
-    assert isinstance(p, OpenAIProvider)
+def test_make_provider_openai_raises() -> None:
+    with pytest.raises(ValueError, match="no longer supported"):
+        make_provider("openai", model="gpt-4o", api_key="sk-test")
 
 
 # ---------------------------------------------------------------------------
