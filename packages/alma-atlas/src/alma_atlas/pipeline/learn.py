@@ -58,12 +58,17 @@ def _provider_from_agent_config(agent_cfg: AgentConfig) -> LLMProvider:
     api_key: str | None = None
     if agent_cfg.api_key_env:
         api_key = os.environ.get(agent_cfg.api_key_env)
+
+    apc = agent_cfg.agent  # AgentProcessConfig or None
     return make_provider(
         agent_cfg.provider,
         model=agent_cfg.model,
         api_key=api_key,
         timeout=float(agent_cfg.timeout),
         max_tokens=agent_cfg.max_tokens,
+        agent_command=apc.command if apc else "claude-agent-acp",
+        agent_args=list(apc.args) if apc else None,
+        agent_env=dict(apc.env) if apc else None,
     )
 
 

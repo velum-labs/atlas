@@ -227,15 +227,25 @@ def make_provider(
     api_key: str | None = None,
     timeout: float = 120.0,
     max_tokens: int = 4096,
+    agent_command: str = "claude-agent-acp",
+    agent_args: list[str] | None = None,
+    agent_env: dict[str, str] | None = None,
+    agent_cwd: str | None = None,
 ) -> LLMProvider:
     """Instantiate an LLM provider by name.
 
     Args:
-        provider_name: One of ``"anthropic"``, ``"openai"``, or ``"mock"``.
-        model:         Model identifier passed to the provider.
-        api_key:       Optional explicit API key (overrides env var lookup).
-        timeout:       HTTP timeout in seconds.
-        max_tokens:    Maximum tokens to generate.
+        provider_name:  One of ``"anthropic"``, ``"openai"``, ``"acp"``, or
+                        ``"mock"``.
+        model:          Model identifier passed to the provider (unused for
+                        ``"acp"`` -- the agent binary controls model choice).
+        api_key:        Optional explicit API key (overrides env var lookup).
+        timeout:        HTTP timeout in seconds (Anthropic/OpenAI only).
+        max_tokens:     Maximum tokens to generate (Anthropic/OpenAI only).
+        agent_command:  ACP agent binary to spawn (``"acp"`` only).
+        agent_args:     Extra CLI arguments for the ACP agent subprocess.
+        agent_env:      Extra environment variables for the ACP agent subprocess.
+        agent_cwd:      Working directory for the ACP agent session.
 
     Returns:
         A configured :class:`LLMProvider` instance.
@@ -257,8 +267,17 @@ def make_provider(
             timeout=timeout,
             max_tokens=max_tokens,
         )
+    if provider_name == "acp":
+        from .acp_provider import ACPProvider
+
+        return ACPProvider(
+            command=agent_command,
+            args=agent_args,
+            env=agent_env,
+            cwd=agent_cwd,
+        )
     if provider_name == "mock":
         return MockProvider()
     raise ValueError(
-        f"Unknown provider: {provider_name!r}. Choose from: anthropic, openai, mock"
+        f"Unknown provider: {provider_name!r}. Choose from: anthropic, openai, acp, mock"
     )
