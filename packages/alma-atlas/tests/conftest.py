@@ -14,8 +14,8 @@ def pytest_configure(config: pytest.Config) -> None:
         "real_e2e: marks tests that hit real external services (Postgres + Anthropic API)",
     )
 
-from alma_atlas.config import AtlasConfig, SourceConfig
-from alma_atlas_store.db import Database
+from alma_atlas.config import AtlasConfig, SourceConfig  # noqa: E402
+from alma_atlas_store.db import Database  # noqa: E402
 
 
 @pytest.fixture

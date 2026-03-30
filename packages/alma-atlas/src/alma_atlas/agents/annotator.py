@@ -99,10 +99,7 @@ async def analyze_assets(
     if not assets:
         return []
 
-    if pre_filtered_files is not None:
-        repo_files = pre_filtered_files
-    else:
-        repo_files = _collect_repo_files(repo_path)
+    repo_files = pre_filtered_files if pre_filtered_files is not None else _collect_repo_files(repo_path)
     logger.debug(
         "annotator: %d asset(s), %d repo file(s) from %s",
         len(assets),

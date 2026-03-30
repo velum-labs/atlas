@@ -68,3 +68,4 @@ asyncio_mode = "auto"
 testpaths = ["packages"]
 python_files = ["test_*.py", "*_test.py"]
 addopts = ["--import-mode=importlib"]
+markers = ["real_e2e: marks tests that hit real external services (Postgres + Anthropic API)"]
