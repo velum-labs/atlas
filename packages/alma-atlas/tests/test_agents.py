@@ -4,7 +4,7 @@ Covers:
 - Schema validation (EdgeEnrichment, PipelineAnalysisResult)
 - MockProvider behaviour
 - Pipeline analyzer prompt construction
-- Enrichment orchestrator (get_unenriched_edges, run_enrichment)
+- Enrichment orchestrator (get_unlearned_edges, run_edge_learning)
 - CLI dry-run
 - Config parsing for the enrichment section
 """
@@ -24,13 +24,13 @@ from alma_atlas.agents.pipeline_analyzer import (
     analyze_edges,
 )
 from alma_atlas.agents.provider import MockProvider, make_provider
-from alma_atlas.agents.schemas import AssetAnnotation, AssetEnrichmentResult, EdgeEnrichment, PipelineAnalysisResult
-from alma_atlas.config import AtlasConfig, EnrichmentConfig, load_atlas_yml
-from alma_atlas.pipeline.enrich import (
+from alma_atlas.agents.schemas import AnnotationResult, AssetAnnotation, EdgeEnrichment, PipelineAnalysisResult
+from alma_atlas.config import AtlasConfig, LearningConfig, load_atlas_yml
+from alma_atlas.pipeline.learn import (
     get_unannotated_assets,
-    get_unenriched_edges,
-    run_asset_enrichment,
-    run_enrichment,
+    get_unlearned_edges,
+    run_asset_annotation,
+    run_edge_learning,
 )
 from alma_atlas_store.annotation_repository import AnnotationRecord, AnnotationRepository
 from alma_atlas_store.asset_repository import Asset, AssetRepository
@@ -171,8 +171,8 @@ async def test_mock_provider_returns_empty_result() -> None:
 
 async def test_mock_provider_returns_empty_asset_enrichment_result() -> None:
     provider = MockProvider()
-    result = await provider.analyze("sys", "usr", AssetEnrichmentResult)
-    assert isinstance(result, AssetEnrichmentResult)
+    result = await provider.analyze("sys", "usr", AnnotationResult)
+    assert isinstance(result, AnnotationResult)
     assert result.annotations == []
     assert result.repo_summary == "Mock provider: no enrichment performed"
 
@@ -327,50 +327,50 @@ async def test_analyze_edges_provider_failure_returns_empty(tmp_path: Path) -> N
 
 
 # ---------------------------------------------------------------------------
-# Enrichment orchestrator — get_unenriched_edges
+# Enrichment orchestrator — get_unlearned_edges
 # ---------------------------------------------------------------------------
 
 
-def test_get_unenriched_edges_returns_unenriched(db: Database) -> None:
+def test_get_unlearned_edges_returns_unenriched(db: Database) -> None:
     _seed_edge(db, _make_edge("src::raw.users", "dst::stg.users", kind="schema_match"))
-    _seed_edge(db, _make_edge("a::x.y", "b::x.y", kind="dbt_source_ref"))
-    unenriched = get_unenriched_edges(db)
+    _seed_edge(db, _make_edge("a::raw.orders", "b::stg.orders", kind="dbt_source_ref"))
+    unenriched = get_unlearned_edges(db)
     assert len(unenriched) == 2
 
 
-def test_get_unenriched_edges_skips_already_enriched(db: Database) -> None:
+def test_get_unlearned_edges_skips_already_enriched(db: Database) -> None:
     _seed_edge(
         db,
         _make_edge(
             "src::raw.users",
             "dst::stg.users",
             kind="schema_match",
-            metadata={"enrichment_status": "enriched"},
+            metadata={"learning_status": "learned"},
         ),
     )
-    assert get_unenriched_edges(db) == []
+    assert get_unlearned_edges(db) == []
 
 
-def test_get_unenriched_edges_skips_other_kinds(db: Database) -> None:
+def test_get_unlearned_edges_skips_other_kinds(db: Database) -> None:
     _seed_edge(db, _make_edge("a::x.y", "b::x.y", kind="reads"))
-    assert get_unenriched_edges(db) == []
+    assert get_unlearned_edges(db) == []
 
 
-def test_get_unenriched_edges_mixed(db: Database) -> None:
-    _seed_edge(db, _make_edge("a::x.y", "b::x.y", kind="schema_match"))
-    _seed_edge(db, _make_edge("c::x.y", "d::x.y", kind="schema_match", metadata={"enrichment_status": "enriched"}))
+def test_get_unlearned_edges_mixed(db: Database) -> None:
+    _seed_edge(db, _make_edge("a::raw.users", "b::stg.users", kind="schema_match"))
+    _seed_edge(db, _make_edge("c::raw.orders", "d::stg.orders", kind="schema_match", metadata={"learning_status": "learned"}))
     _seed_edge(db, _make_edge("e::x.y", "f::x.y", kind="reads"))
-    unenriched = get_unenriched_edges(db)
+    unenriched = get_unlearned_edges(db)
     assert len(unenriched) == 1
-    assert unenriched[0].upstream_id == "a::x.y"
+    assert unenriched[0].upstream_id == "a::raw.users"
 
 
 # ---------------------------------------------------------------------------
-# Enrichment orchestrator — run_enrichment
+# Enrichment orchestrator — run_edge_learning
 # ---------------------------------------------------------------------------
 
 
-async def test_run_enrichment_persists_enrichment(db: Database, tmp_path: Path) -> None:
+async def test_run_edge_learning_persists_enrichment(db: Database, tmp_path: Path) -> None:
     _seed_edge(db, _make_edge("src::raw.users", "dst::staging.stg_users", kind="schema_match"))
 
     fixed = PipelineAnalysisResult(
@@ -386,47 +386,47 @@ async def test_run_enrichment_persists_enrichment(db: Database, tmp_path: Path) 
         ]
     )
     provider = MockProvider(fixed_result=fixed)
-    count = await run_enrichment(db, tmp_path, provider)
+    count = await run_edge_learning(db, tmp_path, provider)
 
     assert count == 1
     edges = EdgeRepository(db).list_all()
     assert len(edges) == 1
     meta = edges[0].metadata
-    assert meta["enrichment_status"] == "enriched"
+    assert meta["learning_status"] == "learned"
     assert meta["transport_kind"] == "CUSTOM_SCRIPT"
     assert meta["strategy"] == "INCREMENTAL"
 
 
-async def test_run_enrichment_no_edges_returns_zero(db: Database, tmp_path: Path) -> None:
+async def test_run_edge_learning_no_edges_returns_zero(db: Database, tmp_path: Path) -> None:
     provider = MockProvider()
-    count = await run_enrichment(db, tmp_path, provider)
+    count = await run_edge_learning(db, tmp_path, provider)
     assert count == 0
 
 
-async def test_run_enrichment_already_enriched_skipped(db: Database, tmp_path: Path) -> None:
+async def test_run_edge_learning_already_enriched_skipped(db: Database, tmp_path: Path) -> None:
     _seed_edge(
         db,
         _make_edge(
             "src::raw.users",
             "dst::stg.users",
             kind="schema_match",
-            metadata={"enrichment_status": "enriched"},
+            metadata={"learning_status": "learned"},
         ),
     )
     provider = MockProvider()
-    count = await run_enrichment(db, tmp_path, provider)
+    count = await run_edge_learning(db, tmp_path, provider)
     assert count == 0
 
 
-async def test_run_enrichment_unmatched_edge_not_updated(db: Database, tmp_path: Path) -> None:
+async def test_run_edge_learning_unmatched_edge_not_updated(db: Database, tmp_path: Path) -> None:
     """If agent returns no match for an edge, it remains unenriched."""
     _seed_edge(db, _make_edge("src::raw.orders", "dst::staging.stg_orders", kind="schema_match"))
     # MockProvider returns empty edges list — no match
     provider = MockProvider()
-    count = await run_enrichment(db, tmp_path, provider)
+    count = await run_edge_learning(db, tmp_path, provider)
     assert count == 0
     edges = EdgeRepository(db).list_all()
-    assert edges[0].metadata.get("enrichment_status") != "enriched"
+    assert edges[0].metadata.get("learning_status") != "learned"
 
 
 # ---------------------------------------------------------------------------
@@ -453,7 +453,7 @@ async def test_get_unannotated_assets_returns_assets_without_annotations(db: Dat
     assert "pg::public.orders" not in unannotated
 
 
-async def test_run_asset_enrichment_persists_annotations(db: Database, tmp_path: Path) -> None:
+async def test_run_asset_annotation_persists_annotations(db: Database, tmp_path: Path) -> None:
     # Seed one asset + schema
     asset_id = "pg::public.orders"
     AssetRepository(db).upsert(Asset(id=asset_id, source="pg:test", kind="table", name="public.orders"))
@@ -464,7 +464,7 @@ async def test_run_asset_enrichment_persists_annotations(db: Database, tmp_path:
         )
     )
 
-    fixed = AssetEnrichmentResult(
+    fixed = AnnotationResult(
         annotations=[
             AssetAnnotation(
                 asset_id=asset_id,
@@ -480,7 +480,7 @@ async def test_run_asset_enrichment_persists_annotations(db: Database, tmp_path:
     )
     provider = MockProvider(fixed_result=fixed)
 
-    count = await run_asset_enrichment(
+    count = await run_asset_annotation(
         db,
         tmp_path,
         provider,
@@ -509,9 +509,9 @@ def test_cli_enrich_help() -> None:
     from alma_atlas.cli.main import app
 
     runner = CliRunner()
-    result = runner.invoke(app, ["enrich", "--help"])
+    result = runner.invoke(app, ["learn", "--help"])
     assert result.exit_code == 0
-    assert "enrich" in result.output.lower() or "Enrich" in result.output
+    assert "learn" in result.output.lower()
 
 
 def test_cli_enrich_dry_run_no_edges(tmp_path: Path) -> None:
@@ -527,11 +527,11 @@ def test_cli_enrich_dry_run_no_edges(tmp_path: Path) -> None:
     cfg = AtlasConfig(config_dir=tmp_path, db_path=db_path)
 
     runner = CliRunner()
-    with patch("alma_atlas.cli.enrich.get_config", return_value=cfg):
-        result = runner.invoke(app, ["enrich", "--dry-run"])
+    with patch("alma_atlas.cli.learn.get_config", return_value=cfg):
+        result = runner.invoke(app, ["learn", "--dry-run"])
 
     assert result.exit_code == 0
-    assert "No unenriched edges" in result.output
+    assert "No unlearned edges" in result.output
 
 
 def test_cli_enrich_assets_dry_run_no_assets(tmp_path: Path) -> None:
@@ -546,8 +546,8 @@ def test_cli_enrich_assets_dry_run_no_assets(tmp_path: Path) -> None:
     cfg = AtlasConfig(config_dir=tmp_path, db_path=db_path)
 
     runner = CliRunner()
-    with patch("alma_atlas.cli.enrich.get_config", return_value=cfg):
-        result = runner.invoke(app, ["enrich", "--assets", "--dry-run"])
+    with patch("alma_atlas.cli.learn.get_config", return_value=cfg):
+        result = runner.invoke(app, ["learn", "--assets", "--dry-run"])
 
     assert result.exit_code == 0
     assert "No unannotated assets" in result.output
@@ -565,8 +565,8 @@ def test_cli_enrich_assets_dry_run_shows_assets(tmp_path: Path) -> None:
     cfg = AtlasConfig(config_dir=tmp_path, db_path=db_path)
 
     runner = CliRunner()
-    with patch("alma_atlas.cli.enrich.get_config", return_value=cfg):
-        result = runner.invoke(app, ["enrich", "--assets", "--dry-run"])
+    with patch("alma_atlas.cli.learn.get_config", return_value=cfg):
+        result = runner.invoke(app, ["learn", "--assets", "--dry-run"])
 
     assert result.exit_code == 0
     assert "pg::public.orders" in result.output
@@ -584,8 +584,8 @@ def test_cli_enrich_dry_run_shows_edges(tmp_path: Path) -> None:
     cfg = AtlasConfig(config_dir=tmp_path, db_path=db_path)
 
     runner = CliRunner()
-    with patch("alma_atlas.cli.enrich.get_config", return_value=cfg):
-        result = runner.invoke(app, ["enrich", "--dry-run"])
+    with patch("alma_atlas.cli.learn.get_config", return_value=cfg):
+        result = runner.invoke(app, ["learn", "--dry-run"])
 
     assert result.exit_code == 0
     assert "raw.users" in result.output or "src::raw.users" in result.output
@@ -604,8 +604,8 @@ def test_cli_enrich_no_repo_exits_nonzero(tmp_path: Path) -> None:
     cfg = AtlasConfig(config_dir=tmp_path, db_path=db_path)
 
     runner = CliRunner()
-    with patch("alma_atlas.cli.enrich.get_config", return_value=cfg):
-        result = runner.invoke(app, ["enrich"])
+    with patch("alma_atlas.cli.learn.get_config", return_value=cfg):
+        result = runner.invoke(app, ["learn"])
 
     assert result.exit_code != 0
 
@@ -616,9 +616,9 @@ def test_cli_enrich_no_repo_exits_nonzero(tmp_path: Path) -> None:
 
 
 def test_enrichment_config_defaults() -> None:
-    cfg = EnrichmentConfig()
+    cfg = LearningConfig()
     assert cfg.provider == "mock"
-    assert cfg.model == "claude-sonnet-4-20250514"
+    assert cfg.model == "claude-opus-4-6-20250529"
     assert cfg.api_key_env == "ANTHROPIC_API_KEY"
     assert cfg.timeout == 120
     assert cfg.max_tokens == 4096
@@ -626,8 +626,8 @@ def test_enrichment_config_defaults() -> None:
 
 def test_atlas_config_has_default_enrichment() -> None:
     cfg = AtlasConfig()
-    assert isinstance(cfg.enrichment, EnrichmentConfig)
-    assert cfg.enrichment.provider == "mock"
+    assert isinstance(cfg.learning, LearningConfig)
+    assert cfg.learning.provider == "mock"
 
 
 def test_load_atlas_yml_enrichment_section(tmp_path: Path) -> None:
@@ -635,7 +635,7 @@ def test_load_atlas_yml_enrichment_section(tmp_path: Path) -> None:
     yml.write_text(
         textwrap.dedent("""\
         version: 1
-        enrichment:
+        learning:
           provider: anthropic
           model: claude-opus-4-6
           api_key_env: MY_ANTHROPIC_KEY
@@ -644,18 +644,18 @@ def test_load_atlas_yml_enrichment_section(tmp_path: Path) -> None:
         """)
     )
     cfg = load_atlas_yml(yml)
-    assert cfg.enrichment.provider == "anthropic"
-    assert cfg.enrichment.model == "claude-opus-4-6"
-    assert cfg.enrichment.api_key_env == "MY_ANTHROPIC_KEY"
-    assert cfg.enrichment.timeout == 60
-    assert cfg.enrichment.max_tokens == 2048
+    assert cfg.learning.provider == "anthropic"
+    assert cfg.learning.model == "claude-opus-4-6"
+    assert cfg.learning.api_key_env == "MY_ANTHROPIC_KEY"
+    assert cfg.learning.timeout == 60
+    assert cfg.learning.max_tokens == 2048
 
 
 def test_load_atlas_yml_enrichment_defaults_when_absent(tmp_path: Path) -> None:
     yml = tmp_path / "atlas.yml"
     yml.write_text("version: 1\n")
     cfg = load_atlas_yml(yml)
-    assert cfg.enrichment.provider == "mock"
+    assert cfg.learning.provider == "mock"
 
 
 def test_load_atlas_yml_unknown_enrichment_key_not_rejected(tmp_path: Path) -> None:
@@ -664,11 +664,11 @@ def test_load_atlas_yml_unknown_enrichment_key_not_rejected(tmp_path: Path) -> N
     yml.write_text(
         textwrap.dedent("""\
         version: 1
-        enrichment:
+        learning:
           provider: mock
           unknown_future_key: value
         """)
     )
     # Should not raise
     cfg = load_atlas_yml(yml)
-    assert cfg.enrichment.provider == "mock"
+    assert cfg.learning.provider == "mock"

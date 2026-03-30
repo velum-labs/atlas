@@ -34,13 +34,13 @@ from pathlib import Path
 
 import pytest
 
-from alma_atlas.config import AgentConfig, AtlasConfig, EnrichmentConfig, SourceConfig
+from alma_atlas.config import AgentConfig, AtlasConfig, LearningConfig, SourceConfig
 from alma_atlas.mcp.tools import _handle_get_annotations, _handle_lineage, _handle_status
-from alma_atlas.pipeline.enrich import (
+from alma_atlas.pipeline.learn import (
     get_unannotated_assets,
-    get_unenriched_edges,
-    run_asset_enrichment,
-    run_enrichment,
+    get_unlearned_edges,
+    run_asset_annotation,
+    run_edge_learning,
 )
 from alma_atlas.pipeline.scan import run_scan_all
 from alma_atlas_store.annotation_repository import AnnotationRepository
@@ -83,7 +83,7 @@ def atlas_cfg(tmp_path_factory: pytest.TempPathFactory) -> AtlasConfig:
     cfg = AtlasConfig(
         config_dir=tmp / "alma",
         db_path=tmp / "atlas.db",
-        enrichment=EnrichmentConfig(
+        learning=LearningConfig(
             provider="anthropic",
             explorer=AgentConfig(
                 provider="anthropic",
@@ -95,7 +95,7 @@ def atlas_cfg(tmp_path_factory: pytest.TempPathFactory) -> AtlasConfig:
                 model=SONNET_MODEL,
                 api_key_env="ANTHROPIC_API_KEY",
             ),
-            asset_enricher=AgentConfig(
+            annotator=AgentConfig(
                 provider="anthropic",
                 model=SONNET_MODEL,
                 api_key_env="ANTHROPIC_API_KEY",
@@ -218,7 +218,7 @@ class TestRealE2EPipeline:
         if not api_key:
             pytest.skip("ANTHROPIC_API_KEY not set — skipping real LLM test")
 
-        unenriched_before = get_unenriched_edges(open_db(atlas_cfg))
+        unenriched_before = get_unlearned_edges(open_db(atlas_cfg))
         if not unenriched_before:
             pytest.skip("No unenriched edges found — scan may have failed")
 
@@ -226,7 +226,7 @@ class TestRealE2EPipeline:
 
         with open_db(atlas_cfg) as db:
             enriched_count = asyncio.run(
-                run_enrichment(db, PIPELINE_REPO, config=atlas_cfg.enrichment)
+                run_edge_learning(db, PIPELINE_REPO, config=atlas_cfg.learning)
             )
 
         logger.info("Edge enrichment complete: %d edges enriched", enriched_count)
@@ -239,7 +239,7 @@ class TestRealE2EPipeline:
         with open_db(atlas_cfg) as db:
             edges = EdgeRepository(db).list_all()
 
-        enriched_edges = [e for e in edges if e.metadata.get("enrichment_status") == "enriched"]
+        enriched_edges = [e for e in edges if e.metadata.get("learning_status") == "learned"]
         if not enriched_edges:
             pytest.skip("No edges were enriched (agent found no evidence in pipeline code)")
 
@@ -250,7 +250,7 @@ class TestRealE2EPipeline:
             assert meta["transport_kind"], f"Empty transport_kind in edge {edge.upstream_id} → {edge.downstream_id}"
             # strategy and schedule fields should be present (may be null/UNKNOWN)
             assert "strategy" in meta, f"Missing strategy in edge {edge.upstream_id} → {edge.downstream_id}"
-            assert "enrichment_status" in meta
+            assert "learning_status" in meta
 
         logger.info(
             "Verified %d enriched edges. Sample: transport_kind=%s, schedule=%s, strategy=%s",
@@ -272,7 +272,7 @@ class TestRealE2EPipeline:
 
         with open_db(atlas_cfg) as db:
             second_count = asyncio.run(
-                run_enrichment(db, PIPELINE_REPO, config=atlas_cfg.enrichment)
+                run_edge_learning(db, PIPELINE_REPO, config=atlas_cfg.learning)
             )
 
         assert second_count == 0, (
@@ -284,7 +284,7 @@ class TestRealE2EPipeline:
     # Phase 4: Asset enrichment
     # ------------------------------------------------------------------
 
-    def test_06_run_asset_enrichment(self, atlas_cfg: AtlasConfig) -> None:
+    def test_06_run_asset_annotation(self, atlas_cfg: AtlasConfig) -> None:
         """Run asset enrichment with real Anthropic API."""
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
@@ -297,10 +297,10 @@ class TestRealE2EPipeline:
 
         with open_db(atlas_cfg) as db:
             annotated_count = asyncio.run(
-                run_asset_enrichment(
+                run_asset_annotation(
                     db,
                     PIPELINE_REPO,
-                    config=atlas_cfg.enrichment,
+                    config=atlas_cfg.learning,
                     limit=20,  # cap to keep test fast
                     batch_size=10,
                 )

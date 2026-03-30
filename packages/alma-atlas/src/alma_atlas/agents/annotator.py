@@ -1,6 +1,6 @@
-"""Asset enricher — scans a code repository and produces per-asset annotations.
+"""Annotator agent — scans a code repository and produces per-asset annotations.
 
-This is the P2 "Codex enrichment" layer: given a set of asset IDs and their
+This is the P2 "Codex learning" layer: given a set of asset IDs and their
 current schema/lineage context, ask the configured LLM provider to infer
 supplementary business metadata:
 
@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from alma_atlas.agents.repo_scanner import collect_repo_files as _collect_repo_files
-from alma_atlas.agents.schemas import AssetAnnotation, AssetEnrichmentResult
+from alma_atlas.agents.schemas import AnnotationResult, AssetAnnotation
 
 if TYPE_CHECKING:
     from alma_atlas.agents.provider import LLMProvider
@@ -104,7 +104,7 @@ async def analyze_assets(
     else:
         repo_files = _collect_repo_files(repo_path)
     logger.debug(
-        "asset_enricher: %d asset(s), %d repo file(s) from %s",
+        "annotator: %d asset(s), %d repo file(s) from %s",
         len(assets),
         len(repo_files),
         repo_path,
@@ -112,13 +112,13 @@ async def analyze_assets(
 
     user_prompt = _build_user_prompt(assets, repo_files, repo_path)
     try:
-        result: AssetEnrichmentResult = await provider.analyze(
+        result: AnnotationResult = await provider.analyze(
             _SYSTEM_PROMPT,
             user_prompt,
-            AssetEnrichmentResult,
+            AnnotationResult,
         )
     except Exception as exc:
-        logger.warning("asset_enricher: LLM call failed: %s", exc)
+        logger.warning("annotator: LLM call failed: %s", exc)
         return []
 
     return result.annotations
