@@ -558,10 +558,15 @@ def _build_adapter(source: SourceConfig):  # type: ignore[return]
                 reference=source.params.get("dsn_env", "PG_DATABASE_URL"),
             )
 
-        # Pass through schema filter if provided
-        include_schemas = (
-            (source.params["schema"],) if "schema" in source.params else ("public",)
-        )
+        # Pass through schema filter if provided.
+        # Accept plural ``include_schemas`` (list/tuple) or singular ``schema`` string.
+        if "include_schemas" in source.params:
+            raw_schemas = source.params["include_schemas"]
+            include_schemas = tuple(raw_schemas) if isinstance(raw_schemas, (list, tuple)) else (raw_schemas,)
+        elif "schema" in source.params:
+            include_schemas = (source.params["schema"],)
+        else:
+            include_schemas = ("public",)
 
         config = PostgresAdapterConfig(
             database_secret=db_secret,
