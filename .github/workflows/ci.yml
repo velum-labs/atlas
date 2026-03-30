@@ -38,7 +38,7 @@ jobs:
         continue-on-error: true
 
       - name: Test
-        run: uv run pytest packages/ -q --tb=short
+        run: uv run pytest packages/ -q --tb=short -m "not real_e2e"
 
       - name: Build all packages
         run: uv build --all
