@@ -365,6 +365,20 @@ def test_get_unlearned_edges_mixed(db: Database) -> None:
     assert unenriched[0].upstream_id == "a::raw.users"
 
 
+def test_get_unlearned_edges_cross_system_same_table(db: Database) -> None:
+    """Cross-system edges with identical schema.table ARE learnable — different source systems."""
+    _seed_edge(db, _make_edge("pg::raw.users", "dbt::raw.users", kind="schema_match"))
+    _seed_edge(db, _make_edge("pg::raw.orders", "dbt::raw.orders", kind="dbt_source_ref"))
+    unenriched = get_unlearned_edges(db)
+    assert len(unenriched) == 2
+
+
+def test_get_unlearned_edges_skips_same_system_self_loop(db: Database) -> None:
+    """True self-loops within the same source system are skipped."""
+    _seed_edge(db, _make_edge("pg::raw.users", "pg::raw.users", kind="schema_match"))
+    assert get_unlearned_edges(db) == []
+
+
 # ---------------------------------------------------------------------------
 # Enrichment orchestrator — run_edge_learning
 # ---------------------------------------------------------------------------

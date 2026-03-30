@@ -33,26 +33,31 @@ _SYSTEM_PROMPT = """\
 You are an expert data engineer analyzing a code repository to understand how data \
 moves between systems.
 
-Your task is to examine the provided code files and infer the transport metadata for \
-each cross-system data edge listed below.
+You will be given a numbered list of edge pairs to analyze.
 
-For each edge you can identify, report:
-- source_table: the upstream asset name (schema.table format)
-- dest_table: the downstream asset name (schema.table format)
+Your task:
+- Return transport metadata for EACH provided edge pair.
+- The output MUST contain exactly one EdgeEnrichment per input edge pair (1:1), 
+  in the same order as listed.
+
+For each edge, report:
+- source_table: MUST equal the provided expected_source_table (schema.table)
+- dest_table: MUST equal the provided expected_dest_table (schema.table)
 - transport_kind: how data physically moves — one of CUSTOM_SCRIPT, AIRBYTE, \
-FIVETRAN, CDC, CLOUD_TRANSFER, DBT_SEED, UNKNOWN
+  FIVETRAN, CDC, CLOUD_TRANSFER, DBT_SEED, UNKNOWN
 - schedule: cron expression or plain-English description if found, else null
 - strategy: copy strategy — one of FULL, INCREMENTAL, CDC, APPEND_ONLY, UNKNOWN
 - write_disposition: what happens at the destination — one of TRUNCATE, APPEND, \
-MERGE, UNKNOWN
+  MERGE, UNKNOWN
 - watermark_column: column used for incremental loads if found, else null
 - owner: DAG owner, script author, or team name if identifiable, else null
-- confidence_note: one or two sentences explaining your reasoning
+- confidence_note: one or two sentences explaining what evidence you found; if no 
+  evidence, say so explicitly.
 
 Rules:
-- Use UNKNOWN for any value you cannot determine from the provided code.
-- Only report edges for which you find concrete evidence in the files.
-- Do not fabricate values or guess beyond what the code shows.
+- Do NOT invent additional edges beyond the provided list.
+- Use UNKNOWN when the code does not provide evidence.
+- Do not guess beyond what the code shows.
 - Agents are READ-ONLY: never suggest modifying the repository.\
 """
 
@@ -65,10 +70,14 @@ def _build_user_prompt(
     """Compose the user-facing portion of the LLM prompt."""
     parts: list[str] = ["## Edge pairs to analyze\n"]
     for i, edge in enumerate(edges, 1):
+        expected_source = edge.upstream_id.split("::", 1)[-1]
+        expected_dest = edge.downstream_id.split("::", 1)[-1]
         parts.append(
-            f"{i}. upstream: {edge.upstream_id}"
-            f"  →  downstream: {edge.downstream_id}"
-            f"  (edge kind: {edge.kind})"
+            f"{i}. upstream_id: {edge.upstream_id}"
+            f"  →  downstream_id: {edge.downstream_id}"
+            f"  (edge kind: {edge.kind})\n"
+            f"   expected_source_table: {expected_source}\n"
+            f"   expected_dest_table: {expected_dest}"
         )
 
     parts.append("\n## Repository files\n")

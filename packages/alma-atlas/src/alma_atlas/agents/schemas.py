@@ -27,7 +27,7 @@ class EdgeEnrichment(BaseModel):
 class PipelineAnalysisResult(BaseModel):
     """Full result returned by the pipeline analysis agent for a batch of edges."""
 
-    edges: list[EdgeEnrichment]
+    edges: list[EdgeEnrichment] = []
     repo_summary: str | None = None
 
 

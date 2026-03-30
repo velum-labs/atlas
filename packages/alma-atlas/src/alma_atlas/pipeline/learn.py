@@ -85,8 +85,14 @@ def get_unlearned_edges(db: Database) -> list[Edge]:
         e
         for e in repo.list_all()
         if e.kind in _LEARNABLE_KINDS
-        # Skip identity edges like pg::raw.users -> dbt::raw.users; there's no "transport" to infer.
-        and e.upstream_id.split("::", 1)[-1] != e.downstream_id.split("::", 1)[-1]
+        # Cross-system edges (schema_match, dbt_source_ref) are ALWAYS learnable even when
+        # schema.table matches — they represent real data flow between different systems
+        # (e.g. pg::raw.users → dbt::raw.users = "how does raw data get loaded?").
+        # Only skip true self-loops within the same source system.
+        and not (
+            e.upstream_id.split("::", 1)[0] == e.downstream_id.split("::", 1)[0]
+            and e.upstream_id.split("::", 1)[-1] == e.downstream_id.split("::", 1)[-1]
+        )
         and e.metadata.get("learning_status") != "learned"
     ]
 
@@ -147,18 +153,49 @@ async def run_edge_learning(
         explorer_provider = _provider_from_agent_config(config.explorer)
         analyzer_provider = _provider_from_agent_config(config.pipeline_analyzer)
 
-        pre_filtered = await explore_for_edges(unlearned, repo_path, explorer_provider)
-        logger.debug(
-            "run_edge_learning: explorer pre-filtered %d file(s)",
-            len(pre_filtered),
-        )
+        # Deduplicate edges by (upstream_table, downstream_table) — schema_match and
+        # dbt_source_ref for the same pair are redundant for learning purposes.
+        seen_pairs: set[tuple[str, str]] = set()
+        deduped: list[Edge] = []
+        for e in unlearned:
+            pair = (_object_part(e.upstream_id), _object_part(e.downstream_id))
+            if pair not in seen_pairs:
+                seen_pairs.add(pair)
+                deduped.append(e)
 
-        enrichments = await analyze_edges(
-            unlearned,
-            repo_path,
-            analyzer_provider,
-            pre_filtered_files=pre_filtered,
-        )
+        if len(deduped) < len(unlearned):
+            logger.info(
+                "run_edge_learning: deduplicated %d → %d edges for agent",
+                len(unlearned),
+                len(deduped),
+            )
+
+        # Batch edges to avoid overwhelming the LLM.  Large batches (>10 edges)
+        # cause Opus to return empty results or malformed responses.
+        _EDGE_BATCH_SIZE = 10
+        enrichments: list = []
+        for batch_start in range(0, len(deduped), _EDGE_BATCH_SIZE):
+            batch = deduped[batch_start : batch_start + _EDGE_BATCH_SIZE]
+            logger.info(
+                "run_edge_learning: batch %d/%d (%d edges)",
+                batch_start // _EDGE_BATCH_SIZE + 1,
+                (len(deduped) + _EDGE_BATCH_SIZE - 1) // _EDGE_BATCH_SIZE,
+                len(batch),
+            )
+
+            pre_filtered = await explore_for_edges(batch, repo_path, explorer_provider)
+            logger.debug(
+                "run_edge_learning: explorer pre-filtered %d file(s)",
+                len(pre_filtered),
+            )
+
+            batch_enrichments = await analyze_edges(
+                batch,
+                repo_path,
+                analyzer_provider,
+                pre_filtered_files=pre_filtered,
+            )
+            enrichments.extend(batch_enrichments)
     elif provider is not None:
         # Legacy single-provider path.
         enrichments = await analyze_edges(unlearned, repo_path, provider)
@@ -169,9 +206,11 @@ async def run_edge_learning(
         logger.info("run_edge_learning: agent returned no results")
         return 0
 
-    # Index enrichments by (source_table, dest_table) for O(1) lookup.
+    # Index enrichments by (schema.table, schema.table) for O(1) lookup.
+    # Be forgiving: some models include system prefixes (e.g. "pg::raw.users").
     enrichment_index: dict[tuple[str, str], object] = {
-        (e.source_table, e.dest_table): e for e in enrichments
+        (_object_part(e.source_table), _object_part(e.dest_table)): e
+        for e in enrichments
     }
 
     repo = EdgeRepository(db)
