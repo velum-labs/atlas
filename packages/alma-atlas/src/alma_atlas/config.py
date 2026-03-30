@@ -41,14 +41,29 @@ def default_config_dir() -> Path:
 
 
 @dataclass
+class AgentProcessConfig:
+    """Configuration for an ACP agent subprocess.
+
+    Used by :class:`ACPProvider` when ``provider: acp`` is set.
+    Any ACP-compatible binary can be used as the agent command.
+    """
+
+    command: str = "claude-agent-acp"
+    args: list[str] = field(default_factory=list)
+    env: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class AgentConfig:
     """Configuration for a single learning agent."""
 
-    provider: str = "anthropic"  # anthropic | openai | mock
+    provider: str = "anthropic"  # anthropic | openai | mock | acp
     model: str = "claude-opus-4-6"
     api_key_env: str = "ANTHROPIC_API_KEY"  # env var name containing the key
     timeout: int = 120
     max_tokens: int = 4096
+    # ACP agent subprocess config.  Set when provider == "acp".
+    agent: AgentProcessConfig | None = None
 
 
 @dataclass
@@ -65,11 +80,13 @@ class LearningConfig:
     """
 
     # Flat fields — preserved for backward compatibility.
-    provider: str = "mock"  # anthropic | openai | mock
+    provider: str = "mock"  # anthropic | openai | mock | acp
     model: str = "claude-opus-4-6"
     api_key_env: str = "ANTHROPIC_API_KEY"  # env var name containing the key
     timeout: int = 120
     max_tokens: int = 4096
+    # ACP agent subprocess config.  Set when provider == "acp" or via agent: key.
+    agent: AgentProcessConfig | None = None
 
     # Per-agent configs.  When the flat YAML format is used these are
     # populated from the flat fields by ``load_atlas_yml``.
@@ -334,6 +351,17 @@ def load_atlas_yml(path: Path | str) -> AtlasConfig:
         _per_agent_keys = frozenset({"explorer", "pipeline_analyzer", "annotator", "asset_enricher"})
         has_nested = bool(set(learning_raw) & _per_agent_keys)
 
+        def _parse_agent_process_config(sub: dict) -> AgentProcessConfig | None:
+            """Parse an optional ``agent:`` sub-key into an AgentProcessConfig."""
+            agent_raw = sub.get("agent")
+            if not agent_raw:
+                return None
+            return AgentProcessConfig(
+                command=agent_raw.get("command", "claude-agent-acp"),
+                args=list(agent_raw.get("args", [])),
+                env=dict(agent_raw.get("env", {})),
+            )
+
         if has_nested:
             # Nested per-agent format: each sub-key is an AgentConfig.
             def _parse_agent(sub: dict) -> AgentConfig:
@@ -343,12 +371,15 @@ def load_atlas_yml(path: Path | str) -> AtlasConfig:
                     api_key_env=sub.get("api_key_env", "ANTHROPIC_API_KEY"),
                     timeout=int(sub.get("timeout", 120)),
                     max_tokens=int(sub.get("max_tokens", 4096)),
+                    agent=_parse_agent_process_config(sub),
                 )
 
             # Support both `annotator` and legacy `asset_enricher` keys in YAML.
             annotator_raw = learning_raw.get("annotator") or learning_raw.get("asset_enricher", {})
 
+            top_agent = _parse_agent_process_config(learning_raw)
             cfg.learning = LearningConfig(
+                agent=top_agent,
                 explorer=_parse_agent(learning_raw.get("explorer", {})),
                 pipeline_analyzer=_parse_agent(learning_raw.get("pipeline_analyzer", {})),
                 annotator=_parse_agent(annotator_raw),
@@ -360,6 +391,7 @@ def load_atlas_yml(path: Path | str) -> AtlasConfig:
             flat_api_key_env = learning_raw.get("api_key_env", "ANTHROPIC_API_KEY")
             flat_timeout = int(learning_raw.get("timeout", 120))
             flat_max_tokens = int(learning_raw.get("max_tokens", 4096))
+            flat_agent = _parse_agent_process_config(learning_raw)
 
             def _flat_agent() -> AgentConfig:
                 return AgentConfig(
@@ -368,6 +400,7 @@ def load_atlas_yml(path: Path | str) -> AtlasConfig:
                     api_key_env=flat_api_key_env,
                     timeout=flat_timeout,
                     max_tokens=flat_max_tokens,
+                    agent=flat_agent,
                 )
 
             cfg.learning = LearningConfig(
@@ -376,6 +409,7 @@ def load_atlas_yml(path: Path | str) -> AtlasConfig:
                 api_key_env=flat_api_key_env,
                 timeout=flat_timeout,
                 max_tokens=flat_max_tokens,
+                agent=flat_agent,
                 explorer=_flat_agent(),
                 pipeline_analyzer=_flat_agent(),
                 annotator=_flat_agent(),
