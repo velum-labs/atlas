@@ -17,9 +17,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pydantic import BaseModel
 
+import warnings
+
 from alma_atlas.agents.acp_provider import ACPProvider, MAX_RETRIES, SimpleClient
 from alma_atlas.agents.schemas import PipelineAnalysisResult
-from alma_atlas.config import AgentProcessConfig, LearningConfig, load_atlas_yml
+from alma_atlas.config import AgentConfig, AgentProcessConfig, LearningConfig, load_atlas_yml
 
 
 # ---------------------------------------------------------------------------
@@ -543,3 +545,167 @@ def test_load_atlas_yml_per_agent_agent_key(tmp_path: Path) -> None:
     assert cfg.learning.explorer.agent is not None
     assert cfg.learning.explorer.agent.command == "codex"
     assert cfg.learning.pipeline_analyzer.agent is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 integration: config -> provider construction
+# ---------------------------------------------------------------------------
+
+
+def test_provider_from_agent_config_with_agent_process_config_uses_acp() -> None:
+    """AgentConfig with AgentProcessConfig must produce ACPProvider automatically."""
+    from alma_atlas.pipeline.learn import _provider_from_agent_config
+
+    cfg = AgentConfig(
+        provider="mock",
+        model="unused",
+        agent=AgentProcessConfig(command="codex", args=["--model", "o3"]),
+    )
+    provider = _provider_from_agent_config(cfg)
+    assert isinstance(provider, ACPProvider)
+    assert provider._command == "codex"
+    assert provider._args == ["--model", "o3"]
+
+
+def test_provider_from_agent_config_without_agent_process_config_uses_legacy() -> None:
+    """AgentConfig without AgentProcessConfig must produce the configured legacy provider."""
+    from alma_atlas.agents.provider import AnthropicProvider
+    from alma_atlas.pipeline.learn import _provider_from_agent_config
+
+    cfg = AgentConfig(provider="anthropic", model="claude-opus-4-6", agent=None)
+    provider = _provider_from_agent_config(cfg)
+    assert isinstance(provider, AnthropicProvider)
+
+
+def test_provider_from_agent_config_agent_overrides_provider_field() -> None:
+    """AgentProcessConfig takes precedence even when provider='anthropic' is set."""
+    from alma_atlas.pipeline.learn import _provider_from_agent_config
+
+    cfg = AgentConfig(
+        provider="anthropic",
+        model="claude-opus-4-6",
+        agent=AgentProcessConfig(command="claude-agent-acp"),
+    )
+    provider = _provider_from_agent_config(cfg)
+    assert isinstance(provider, ACPProvider)
+    assert provider._command == "claude-agent-acp"
+
+
+def test_load_atlas_yml_agent_command_produces_acp_provider(tmp_path: Path) -> None:
+    """Flat atlas.yml with agent.command -> _provider_from_agent_config -> ACPProvider."""
+    from alma_atlas.pipeline.learn import _provider_from_agent_config
+
+    yml = tmp_path / "atlas.yml"
+    yml.write_text(
+        textwrap.dedent("""\
+        version: 1
+        learning:
+          agent:
+            command: claude-agent-acp
+            args: []
+        """)
+    )
+    cfg = load_atlas_yml(yml)
+    # All three sub-agents should carry the agent process config.
+    provider = _provider_from_agent_config(cfg.learning.explorer)
+    assert isinstance(provider, ACPProvider)
+    assert provider._command == "claude-agent-acp"
+
+
+def test_load_atlas_yml_flat_anthropic_emits_deprecation_warning(tmp_path: Path) -> None:
+    """Flat atlas.yml with provider: anthropic must emit a DeprecationWarning."""
+    yml = tmp_path / "atlas.yml"
+    yml.write_text(
+        textwrap.dedent("""\
+        version: 1
+        learning:
+          provider: anthropic
+          model: claude-opus-4-6
+          api_key_env: ANTHROPIC_API_KEY
+        """)
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        load_atlas_yml(yml)
+
+    dep_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+    assert len(dep_warnings) == 1
+    assert "learning.provider: anthropic" in str(dep_warnings[0].message)
+    assert "agent.command" in str(dep_warnings[0].message)
+
+
+def test_load_atlas_yml_flat_openai_emits_deprecation_warning(tmp_path: Path) -> None:
+    """Flat atlas.yml with provider: openai must emit a DeprecationWarning."""
+    yml = tmp_path / "atlas.yml"
+    yml.write_text(
+        textwrap.dedent("""\
+        version: 1
+        learning:
+          provider: openai
+          model: gpt-4o
+        """)
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        load_atlas_yml(yml)
+
+    dep_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+    assert len(dep_warnings) == 1
+    assert "learning.provider: openai" in str(dep_warnings[0].message)
+
+
+def test_load_atlas_yml_flat_mock_no_deprecation_warning(tmp_path: Path) -> None:
+    """Flat atlas.yml with provider: mock must NOT emit a DeprecationWarning."""
+    yml = tmp_path / "atlas.yml"
+    yml.write_text("version: 1\nlearning:\n  provider: mock\n")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        load_atlas_yml(yml)
+
+    dep_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+    assert not dep_warnings
+
+
+def test_load_atlas_yml_nested_anthropic_emits_deprecation_warning(tmp_path: Path) -> None:
+    """Nested atlas.yml with per-agent provider: anthropic must emit DeprecationWarning."""
+    yml = tmp_path / "atlas.yml"
+    yml.write_text(
+        textwrap.dedent("""\
+        version: 1
+        learning:
+          explorer:
+            provider: anthropic
+            model: claude-haiku-4-5-20251001
+          pipeline_analyzer:
+            provider: anthropic
+            model: claude-opus-4-6
+        """)
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        load_atlas_yml(yml)
+
+    dep_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+    # Two agents with provider: anthropic -> two warnings.
+    assert len(dep_warnings) == 2
+    for w in dep_warnings:
+        assert "agent.command" in str(w.message)
+
+
+def test_load_atlas_yml_agent_command_no_deprecation_warning(tmp_path: Path) -> None:
+    """atlas.yml using agent.command format must NOT emit a DeprecationWarning."""
+    yml = tmp_path / "atlas.yml"
+    yml.write_text(
+        textwrap.dedent("""\
+        version: 1
+        learning:
+          agent:
+            command: claude-agent-acp
+        """)
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        load_atlas_yml(yml)
+
+    dep_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+    assert not dep_warnings

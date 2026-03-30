@@ -52,16 +52,25 @@ def _is_real_provider(provider_name: str) -> bool:
 
 
 def _provider_from_agent_config(agent_cfg: AgentConfig) -> LLMProvider:
-    """Instantiate an LLMProvider from an :class:`~alma_atlas.config.AgentConfig`."""
+    """Instantiate an LLMProvider from an :class:`~alma_atlas.config.AgentConfig`.
+
+    When an :class:`~alma_atlas.config.AgentProcessConfig` is attached
+    (``agent_cfg.agent is not None``), the ACP provider is used automatically
+    regardless of the ``provider`` field value.
+    """
     from alma_atlas.agents.provider import make_provider
 
+    apc = agent_cfg.agent  # AgentProcessConfig or None
+
+    # If an agent process config is present, default to ACP automatically.
+    effective_provider = "acp" if apc is not None else agent_cfg.provider
+
     api_key: str | None = None
-    if agent_cfg.api_key_env:
+    if agent_cfg.api_key_env and effective_provider != "acp":
         api_key = os.environ.get(agent_cfg.api_key_env)
 
-    apc = agent_cfg.agent  # AgentProcessConfig or None
     return make_provider(
-        agent_cfg.provider,
+        effective_provider,
         model=agent_cfg.model,
         api_key=api_key,
         timeout=float(agent_cfg.timeout),
