@@ -19,6 +19,8 @@ from alma_atlas.agents.repo_scanner import (
     _MAX_FILES,  # noqa: F401
     _SCAN_GLOBS,  # noqa: F401
     _SKIP_DIRS,  # noqa: F401
+)
+from alma_atlas.agents.repo_scanner import (
     collect_repo_files as _collect_repo_files,  # backward-compat alias
 )
 from alma_atlas.agents.schemas import EdgeEnrichment, PipelineAnalysisResult
@@ -124,10 +126,7 @@ async def analyze_edges(
     if not edges:
         return []
 
-    if pre_filtered_files is not None:
-        repo_files = pre_filtered_files
-    else:
-        repo_files = _collect_repo_files(repo_path)
+    repo_files = pre_filtered_files if pre_filtered_files is not None else _collect_repo_files(repo_path)
 
     logger.debug(
         "pipeline_analyzer: %d edge(s), %d repo file(s) from %s",
