@@ -33,6 +33,14 @@ jobs:
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
+        with:
+          # For first-time bootstrap, provide a repository secret named
+          # PAGES_ENABLEMENT_TOKEN with repo/pages write access (PAT) or a GitHub
+          # App token with administration:write + pages:write. Otherwise the
+          # default GITHUB_TOKEN is used and the repository must already have
+          # Pages enabled with "GitHub Actions" as the build source.
+          token: ${{ secrets.PAGES_ENABLEMENT_TOKEN || github.token }}
+          enablement: ${{ secrets.PAGES_ENABLEMENT_TOKEN != '' }}
 
       - name: Build docs site
         run: uv run mkdocs build --strict

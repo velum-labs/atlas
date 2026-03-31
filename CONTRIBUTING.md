@@ -67,6 +67,12 @@ uv run mkdocs serve
 uv run mkdocs build --strict
 ```
 
+The GitHub Pages publish workflow expects the repository to already have Pages
+enabled with **GitHub Actions** as the build source. For first-time bootstrap,
+either enable that manually in repository settings or provide a
+`PAGES_ENABLEMENT_TOKEN` repository secret so `actions/configure-pages` can
+enable it automatically.
+
 ## Code style
 
 - **Formatter**: ruff format (line length 120)
