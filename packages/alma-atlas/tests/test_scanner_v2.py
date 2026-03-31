@@ -356,22 +356,21 @@ def _make_persisted(key: str = _ADAPTER_KEY) -> MagicMock:
 
 
 class TestScannerV2:
-    def test_v2_adapter_runs_v2_path(self, tmp_path: Path) -> None:
+    def test_scanner_v2_delegates_to_run_scan(self, tmp_path: Path) -> None:
         cfg = _cfg(tmp_path)
         source = SourceConfig(id="pg-test", kind="postgres", params={})
-        adapter = _make_mock_adapter_v2()
-        persisted = _make_persisted()
+        from alma_atlas.pipeline.scan import ScanResult
 
-        with (
-            patch("alma_atlas.pipeline.scan._build_adapter", return_value=(adapter, persisted)),
-            patch("alma_atlas.pipeline.scanner_v2._store_v2_results", return_value=(5, 3)),
-        ):
+        with patch(
+            "alma_atlas.pipeline.scan.run_scan",
+            return_value=ScanResult(source_id="pg-test", asset_count=5, edge_count=3),
+        ) as mock_run_scan:
             result = ScannerV2(cfg).scan(source)
 
-        # v2 path was taken: probe must have been called
-        adapter.probe.assert_called_once()
+        mock_run_scan.assert_called_once_with(source, cfg)
         assert result.source_id == "pg-test"
-        assert len(result.capabilities_run) > 0
+        assert result.asset_count == 5
+        assert result.edge_count == 3
 
     def test_v1_adapter_falls_back_to_run_scan(self, tmp_path: Path) -> None:
         cfg = _cfg(tmp_path)
@@ -427,7 +426,7 @@ class TestScannerV2:
             result = run_scan_v2(source, cfg)
 
         assert result.error is not None
-        assert "probing" in result.error.lower()
+        assert "capability probe failed" in result.error.lower()
 
     def test_no_available_capabilities_returns_warning(self, tmp_path: Path) -> None:
         cfg = _cfg(tmp_path)
@@ -443,7 +442,7 @@ class TestScannerV2:
         assert result.error is None
         assert len(result.warnings) >= 1
         assert result.capabilities_run == []
-        assert len(result.capabilities_skipped) == len(AdapterCapability)
+        assert result.capabilities_skipped == []
 
     def test_schema_results_stored_as_assets(self, tmp_path: Path) -> None:
         cfg = _cfg(tmp_path)
@@ -511,8 +510,9 @@ class TestScannerV2:
         with patch("alma_atlas.pipeline.scan._build_adapter", return_value=(adapter, _make_persisted())):
             result = ScannerV2(cfg).scan(source)
 
-        assert AdapterCapability.TRAFFIC in result.capabilities_skipped
-        assert AdapterCapability.DISCOVER in result.capabilities_run
+        assert result.capabilities_skipped == []
+        assert result.capabilities_run == []
+        assert any("capability_skipped:traffic" in warning for warning in result.warnings)
 
 
 # ---------------------------------------------------------------------------

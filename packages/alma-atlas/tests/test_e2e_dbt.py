@@ -132,8 +132,8 @@ def test_run_scan_dbt_asset_kinds(dbt_source: SourceConfig, scan_cfg: AtlasConfi
     by_name = {a.name: a for a in assets}
     # stg_orders is materialized as a view
     assert by_name["analytics.stg_orders"].kind == "view"
-    # raw source defaults to table
-    assert by_name["raw.orders"].kind == "table"
+    # dbt sources surface as external tables in the v2-backed scan path
+    assert by_name["raw.orders"].kind == "external_table"
 
 
 def test_run_scan_dbt_lineage_edges(dbt_source: SourceConfig, scan_cfg: AtlasConfig) -> None:

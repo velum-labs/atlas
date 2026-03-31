@@ -30,7 +30,13 @@ class SchemaSnapshot:
 
     @property
     def fingerprint(self) -> str:
-        col_sig = json.dumps([(c.name, c.type) for c in self.columns], sort_keys=True)
+        col_sig = json.dumps(
+            [
+                (column.name, column.type, column.nullable, column.description)
+                for column in self.columns
+            ],
+            sort_keys=True,
+        )
         return hashlib.sha256(col_sig.encode()).hexdigest()[:16]
 
     @property

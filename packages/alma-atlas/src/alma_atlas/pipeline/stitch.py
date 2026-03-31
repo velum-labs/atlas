@@ -19,7 +19,6 @@ from alma_atlas_store.asset_repository import Asset, AssetRepository
 from alma_atlas_store.db import Database
 from alma_atlas_store.edge_repository import Edge, EdgeRepository
 from alma_atlas_store.query_repository import QueryObservation, QueryRepository
-from alma_connectors.source_adapter import TrafficObservationResult
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +42,7 @@ def _fingerprint(sql: str) -> str:
 
 
 def stitch(
-    traffic: TrafficObservationResult,
+    traffic: object,
     db: Database,
     *,
     source_id: str = "",
@@ -52,7 +51,10 @@ def stitch(
     """Derive and persist lineage edges from a set of query observations.
 
     Args:
-        traffic:     Query observations returned by a source adapter.
+        traffic:     Query observations returned by a source adapter. Accepts
+                     both the legacy v1 `TrafficObservationResult` and the v2
+                     `TrafficExtractionResult` wrapper as long as `.events`
+                     is available.
         db:          Open Atlas database connection.
         source_id:   Identifier for the source (used as consumer fallback).
         source_kind: Dialect hint for SQL parsing (e.g. "bigquery", "postgres").
@@ -72,7 +74,8 @@ def stitch(
 
     edges_written = 0
 
-    for event in traffic.events:
+    events = getattr(traffic, "events", ())
+    for event in events:
         if not event.sql.strip():
             continue
 

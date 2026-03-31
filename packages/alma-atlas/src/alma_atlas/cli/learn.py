@@ -123,15 +123,14 @@ def learn(
 
 def _run_edge_learning(cfg, repo_path: Path) -> None:
     """Synchronous wrapper — runs edge learning using the per-agent config."""
-    from alma_atlas.pipeline.learn import run_edge_learning
+    from alma_atlas.pipeline.learn import edge_learning_is_enabled, run_edge_learning
     from alma_atlas_store.db import Database
 
-    _has_agent = cfg.learning.agent is not None
-    if cfg.learning.provider == "mock" and not _has_agent:
+    if not edge_learning_is_enabled(cfg.learning):
         console.print(
             "[red]Error:[/red] No real LLM provider configured for learning.\n"
-            "Set [bold]learning.agent.command[/bold] in atlas.yml (e.g. claude-agent-acp),\n"
-            "or export ANTHROPIC_API_KEY / OPENAI_API_KEY."
+            "Configure non-mock [bold]learning.explorer[/bold] and "
+            "[bold]learning.pipeline_analyzer[/bold] agent settings in atlas.yml."
         )
         raise typer.Exit(code=1)
 
@@ -143,15 +142,14 @@ def _run_edge_learning(cfg, repo_path: Path) -> None:
 
 def _run_asset_annotation(cfg, repo_path: Path) -> None:
     """Synchronous wrapper -- runs asset annotation using the per-agent config."""
-    from alma_atlas.pipeline.learn import run_asset_annotation
+    from alma_atlas.pipeline.learn import asset_annotation_is_enabled, run_asset_annotation
     from alma_atlas_store.db import Database
 
-    _has_agent = cfg.learning.agent is not None
-    if cfg.learning.provider == "mock" and not _has_agent:
+    if not asset_annotation_is_enabled(cfg.learning):
         console.print(
             "[red]Error:[/red] No real LLM provider configured for learning.\n"
-            "Set [bold]learning.agent.command[/bold] in atlas.yml (e.g. claude-agent-acp),\n"
-            "or export ANTHROPIC_API_KEY / OPENAI_API_KEY."
+            "Configure non-mock [bold]learning.explorer[/bold] and "
+            "[bold]learning.annotator[/bold] agent settings in atlas.yml."
         )
         raise typer.Exit(code=1)
 

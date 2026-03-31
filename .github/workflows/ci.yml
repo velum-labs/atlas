@@ -31,11 +31,10 @@ jobs:
         run: uv sync --all-packages
 
       - name: Lint
-        run: uv run ruff check packages/
+        run: uv run ruff check packages/ scripts/
 
       - name: Type check
-        run: uv run ty check packages/alma-atlas/src packages/alma-atlas-store/src packages/alma-analysis/src packages/alma-connectors/src
-        continue-on-error: true
+        run: uv run ty check packages/alma-atlas/src/alma_atlas/config.py packages/alma-atlas/src/alma_atlas/cli/connect.py packages/alma-atlas/src/alma_atlas/cli/learn.py packages/alma-atlas/src/alma_atlas/cli/scan.py packages/alma-atlas/src/alma_atlas/cli/team.py packages/alma-atlas/src/alma_atlas/cli/serve.py packages/alma-atlas/src/alma_atlas/pipeline/learn.py packages/alma-atlas/src/alma_atlas/pipeline/scan.py packages/alma-atlas/src/alma_atlas/pipeline/scanner_v2.py packages/alma-atlas/src/alma_atlas/pipeline/stitch.py packages/alma-atlas/src/alma_atlas/sync/client.py packages/alma-atlas-store/src/alma_atlas_store/schema_repository.py
 
       - name: Test
         run: uv run pytest packages/ -q --tb=short -m "not real_e2e"
@@ -74,7 +73,16 @@ jobs:
           uv run alma-atlas --help
           uv run alma-atlas status --help
           uv run alma-atlas connect --help
+          uv run alma-atlas connect snowflake --help
+          uv run alma-atlas connect airflow --help
+          uv run alma-atlas connect looker --help
+          uv run alma-atlas connect fivetran --help
+          uv run alma-atlas connect metabase --help
           uv run alma-atlas scan --help
+          uv run alma-atlas search --help
+          uv run alma-atlas lineage --help
+          uv run alma-atlas export --help
+          uv run alma-atlas team --help
           uv run alma-atlas serve --help
 
       - name: Import smoke test
@@ -88,10 +96,17 @@ jobs:
           from alma_atlas_store.asset_repository import AssetRepository
           from alma_connectors.adapters.bigquery import BigQueryAdapter
           from alma_connectors.adapters.dbt import DbtAdapter
+          from alma_connectors.adapters.airflow import AirflowAdapter
+          from alma_connectors.adapters.fivetran import FivetranAdapter
+          from alma_connectors.adapters.looker import LookerAdapter
+          from alma_connectors.adapters.metabase import MetabaseAdapter
           from alma_connectors.adapters.postgres import PostgresAdapter
+          from alma_connectors.adapters.snowflake import SnowflakeAdapter
           from alma_analysis.edges import extract_edges
           from alma_analysis.lineage import compute_lineage
           from alma_sqlkit.parser import SQLParser
+          import starlette
+          import uvicorn
           db = Database(':memory:')
           AssetRepository(db)
           SQLParser().parse('SELECT 1 FROM t')

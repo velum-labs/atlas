@@ -221,44 +221,17 @@ class ScannerV2:
         self._cfg = cfg
 
     def scan(self, source: SourceConfig) -> ScanResultV2:
-        """Run a full scan for one source.
+        """Run a full scan using the canonical scan runtime."""
+        from alma_atlas.pipeline.scan import run_scan
 
-        v2 adapters go through: probe → route → extract → store.
-        v1 adapters delegate to run_scan() and the result is wrapped.
-
-        Args:
-            source: The source configuration.
-
-        Returns:
-            ScanResultV2 summarising what was extracted.
-        """
-        from alma_atlas.pipeline.scan import _build_adapter, run_scan
-        from alma_ports.errors import ConfigurationError
-
-        try:
-            adapter, persisted = _build_adapter(source)
-        except (ValueError, ImportError) as exc:
-            raise ConfigurationError(str(exc)) from exc
-
-        if isinstance(adapter, SourceAdapterV2):
-            return self._scan_v2(adapter, persisted, source)
-
-        # v1 fallback
-        logger.debug("Adapter %r does not implement SourceAdapterV2; using v1 path", source.kind)
-        v1_result = run_scan(source, self._cfg)
-        wrapped = ScanResultV2(
-            source_id=v1_result.source_id,
-            asset_count=v1_result.asset_count,
-            edge_count=v1_result.edge_count,
-            error=v1_result.error,
-            warnings=list(v1_result.warnings),
+        result = run_scan(source, self._cfg)
+        return ScanResultV2(
+            source_id=result.source_id,
+            asset_count=result.asset_count,
+            edge_count=result.edge_count,
+            error=result.error,
+            warnings=list(result.warnings),
         )
-
-        # Fire post-scan hooks (v1 path; drift hooks are fired inside run_scan already).
-        if self._cfg.hooks:
-            self._fire_hooks(wrapped)
-
-        return wrapped
 
     def _fire_hooks(self, result: ScanResultV2) -> None:
         """Fire post-scan hooks for a completed v2 scan result."""
@@ -376,6 +349,9 @@ def _store_v2_results(
 
     asset_count = 0
     edge_count = 0
+
+    if cfg.db_path is None:
+        raise ValueError("Atlas db_path is not configured")
 
     with Database(cfg.db_path) as db:
         # Raw serialised snapshots

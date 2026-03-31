@@ -66,12 +66,19 @@ def team_sync() -> None:
     from alma_atlas_store.db import Database
 
     auth = TeamAuth(cfg.team_api_key)
-    client = SyncClient(cfg.team_server_url, auth, cfg.team_id or "default")
+    server_url = cfg.team_server_url
+    db_path = cfg.db_path
+    assert server_url is not None
+    assert db_path is not None
 
     with console.status("[bold]Syncing with team server…"):
         try:
-            with Database(cfg.db_path) as db:
-                response = asyncio.run(client.full_sync(db, cfg))
+            async def _run_sync():
+                async with SyncClient(server_url, auth, cfg.team_id or "default") as client:
+                    with Database(db_path) as db:
+                        return await client.full_sync(db, cfg)
+
+            response = asyncio.run(_run_sync())
             rprint(
                 f"[green]Sync complete[/green] — "
                 f"{response.accepted_count} record(s) accepted, "
@@ -105,6 +112,7 @@ def team_status() -> None:
         table.add_row("Last sync cursor", cursor or "[dim]never synced[/dim]")
 
         if cfg.db_path and cfg.db_path.exists():
+            from alma_atlas.sync.client import _parse_ts
             from alma_atlas_store.asset_repository import AssetRepository
             from alma_atlas_store.contract_repository import ContractRepository
             from alma_atlas_store.db import Database
@@ -120,7 +128,13 @@ def team_status() -> None:
                 from alma_atlas_store.db import Database
 
                 with Database(cfg.db_path) as db:
-                    pending = len([a for a in AssetRepository(db).list_all() if (a.last_seen or "") >= cursor])
+                    pending = len(
+                        [
+                            asset
+                            for asset in AssetRepository(db).list_all()
+                            if _parse_ts(asset.last_seen) >= _parse_ts(cursor)
+                        ]
+                    )
                 table.add_row("Pending asset changes", str(pending))
             table.add_row("Total assets", str(asset_count))
             table.add_row("Total edges", str(edge_count))

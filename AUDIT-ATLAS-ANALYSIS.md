@@ -1,3 +1,9 @@
+# Historical Audit Note
+
+This document is retained for context only.
+
+Several findings here were fixed or superseded by later refactors. Do not treat it as the current state of the repo after the canonical scan/runtime repair.
+
 # AUDIT-ATLAS-ANALYSIS.md
 
 Deep audit of `packages/alma-analysis` (9 files, ~2107 LOC) and `packages/alma-atlas` (29 files, ~3984 LOC).

@@ -8,7 +8,7 @@ Usage:
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from rich import print as rprint
@@ -55,8 +55,8 @@ def serve(
 
         sse = SseServerTransport("/messages/")
 
-        async def handle_sse(request: object) -> object:
-            async with sse.connect_sse(request.scope, request.receive, request._send) as streams:  # type: ignore[attr-defined]
+        async def handle_sse(request: Any) -> object:
+            async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
                 await server.run(streams[0], streams[1], server.create_initialization_options())
 
         starlette_app = Starlette(

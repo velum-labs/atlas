@@ -14,14 +14,13 @@ from __future__ import annotations
 import json
 import logging
 import os
-import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 # Known top-level keys for atlas.yml.  Unknown keys are rejected (fail-closed).
 # `enrichment` is kept as a deprecated alias for `learning`.
-_KNOWN_ATLAS_YML_KEYS = frozenset({"version", "sources", "team", "scan", "hooks", "learning", "enrichment"})
+_KNOWN_ATLAS_YML_KEYS = frozenset({"version", "sources", "team", "hooks", "learning", "enrichment"})
 
 # Keys whose values must be redacted in __repr__ output.
 _SECRET_PARAM_KEYS = frozenset({"dsn", "password", "api_key", "api_secret", "client_secret", "auth_token"})
@@ -58,7 +57,7 @@ class AgentProcessConfig:
 class AgentConfig:
     """Configuration for a single learning agent."""
 
-    provider: str = "anthropic"  # anthropic | openai | mock | acp
+    provider: str = "mock"  # mock | acp
     model: str = "claude-opus-4-6"
     api_key_env: str = "ANTHROPIC_API_KEY"  # env var name containing the key
     timeout: int = 120
@@ -81,7 +80,7 @@ class LearningConfig:
     """
 
     # Flat fields — preserved for backward compatibility.
-    provider: str = "mock"  # anthropic | openai | mock | acp
+    provider: str = "mock"  # mock | acp
     model: str = "claude-opus-4-6"
     api_key_env: str = "ANTHROPIC_API_KEY"  # env var name containing the key
     timeout: int = 120
@@ -351,7 +350,7 @@ def load_atlas_yml(path: Path | str) -> AtlasConfig:
     if learning_raw:
         _per_agent_keys = frozenset({"explorer", "pipeline_analyzer", "annotator", "asset_enricher"})
         has_nested = bool(set(learning_raw) & _per_agent_keys)
-        _LEGACY_PROVIDERS = frozenset({"anthropic", "openai"})
+        _SUPPORTED_PROVIDERS = frozenset({"acp", "mock"})
 
         def _parse_agent_process_config(sub: dict) -> AgentProcessConfig | None:
             """Parse an optional ``agent:`` sub-key into an AgentProcessConfig."""
@@ -367,15 +366,15 @@ def load_atlas_yml(path: Path | str) -> AtlasConfig:
         if has_nested:
             # Nested per-agent format: each sub-key is an AgentConfig.
             def _parse_agent(sub: dict) -> AgentConfig:
-                if "provider" in sub and sub["provider"] in _LEGACY_PROVIDERS:
-                    warnings.warn(
-                        f"atlas.yml: per-agent 'provider: {sub['provider']}' is deprecated. "
-                        "Switch to the 'agent.command' format instead.",
-                        DeprecationWarning,
-                        stacklevel=3,
+                provider = sub.get("provider", "mock")
+                if provider not in _SUPPORTED_PROVIDERS:
+                    raise ValueError(
+                        "atlas.yml: unsupported learning provider "
+                        f"{provider!r}. Supported providers: {sorted(_SUPPORTED_PROVIDERS)}. "
+                        "Use 'provider: acp' with an optional 'agent.command', or 'provider: mock'."
                     )
                 return AgentConfig(
-                    provider=sub.get("provider", "anthropic"),
+                    provider=provider,
                     model=sub.get("model", "claude-opus-4-6"),
                     api_key_env=sub.get("api_key_env", "ANTHROPIC_API_KEY"),
                     timeout=int(sub.get("timeout", 120)),
@@ -423,12 +422,11 @@ def load_atlas_yml(path: Path | str) -> AtlasConfig:
         else:
             # Flat (legacy) format: apply the same values to all agents.
             flat_provider = learning_raw.get("provider", "mock")
-            if "provider" in learning_raw and flat_provider in _LEGACY_PROVIDERS:
-                warnings.warn(
-                    f"atlas.yml: 'learning.provider: {flat_provider}' is deprecated. "
-                    "Switch to 'learning.agent.command' instead.",
-                    DeprecationWarning,
-                    stacklevel=2,
+            if flat_provider not in _SUPPORTED_PROVIDERS:
+                raise ValueError(
+                    "atlas.yml: unsupported learning.provider "
+                    f"{flat_provider!r}. Supported providers: {sorted(_SUPPORTED_PROVIDERS)}. "
+                    "Use 'learning.agent.command' for ACP-backed agents or 'provider: mock'."
                 )
             flat_model = learning_raw.get("model", "claude-opus-4-6")
             flat_api_key_env = learning_raw.get("api_key_env", "ANTHROPIC_API_KEY")

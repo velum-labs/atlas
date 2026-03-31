@@ -184,9 +184,9 @@ def e2e_config(tmp_path: Path) -> AtlasConfig:
         config_dir=tmp_path / "alma",
         db_path=tmp_path / "atlas.db",
         learning=LearningConfig(
-            explorer=AgentConfig(provider="mock", model="haiku"),
-            pipeline_analyzer=AgentConfig(provider="mock", model="sonnet"),
-            annotator=AgentConfig(provider="mock", model="sonnet"),
+            explorer=AgentConfig(provider="acp", model="haiku"),
+            pipeline_analyzer=AgentConfig(provider="acp", model="sonnet"),
+            annotator=AgentConfig(provider="acp", model="sonnet"),
         ),
     )
 
@@ -383,7 +383,7 @@ class TestE2ELearningPipeline:
             # Verify the seeded schema_match edges are now learned
             unlearned_ids = {(e.upstream_id, e.downstream_id) for e in get_unlearned_edges(db)}
             assert ("pg:main::raw.users", "dbt:fintual::staging.users") not in unlearned_ids
-            assert ("pg:main::raw.transactions", "dbt:fintual::raw.transactions") not in unlearned_ids
+            assert ("pg:main::raw.transactions", "dbt:fintual::staging.transactions") not in unlearned_ids
 
             unannotated = get_unannotated_assets(db)
             assert len(unannotated) >= 2
@@ -402,7 +402,7 @@ class TestE2ELearningPipeline:
             assert users_ann.granularity == "one row per user"
             assert users_ann.join_keys == ["user_id"]
             assert users_ann.sensitivity == "PII"
-            assert "mock" in users_ann.annotated_by
+            assert "acp" in users_ann.annotated_by
 
             txn_ann = ann_repo.get("dbt:fintual::analytics.stg_transactions")
             assert txn_ann is not None

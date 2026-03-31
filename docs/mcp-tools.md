@@ -1,36 +1,48 @@
 # MCP Tools Reference
 
-Alma Atlas registers six MCP tools on the server started by `alma-atlas serve`. These tools expose the Atlas graph to any MCP-compatible AI agent.
+Atlas currently registers **12** MCP tools when you run `alma-atlas serve`.
 
-All tools require a populated database. Run `alma-atlas scan` before connecting an agent.
+All tools require a populated local Atlas database. Run `alma-atlas scan` first.
 
----
+## Tool Catalog
 
-## atlas_search
+| Tool | Input | Description |
+|------|-------|-------------|
+| `atlas_search` | `query`, optional `limit` | Search assets by ID, name, or keyword |
+| `atlas_get_asset` | `asset_id` | Return one asset as JSON |
+| `atlas_get_annotations` | optional `asset_id`, optional `limit` | Return learned business annotations |
+| `atlas_lineage` | `asset_id`, `direction`, optional `depth` | Traverse upstream or downstream lineage |
+| `atlas_status` | none | Summarize assets, edges, and query fingerprints |
+| `atlas_get_schema` | `asset_id` | Return the latest schema snapshot |
+| `atlas_impact` | `asset_id`, optional `depth` | Show downstream blast radius |
+| `atlas_get_query_patterns` | optional `top_n` | Show top stored query fingerprints |
+| `atlas_suggest_tables` | `query`, optional `limit` | Rank likely tables for a search intent |
+| `atlas_check_contract` | `asset_id` | Validate one asset against stored contracts |
+| `atlas_list_violations` | optional `asset_id`, optional `limit` | Show recent unresolved violations |
+| `atlas_team_sync` | none | Push local graph state and pull team contracts |
 
-Search for data assets by name, ID, or keyword.
+## Asset IDs
 
-**Input schema**
+Atlas asset IDs use the canonical form:
 
-```json
-{
-  "type": "object",
-  "properties": {
-    "query": {
-      "type": "string",
-      "description": "Search term"
-    },
-    "limit": {
-      "type": "integer",
-      "description": "Maximum number of results",
-      "default": 20
-    }
-  },
-  "required": ["query"]
-}
+```text
+{source_id}::{object_ref}
 ```
 
-**Example input**
+Examples:
+
+| Source | Asset ID |
+|--------|----------|
+| BigQuery | `bigquery:my-project::analytics.orders` |
+| PostgreSQL | `postgres:customer:public::public.users` |
+| dbt | `dbt:analytics::marts.fct_orders` |
+| Looker | `looker:bi-example::ecommerce.orders` |
+
+Use `atlas_search` if you do not know the exact ID.
+
+## Common Examples
+
+### Search
 
 ```json
 {
@@ -39,268 +51,58 @@ Search for data assets by name, ID, or keyword.
 }
 ```
 
-**Example output**
-
-```
-Found 3 asset(s) matching 'orders':
-
-  bigquery:my-project.analytics.orders  [TABLE]  source=bigquery:my-project
-  bigquery:my-project.analytics.orders_daily  [VIEW]  source=bigquery:my-project  Daily order aggregation
-  dbt:my-project.fct_orders  [TABLE]  source=dbt:my-project  Fact table for order events
-```
-
----
-
-## atlas_get_asset
-
-Retrieve full details for a specific data asset by its ID.
-
-**Input schema**
+### Get One Asset
 
 ```json
 {
-  "type": "object",
-  "properties": {
-    "asset_id": {
-      "type": "string",
-      "description": "Fully-qualified asset ID"
-    }
-  },
-  "required": ["asset_id"]
+  "asset_id": "bigquery:my-project::analytics.orders"
 }
 ```
 
-**Example input**
+### Lineage
 
 ```json
 {
-  "asset_id": "bigquery:my-project.analytics.orders"
-}
-```
-
-**Example output**
-
-```json
-{
-  "id": "bigquery:my-project.analytics.orders",
-  "source": "bigquery:my-project",
-  "kind": "TABLE",
-  "name": "orders",
-  "description": null,
-  "tags": [],
-  "metadata": {
-    "project": "my-project",
-    "dataset": "analytics",
-    "table": "orders",
-    "row_count": 4821043
-  },
-  "first_seen": "2024-11-01T09:00:00",
-  "last_seen": "2025-03-20T14:32:00"
-}
-```
-
----
-
-## atlas_lineage
-
-Trace upstream or downstream lineage for a data asset.
-
-**Input schema**
-
-```json
-{
-  "type": "object",
-  "properties": {
-    "asset_id": {
-      "type": "string",
-      "description": "Asset ID to trace from"
-    },
-    "direction": {
-      "type": "string",
-      "enum": ["upstream", "downstream"],
-      "description": "Direction of traversal"
-    },
-    "depth": {
-      "type": "integer",
-      "description": "Maximum traversal depth (omit for unlimited)"
-    }
-  },
-  "required": ["asset_id", "direction"]
-}
-```
-
-**Example input — upstream**
-
-```json
-{
-  "asset_id": "dbt:my-project.fct_orders",
+  "asset_id": "dbt:analytics::marts.fct_orders",
   "direction": "upstream",
   "depth": 3
 }
 ```
 
-**Example output**
-
-```
-Upstream lineage for dbt:my-project.fct_orders (4 nodes):
-  bigquery:my-project.raw.orders
-  bigquery:my-project.raw.customers
-  dbt:my-project.stg_orders
-  dbt:my-project.stg_customers
-```
-
-**Example input — downstream**
+### Schema
 
 ```json
 {
-  "asset_id": "bigquery:my-project.analytics.orders",
-  "direction": "downstream"
+  "asset_id": "postgres:customer:public::public.users"
 }
 ```
 
-**Example output**
-
-```
-Downstream lineage for bigquery:my-project.analytics.orders (2 nodes):
-  bigquery:my-project.analytics.orders_daily
-  dbt:my-project.fct_orders
-```
-
----
-
-## atlas_status
-
-Return a summary of the Atlas graph: total assets, edges, query fingerprints, and counts by kind and source.
-
-**Input schema**
+### Query Patterns
 
 ```json
 {
-  "type": "object",
-  "properties": {}
+  "top_n": 20
 }
 ```
 
-No inputs required.
-
-**Example output**
-
-```
-Atlas graph: 196 assets, 130 edges, 34 query fingerprints
-
-Assets by kind:
-  TABLE: 98
-  VIEW: 44
-  MATERIALIZED_VIEW: 8
-  SEED: 4
-  SNAPSHOT: 2
-
-Assets by source:
-  bigquery:my-project: 142
-  dbt:my-project: 54
-```
-
----
-
-## atlas_get_schema
-
-Get the latest schema snapshot for a data asset — column names, types, and nullability.
-
-**Input schema**
+### Contract Check
 
 ```json
 {
-  "type": "object",
-  "properties": {
-    "asset_id": {
-      "type": "string",
-      "description": "Asset ID to get schema for"
-    }
-  },
-  "required": ["asset_id"]
+  "asset_id": "dbt:analytics::marts.fct_orders"
 }
 ```
 
-**Example input**
+### Violations
 
 ```json
 {
-  "asset_id": "bigquery:my-project.analytics.orders"
+  "limit": 50
 }
 ```
 
-**Example output**
+## Notes
 
-```
-Schema for bigquery:my-project.analytics.orders (captured 2025-03-20T14:32:00):
-
-  order_id          STRING    NOT NULL
-  customer_id       STRING    NOT NULL
-  order_date        DATE      NOT NULL
-  status            STRING    NULL
-  total_amount      NUMERIC   NULL
-  created_at        TIMESTAMP NOT NULL
-  updated_at        TIMESTAMP NULL
-```
-
----
-
-## atlas_impact
-
-Analyse the downstream impact of changes to an asset — returns all assets that depend on it, directly or transitively.
-
-**Input schema**
-
-```json
-{
-  "type": "object",
-  "properties": {
-    "asset_id": {
-      "type": "string",
-      "description": "Asset ID to analyse impact for"
-    },
-    "depth": {
-      "type": "integer",
-      "description": "Maximum depth of impact analysis"
-    }
-  },
-  "required": ["asset_id"]
-}
-```
-
-**Example input**
-
-```json
-{
-  "asset_id": "bigquery:my-project.raw.orders"
-}
-```
-
-**Example output**
-
-```
-Impact analysis for bigquery:my-project.raw.orders:
-  5 downstream asset(s) would be affected by changes:
-
-  bigquery:my-project.analytics.orders
-  bigquery:my-project.analytics.orders_daily
-  dbt:my-project.stg_orders
-  dbt:my-project.fct_orders
-  dbt:my-project.rpt_revenue
-
-Recommendation: Review these 5 downstream assets before making changes to bigquery:my-project.raw.orders.
-```
-
----
-
-## Asset ID format
-
-Asset IDs follow the pattern `{source_id}.{schema}.{object}`, where `source_id` is the identifier assigned during `alma-atlas connect`. Use `atlas_search` to discover IDs if you don't know them.
-
-Examples:
-
-| Source | Asset ID |
-|--------|----------|
-| BigQuery | `bigquery:my-project.analytics.orders` |
-| PostgreSQL | `postgres:mydb.public.users` |
-| dbt | `dbt:my-project.fct_orders` |
+- `atlas_status` is the MCP graph summary. The CLI `alma-atlas status` is a separate command with its own display format.
+- `atlas_team_sync` reports sync results for assets, edges, contracts, and violations; it does not make schema snapshots, query fingerprints, or annotations globally shared.
+- `atlas_get_asset` returns the asset record as stored in SQLite. That means the exact metadata keys vary by connector and by what the current scan path projected.

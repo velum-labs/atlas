@@ -11,7 +11,10 @@ Usage:
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Annotated
+from urllib.parse import urlparse
 
 import typer
 from rich import print as rprint
@@ -24,17 +27,49 @@ app = typer.Typer(help="Register and manage data source connections.")
 console = Console()
 
 
+def _slug_from_url(url: str) -> str:
+    parsed = urlparse(url)
+    host = parsed.hostname or url
+    return host.replace(".", "-")
+
+
+def _read_dbt_project_name(manifest_path: str) -> str | None:
+    try:
+        manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    metadata = manifest.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    project_name = metadata.get("project_name")
+    return project_name.strip() if isinstance(project_name, str) and project_name.strip() else None
+
+
 @app.command("bigquery")
 def connect_bigquery(
     project: Annotated[str, typer.Option("--project", "-p", help="GCP project ID.")],
     credentials: Annotated[str | None, typer.Option(help="Path to service account JSON.")] = None,
+    service_account_env: Annotated[
+        str | None,
+        typer.Option("--service-account-env", help="Env var containing the raw service account JSON payload."),
+    ] = None,
+    location: Annotated[str, typer.Option("--location", help="BigQuery location / region.")] = "us",
 ) -> None:
     """Register a Google BigQuery data source."""
+    if credentials and service_account_env:
+        rprint("[red]Error:[/red] Use either --credentials or --service-account-env, not both.")
+        raise typer.Exit(1)
     cfg = get_config()
+    params: dict[str, str] = {"project_id": project, "location": location}
+    if credentials:
+        params["credentials"] = credentials
+    if service_account_env:
+        params["service_account_env"] = service_account_env
     source = SourceConfig(
         id=f"bigquery:{project}",
         kind="bigquery",
-        params={"project": project, **({"credentials": credentials} if credentials else {})},
+        params=params,
     )
     cfg.add_source(source)
     rprint(f"[green]Connected:[/green] BigQuery project [bold]{project}[/bold]")
@@ -53,7 +88,7 @@ def connect_postgres(
     source = SourceConfig(
         id=source_id,
         kind="postgres",
-        params={"dsn": dsn, "schema": schema},
+        params={"dsn": dsn, "include_schemas": [schema]},
     )
     cfg.add_source(source)
     rprint(f"[green]Connected:[/green] Postgres database [bold]{db_name}[/bold] (schema: {schema})")
@@ -62,23 +97,36 @@ def connect_postgres(
 @app.command("snowflake")
 def connect_snowflake(
     account: Annotated[str, typer.Option("--account", help="Snowflake account identifier.")],
-    user: Annotated[str, typer.Option("--user", help="Snowflake username.")],
+    account_secret_env: Annotated[
+        str,
+        typer.Option(
+            "--account-secret-env",
+            help="Env var containing the Snowflake connection JSON payload.",
+        ),
+    ] = "SNOWFLAKE_CONNECTION_JSON",
     warehouse: Annotated[str | None, typer.Option("--warehouse")] = None,
     database: Annotated[str | None, typer.Option("--database")] = None,
-    schema: Annotated[str, typer.Option("--schema")] = "PUBLIC",
+    role: Annotated[str | None, typer.Option("--role")] = None,
+    schema: Annotated[str | None, typer.Option("--schema")] = None,
 ) -> None:
     """Register a Snowflake data source."""
     cfg = get_config()
+    params: dict[str, object] = {
+        "account": account,
+        "account_secret_env": account_secret_env,
+    }
+    if warehouse is not None:
+        params["warehouse"] = warehouse
+    if database is not None:
+        params["database"] = database
+    if role is not None:
+        params["role"] = role
+    if schema is not None:
+        params["include_schemas"] = [schema]
     source = SourceConfig(
         id=f"snowflake:{account}",
         kind="snowflake",
-        params={
-            "account": account,
-            "user": user,
-            **({} if warehouse is None else {"warehouse": warehouse}),
-            **({} if database is None else {"database": database}),
-            "schema": schema,
-        },
+        params=params,
     )
     cfg.add_source(source)
     rprint(f"[green]Connected:[/green] Snowflake account [bold]{account}[/bold]")
@@ -94,8 +142,6 @@ def connect_dbt(
     project: Annotated[str | None, typer.Option("--project", help="dbt project name override.")] = None,
 ) -> None:
     """Register a dbt project source."""
-    from pathlib import Path
-
     if project_dir is not None:
         project_path = Path(project_dir).resolve()
         if manifest is not None:
@@ -116,14 +162,143 @@ def connect_dbt(
         rprint("[red]Error:[/red] Provide --manifest or --project-dir")
         raise typer.Exit(1)
 
+    detected_project = project or _read_dbt_project_name(manifest_path)
+    if detected_project is None:
+        detected_project = Path(manifest_path).resolve().parent.parent.name
+
+    project_dir_path = Path(manifest_path).resolve().parent
+    catalog_path = project_dir_path / "catalog.json"
+    run_results_path = project_dir_path / "run_results.json"
+
     cfg = get_config()
     source = SourceConfig(
-        id=f"dbt:{project or 'project'}",
+        id=f"dbt:{detected_project}",
         kind="dbt",
-        params={"manifest_path": manifest_path, **({"project_name": project} if project else {})},
+        params={
+            "manifest_path": manifest_path,
+            **({"catalog_path": str(catalog_path)} if catalog_path.exists() else {}),
+            **({"run_results_path": str(run_results_path)} if run_results_path.exists() else {}),
+            "project_name": detected_project,
+        },
     )
     cfg.add_source(source)
     rprint(f"[green]Connected:[/green] dbt project from [bold]{manifest_path}[/bold]")
+
+
+@app.command("airflow")
+def connect_airflow(
+    base_url: Annotated[str, typer.Option("--base-url", help="Airflow base URL.")],
+    auth_token_env: Annotated[
+        str | None,
+        typer.Option("--auth-token-env", help="Env var containing the Airflow auth token."),
+    ] = "AIRFLOW_AUTH_TOKEN",
+    username: Annotated[str | None, typer.Option("--username")] = None,
+    password: Annotated[str | None, typer.Option("--password", hide_input=True)] = None,
+) -> None:
+    """Register an Apache Airflow source."""
+    cfg = get_config()
+    params: dict[str, object] = {"base_url": base_url}
+    if auth_token_env:
+        params["auth_token_env"] = auth_token_env
+    if username is not None:
+        params["username"] = username
+    if password is not None:
+        params["password"] = password
+    source = SourceConfig(
+        id=f"airflow:{_slug_from_url(base_url)}",
+        kind="airflow",
+        params=params,
+    )
+    cfg.add_source(source)
+    rprint(f"[green]Connected:[/green] Airflow instance [bold]{base_url}[/bold]")
+
+
+@app.command("looker")
+def connect_looker(
+    instance_url: Annotated[str, typer.Option("--instance-url", help="Looker instance URL.")],
+    client_id_env: Annotated[
+        str,
+        typer.Option("--client-id-env", help="Env var containing the Looker client ID."),
+    ] = "LOOKER_CLIENT_ID",
+    client_secret_env: Annotated[
+        str,
+        typer.Option("--client-secret-env", help="Env var containing the Looker client secret."),
+    ] = "LOOKER_CLIENT_SECRET",
+    port: Annotated[int, typer.Option("--port", help="Looker API port.")] = 19999,
+) -> None:
+    """Register a Looker source."""
+    cfg = get_config()
+    source = SourceConfig(
+        id=f"looker:{_slug_from_url(instance_url)}",
+        kind="looker",
+        params={
+            "instance_url": instance_url,
+            "client_id_env": client_id_env,
+            "client_secret_env": client_secret_env,
+            "port": port,
+        },
+    )
+    cfg.add_source(source)
+    rprint(f"[green]Connected:[/green] Looker instance [bold]{instance_url}[/bold]")
+
+
+@app.command("fivetran")
+def connect_fivetran(
+    api_key_env: Annotated[
+        str,
+        typer.Option("--api-key-env", help="Env var containing the Fivetran API key."),
+    ] = "FIVETRAN_API_KEY",
+    api_secret_env: Annotated[
+        str,
+        typer.Option("--api-secret-env", help="Env var containing the Fivetran API secret."),
+    ] = "FIVETRAN_API_SECRET",
+) -> None:
+    """Register a Fivetran source."""
+    cfg = get_config()
+    source = SourceConfig(
+        id="fivetran:default",
+        kind="fivetran",
+        params={
+            "api_key_env": api_key_env,
+            "api_secret_env": api_secret_env,
+        },
+    )
+    cfg.add_source(source)
+    rprint("[green]Connected:[/green] Fivetran account")
+
+
+@app.command("metabase")
+def connect_metabase(
+    instance_url: Annotated[str, typer.Option("--instance-url", help="Metabase instance URL.")],
+    api_key_env: Annotated[
+        str | None,
+        typer.Option("--api-key-env", help="Env var containing the Metabase API key."),
+    ] = None,
+    username: Annotated[str | None, typer.Option("--username")] = None,
+    password: Annotated[str | None, typer.Option("--password", hide_input=True)] = None,
+) -> None:
+    """Register a Metabase source."""
+    if api_key_env is None and (username is None or password is None):
+        rprint(
+            "[red]Error:[/red] Provide either --api-key-env or both --username and --password."
+        )
+        raise typer.Exit(1)
+
+    cfg = get_config()
+    params: dict[str, object] = {"instance_url": instance_url}
+    if api_key_env is not None:
+        params["api_key_env"] = api_key_env
+    if username is not None:
+        params["username"] = username
+    if password is not None:
+        params["password"] = password
+    source = SourceConfig(
+        id=f"metabase:{_slug_from_url(instance_url)}",
+        kind="metabase",
+        params=params,
+    )
+    cfg.add_source(source)
+    rprint(f"[green]Connected:[/green] Metabase instance [bold]{instance_url}[/bold]")
 
 
 @app.command("list")

@@ -27,7 +27,7 @@ import os
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 from acp import PROTOCOL_VERSION, spawn_agent_process, text_block
 from pydantic import BaseModel
@@ -117,12 +117,10 @@ class SimpleClient:
     # ------------------------------------------------------------------
 
     async def create_terminal(self, command: str, session_id: str, **kwargs: Any) -> Any:
-        from acp.schema import CreateTerminalResponse
 
         raise RuntimeError("ACPProvider: terminal operations are not supported")
 
     async def terminal_output(self, session_id: str, terminal_id: str, **kwargs: Any) -> Any:
-        from acp.schema import TerminalOutputResponse
 
         raise RuntimeError("ACPProvider: terminal operations are not supported")
 
@@ -207,7 +205,7 @@ class ACPProvider:
             self._args,
         )
         self._cm = spawn_agent_process(
-            self._client,
+            cast(Any, self._client),
             self._command,
             *self._args,
             env=merged_env,
@@ -345,7 +343,7 @@ class ACPProvider:
             self._session_id = None
             logger.debug("ACPProvider: agent subprocess terminated")
 
-    async def __aenter__(self) -> "ACPProvider":
+    async def __aenter__(self) -> ACPProvider:
         return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:

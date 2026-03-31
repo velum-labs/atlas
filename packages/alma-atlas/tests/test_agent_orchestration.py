@@ -64,7 +64,7 @@ def _seed_edge(db: Database, edge: Edge) -> None:
 
 def test_agent_config_defaults() -> None:
     cfg = AgentConfig()
-    assert cfg.provider == "anthropic"
+    assert cfg.provider == "mock"
     assert cfg.model == "claude-opus-4-6"
     assert cfg.api_key_env == "ANTHROPIC_API_KEY"
     assert cfg.timeout == 120
@@ -72,8 +72,8 @@ def test_agent_config_defaults() -> None:
 
 
 def test_agent_config_custom_values() -> None:
-    cfg = AgentConfig(provider="openai", model="gpt-4o", timeout=60, max_tokens=2048)
-    assert cfg.provider == "openai"
+    cfg = AgentConfig(provider="acp", model="gpt-4o", timeout=60, max_tokens=2048)
+    assert cfg.provider == "acp"
     assert cfg.model == "gpt-4o"
     assert cfg.timeout == 60
     assert cfg.max_tokens == 2048
@@ -107,11 +107,11 @@ def test_learning_config_flat_fields_still_work() -> None:
 
 
 def test_learning_config_per_agent_fields_are_independent() -> None:
-    explorer_cfg = AgentConfig(provider="openai", model="gpt-4o-mini")
-    analyzer_cfg = AgentConfig(provider="anthropic", model="claude-haiku-4-5-20251001")
+    explorer_cfg = AgentConfig(provider="acp", model="gpt-4o-mini")
+    analyzer_cfg = AgentConfig(provider="acp", model="claude-haiku-4-5-20251001")
     cfg = LearningConfig(explorer=explorer_cfg, pipeline_analyzer=analyzer_cfg)
-    assert cfg.explorer.provider == "openai"
-    assert cfg.pipeline_analyzer.provider == "anthropic"
+    assert cfg.explorer.provider == "acp"
+    assert cfg.pipeline_analyzer.provider == "acp"
     assert cfg.annotator.provider == "mock"  # default
 
 
@@ -126,7 +126,7 @@ def test_load_atlas_yml_flat_format_sets_per_agent_configs(tmp_path: Path) -> No
         textwrap.dedent("""\
         version: 1
         enrichment:
-          provider: anthropic
+          provider: acp
           model: claude-opus-4-6
           api_key_env: MY_KEY
           timeout: 60
@@ -135,14 +135,14 @@ def test_load_atlas_yml_flat_format_sets_per_agent_configs(tmp_path: Path) -> No
     )
     cfg = load_atlas_yml(yml)
     # Flat fields preserved.
-    assert cfg.learning.provider == "anthropic"
+    assert cfg.learning.provider == "acp"
     assert cfg.learning.model == "claude-opus-4-6"
     # Flat format propagates to all per-agent configs.
-    assert cfg.learning.explorer.provider == "anthropic"
+    assert cfg.learning.explorer.provider == "acp"
     assert cfg.learning.explorer.model == "claude-opus-4-6"
-    assert cfg.learning.pipeline_analyzer.provider == "anthropic"
+    assert cfg.learning.pipeline_analyzer.provider == "acp"
     assert cfg.learning.pipeline_analyzer.model == "claude-opus-4-6"
-    assert cfg.learning.annotator.provider == "anthropic"
+    assert cfg.learning.annotator.provider == "acp"
     assert cfg.learning.annotator.model == "claude-opus-4-6"
 
 
@@ -158,24 +158,24 @@ def test_load_atlas_yml_nested_per_agent_format(tmp_path: Path) -> None:
         version: 1
         enrichment:
           explorer:
-            provider: anthropic
+            provider: acp
             model: claude-haiku-4-20250514
             timeout: 30
           pipeline_analyzer:
-            provider: anthropic
+            provider: acp
             model: claude-sonnet-4-20250514
           annotator:
-            provider: openai
+            provider: acp
             model: gpt-4o
         """)
     )
     cfg = load_atlas_yml(yml)
-    assert cfg.learning.explorer.provider == "anthropic"
+    assert cfg.learning.explorer.provider == "acp"
     assert cfg.learning.explorer.model == "claude-haiku-4-20250514"
     assert cfg.learning.explorer.timeout == 30
-    assert cfg.learning.pipeline_analyzer.provider == "anthropic"
+    assert cfg.learning.pipeline_analyzer.provider == "acp"
     assert cfg.learning.pipeline_analyzer.model == "claude-sonnet-4-20250514"
-    assert cfg.learning.annotator.provider == "openai"
+    assert cfg.learning.annotator.provider == "acp"
     assert cfg.learning.annotator.model == "gpt-4o"
 
 
@@ -193,8 +193,8 @@ def test_load_atlas_yml_nested_partial_uses_defaults(tmp_path: Path) -> None:
     cfg = load_atlas_yml(yml)
     assert cfg.learning.explorer.provider == "mock"
     # pipeline_analyzer and annotator fall back to AgentConfig defaults.
-    assert cfg.learning.pipeline_analyzer.provider == "anthropic"
-    assert cfg.learning.annotator.provider == "anthropic"
+    assert cfg.learning.pipeline_analyzer.provider == "mock"
+    assert cfg.learning.annotator.provider == "mock"
 
 
 # ---------------------------------------------------------------------------
@@ -351,8 +351,13 @@ async def test_run_edge_learning_with_config(db: Database, tmp_path: Path) -> No
     )
     provider = MockProvider(fixed_result=fixed)
 
+    learning_cfg = LearningConfig(
+        explorer=AgentConfig(provider="acp"),
+        pipeline_analyzer=AgentConfig(provider="acp"),
+    )
+
     with patch("alma_atlas.pipeline.learn._provider_from_agent_config", return_value=provider):
-        count = await run_edge_learning(db, tmp_path, config=LearningConfig())
+        count = await run_edge_learning(db, tmp_path, config=learning_cfg)
 
     assert count == 1
     edges = EdgeRepository(db).list_all()
@@ -413,8 +418,13 @@ async def test_run_asset_annotation_with_config(db: Database, tmp_path: Path) ->
     )
     provider = MockProvider(fixed_result=fixed)
 
+    learning_cfg = LearningConfig(
+        explorer=AgentConfig(provider="acp"),
+        annotator=AgentConfig(provider="acp"),
+    )
+
     with patch("alma_atlas.pipeline.learn._provider_from_agent_config", return_value=provider):
-        count = await run_asset_annotation(db, tmp_path, config=LearningConfig())
+        count = await run_asset_annotation(db, tmp_path, config=learning_cfg)
 
     assert count == 1
     record = AnnotationRepository(db).get(asset_id)

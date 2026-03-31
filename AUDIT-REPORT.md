@@ -1,3 +1,9 @@
+# Historical Audit Note
+
+This document is retained for context only.
+
+The repo has since been refactored, several findings here are fixed, and some others changed shape as the runtime moved to the canonical v2-backed scan path. Do not treat this file as the current source of truth; use the live code, tests, and current docs instead.
+
 # Overnight AI Agent Code Audit
 **Date:** 2026-03-24
 **Auditor:** Claude Sonnet 4.6 (post-session review)

@@ -1,3 +1,9 @@
+# Historical Audit Note
+
+This document is retained for context only.
+
+Foundation-layer behavior has changed since this audit. Use the repaired runtime, current tests, and current docs as the source of truth.
+
 # Foundations Audit: alma-ports · alma-sqlkit · alma-atlas-store
 
 **Audited:** 2026-03-24

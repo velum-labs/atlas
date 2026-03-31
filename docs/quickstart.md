@@ -1,16 +1,11 @@
 # Quickstart
 
-This guide walks you from a fresh install to a working MCP server in under 5 minutes. Pick the path that matches your data stack.
-
-## Prerequisites
-
-- Python 3.12+
-- Valid credentials for at least one source (BigQuery, PostgreSQL, or dbt)
+This guide walks from install to a working local Atlas graph and MCP server.
 
 ## Install
 
 ```bash
-pip install alma-atlas
+uv add alma-atlas
 ```
 
 Verify:
@@ -19,246 +14,115 @@ Verify:
 alma-atlas --help
 ```
 
-## Path A: BigQuery
+## Register Sources
 
-### 1. Authenticate
+### BigQuery
 
-Atlas reads BigQuery using Application Default Credentials or an explicit service account key.
-
-**Option 1 — ADC (recommended for local use):**
+Atlas supports either Application Default Credentials or an explicit key file.
 
 ```bash
+# ADC
 gcloud auth application-default login
-```
-
-**Option 2 — Service account key:**
-
-Download a JSON key for a service account with the following roles:
-
-- `roles/bigquery.jobUser` — run INFORMATION_SCHEMA queries
-- `roles/bigquery.metadataViewer` — read table and column metadata
-
-Save the key to a local path, e.g. `~/.config/gcloud/atlas-sa.json`.
-
-### 2. Connect
-
-```bash
 alma-atlas connect bigquery --project my-gcp-project
-# with an explicit key file:
-alma-atlas connect bigquery --project my-gcp-project --credentials ~/.config/gcloud/atlas-sa.json
+
+# Explicit key file
+alma-atlas connect bigquery \
+  --project my-gcp-project \
+  --credentials ~/.config/gcloud/atlas-sa.json
 ```
 
-Expected output:
-
-```
-Connected: BigQuery project my-gcp-project
-```
-
-### 3. Scan
+### PostgreSQL
 
 ```bash
-alma-atlas scan
+alma-atlas connect postgres \
+  --dsn "postgresql://atlas_user:password@localhost:5432/mydb" \
+  --schema public
 ```
 
-Expected output:
+### Snowflake
 
-```
-Scanning bigquery:my-gcp-project...
-  assets: 142  edges: 89
-Scan complete.
-```
-
-### 4. Verify
+Atlas expects a Snowflake connection JSON blob in an env var such as:
 
 ```bash
-alma-atlas status
+export SNOWFLAKE_CONNECTION_JSON='{"account":"xy12345.us-east-1","user":"ATLAS_USER","password":"...","warehouse":"COMPUTE_WH","database":"ANALYTICS","role":"ANALYST"}'
 ```
 
-Expected output:
-
-```
-Atlas graph: 142 assets, 89 edges, 34 query fingerprints
-
-Assets by kind:
-  TABLE: 98
-  VIEW: 44
-
-Assets by source:
-  bigquery:my-gcp-project: 142
-```
-
-### 5. Start the MCP server
+Then register the source:
 
 ```bash
-alma-atlas serve
+alma-atlas connect snowflake \
+  --account xy12345.us-east-1 \
+  --account-secret-env SNOWFLAKE_CONNECTION_JSON \
+  --role ANALYST \
+  --schema ANALYTICS
 ```
 
-Expected output:
-
-```
-Alma Atlas MCP Server — transport: stdio
-```
-
-The server is now listening on stdin/stdout. Connect your IDE — see [IDE configuration](../README.md#ide-configuration).
-
----
-
-## Path B: PostgreSQL
-
-### 1. Prepare credentials
-
-Atlas connects via a standard DSN. The database user needs:
-
-```sql
-GRANT CONNECT ON DATABASE mydb TO atlas_user;
-GRANT USAGE ON SCHEMA public TO atlas_user;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO atlas_user;
-```
-
-For query traffic via `pg_stat_statements`:
-
-```sql
--- In postgresql.conf:
-shared_preload_libraries = 'pg_stat_statements'
-
--- Then:
-CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
-GRANT SELECT ON pg_stat_statements TO atlas_user;
-```
-
-### 2. Connect
+### dbt
 
 ```bash
-alma-atlas connect postgres --dsn "postgresql://atlas_user:password@localhost:5432/mydb"
-# scan a non-default schema:
-alma-atlas connect postgres --dsn "postgresql://..." --schema analytics
-```
-
-Expected output:
-
-```
-Connected: Postgres database mydb
-```
-
-### 3. Scan
-
-```bash
-alma-atlas scan
-```
-
-Expected output:
-
-```
-Scanning postgres:mydb...
-  assets: 67  edges: 41
-Scan complete.
-```
-
-### 4. Verify and serve
-
-```bash
-alma-atlas status
-alma-atlas serve
-```
-
----
-
-## Path C: dbt
-
-Atlas reads dbt's compiled artifacts — no warehouse connection required for schema and lineage data.
-
-### 1. Compile your dbt project
-
-```bash
-cd my-dbt-project
-dbt compile   # or: dbt run
-```
-
-This produces `target/manifest.json` (and optionally `target/catalog.json`).
-
-### 2. Connect
-
-```bash
-# Point at the project directory (Atlas finds target/manifest.json automatically):
+# Atlas auto-discovers target/manifest.json and, when present,
+# target/catalog.json and target/run_results.json.
 alma-atlas connect dbt --project-dir ./my-dbt-project
-
-# Or point directly at the manifest:
-alma-atlas connect dbt --manifest ./my-dbt-project/target/manifest.json
-
-# Override the project display name:
-alma-atlas connect dbt --project-dir ./my-dbt-project --project my-project
 ```
 
-Expected output:
+### Optional Community Sources
 
-```
-Connected: dbt project from /Users/you/my-dbt-project/target/manifest.json
+```bash
+alma-atlas connect airflow --base-url https://airflow.example.com --auth-token-env AIRFLOW_AUTH_TOKEN
+alma-atlas connect looker --instance-url https://looker.example.com --client-id-env LOOKER_CLIENT_ID --client-secret-env LOOKER_CLIENT_SECRET
+alma-atlas connect fivetran --api-key-env FIVETRAN_API_KEY --api-secret-env FIVETRAN_API_SECRET
+alma-atlas connect metabase --instance-url https://metabase.example.com --api-key-env METABASE_API_KEY
 ```
 
-### 3. Scan
+## Scan
 
 ```bash
 alma-atlas scan
 ```
 
-Expected output:
+Atlas writes a local SQLite graph at `~/.alma/atlas.db` by default.
 
-```
-Scanning dbt:my-project...
-  assets: 54  edges: 78
-Scan complete.
-```
-
-### 4. Verify and serve
+## Verify
 
 ```bash
 alma-atlas status
+alma-atlas search orders
+```
+
+Use MCP or CLI search/lineage commands to discover real asset IDs before requesting a specific asset.
+
+## Asset IDs
+
+Atlas uses canonical IDs in the form:
+
+```text
+{source_id}::{object_ref}
+```
+
+Examples:
+
+- `bigquery:my-project::analytics.orders`
+- `postgres:customer:public::public.users`
+- `dbt:analytics::marts.fct_orders`
+
+## Serve MCP
+
+```bash
+# stdio (for local IDE integration)
 alma-atlas serve
-```
 
----
-
-## Combining multiple sources
-
-Atlas merges assets and edges from all registered sources into a single graph. Register as many sources as you need:
-
-```bash
-alma-atlas connect bigquery --project my-gcp-project
-alma-atlas connect dbt --project-dir ./my-dbt-project
-alma-atlas scan
-alma-atlas status
-```
-
-List registered sources:
-
-```bash
-alma-atlas connect list
-```
-
-Remove a source:
-
-```bash
-alma-atlas connect remove bigquery:my-gcp-project
-```
-
----
-
-## Re-scanning
-
-Run `alma-atlas scan` at any time to refresh the graph. Atlas uses cursors for incremental traffic observation — only new query events are fetched on subsequent scans.
-
-## SSE transport
-
-For remote or multi-client setups, use the SSE transport instead of stdio:
-
-```bash
+# SSE
 alma-atlas serve --transport sse --host 127.0.0.1 --port 8080
 ```
 
-Then configure your MCP client with `http://127.0.0.1:8080/sse` as the endpoint.
+For SSE clients, the endpoint is `http://127.0.0.1:8080/sse`.
 
-## Next steps
+## Re-scan
 
-- [MCP Tools Reference](mcp-tools.md) — what tools are available to your AI agent
-- [Config Reference](config-reference.md) — full `sources.json` format
-- [Adapters](adapters.md) — adapter-specific options and limitations
+Run `alma-atlas scan` whenever you want to refresh the graph. Traffic-backed connectors persist observation cursors in the saved source config so subsequent scans can resume from the last observed point.
+
+## Next Steps
+
+- [MCP Tools Reference](mcp-tools.md)
+- [Config Reference](config-reference.md)
+- [Adapters](adapters.md)

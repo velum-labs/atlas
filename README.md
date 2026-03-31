@@ -6,74 +6,103 @@
 
 **Open-source data stack discovery CLI + MCP server**
 
-Alma Atlas scans your data warehouse, dbt project, and BI tools to build a live dependency graph of your entire data stack — tables, schemas, query traffic, and lineage — then exposes that graph as [Model Context Protocol](https://modelcontextprotocol.io) tools so AI agents can answer questions about your data infrastructure in real time.
+Alma Atlas scans warehouses, dbt projects, orchestration systems, and BI/semantic layers into one local graph, then exposes that graph over [Model Context Protocol](https://modelcontextprotocol.io) so agents can answer questions with live schema, lineage, and query-context instead of guessing from code alone.
 
 ## Why Atlas?
 
-AI coding assistants (Cursor, Claude Code, Copilot) write syntactically valid but semantically wrong data code. They can see your files but know nothing about:
+AI coding assistants can read your repo, but they do not know:
 
-- The live schema of your warehouse — so they reference columns that don't exist
-- How data flows through your stack — so they pick the wrong table for a join
-- Who consumes what downstream — so a refactor silently breaks a dashboard
+- which columns exist right now
+- how data actually flows between systems
+- what breaks downstream if a table changes
+- which queries or dashboards depend on a dataset
 
-Atlas gives your AI the context a senior data engineer carries in their head: live schemas, lineage, query traffic, and blast-radius analysis — all queryable through MCP tools.
+Atlas gives them that context through a local graph and MCP tools.
 
 ## Quickstart
 
 ```bash
 uv add alma-atlas
 
-# Or install from ghcr.io (pre-release / latest tagged builds):
-# uv add alma-atlas --index velum=https://pyoci.com/ghcr.io/velum-labs/
-
-# Connect a source (pick one or more)
+# Register one or more sources
 alma-atlas connect bigquery --project my-gcp-project
-alma-atlas connect snowflake --account xy12345.us-east-1 --role ANALYST
-alma-atlas connect postgres --dsn postgresql://user:pass@host/db
+alma-atlas connect postgres --dsn "postgresql://user:pass@host/db" --schema public
+alma-atlas connect snowflake \
+  --account xy12345.us-east-1 \
+  --account-secret-env SNOWFLAKE_CONNECTION_JSON \
+  --role ANALYST \
+  --schema ANALYTICS
 alma-atlas connect dbt --project-dir ./my-dbt-project
 
-# Scan all connected sources
+# Scan all registered sources
 alma-atlas scan
 
 # Start the MCP server
 alma-atlas serve
 ```
 
-Then add Atlas to your IDE — see [IDE configuration](#ide-configuration) below.
+See [docs/quickstart.md](docs/quickstart.md) for connector-specific setup and examples.
 
-See [docs/quickstart.md](docs/quickstart.md) for a full walkthrough including expected output and credential setup.
+## Supported Source Kinds
+
+| Kind | CLI register | Canonical assets | Traffic | Graph lineage | Notes |
+|------|--------------|------------------|---------|---------------|-------|
+| `bigquery` | Yes | Yes | Yes | Yes | Traffic-derived lineage + schema metadata |
+| `postgres` | Yes | Yes | Yes | Yes | `pg_stat_statements` and optional log capture |
+| `snowflake` | Yes | Yes | Yes | Yes | Requires `account_secret_env` connection JSON |
+| `dbt` | Yes | Yes | No | Yes | Reads manifest/catalog artifacts |
+| `airflow` | Yes | Yes | Yes | Yes | DAG discovery, task traffic, orchestration metadata |
+| `looker` | Yes | Yes | No | Yes | Semantic-model assets + declared lineage |
+| `fivetran` | Yes | Yes | No | Yes | Connector discovery + connector API lineage |
+| `metabase` | Yes | Yes | Yes | Limited | Database/table discovery + query activity |
+
+See [docs/adapters.md](docs/adapters.md) for details and required params.
 
 ## MCP Tools
 
-Six tools are registered when you run `alma-atlas serve`:
+`alma-atlas serve` currently registers **12** tools:
 
 | Tool | Description |
 |------|-------------|
-| `atlas_search` | Full-text search across all assets by name, ID, or keyword |
-| `atlas_get_asset` | Full metadata for an asset: kind, tags, row count, first/last seen |
-| `atlas_get_schema` | Column names, types, and nullability for a table or view |
-| `atlas_lineage` | Upstream or downstream traversal with configurable depth |
-| `atlas_impact` | All assets transitively downstream of a given asset |
-| `atlas_status` | Graph summary: asset counts by kind and source |
+| `atlas_search` | Search assets by ID, name, or keyword |
+| `atlas_get_asset` | Return one asset as JSON |
+| `atlas_get_annotations` | Return learned business annotations |
+| `atlas_lineage` | Traverse upstream or downstream lineage |
+| `atlas_status` | Summarize assets, edges, and queries |
+| `atlas_get_schema` | Return the latest schema snapshot |
+| `atlas_impact` | Show downstream blast radius |
+| `atlas_get_query_patterns` | Show top stored query fingerprints |
+| `atlas_suggest_tables` | Rank likely tables for a search intent |
+| `atlas_check_contract` | Validate an asset against stored contracts |
+| `atlas_list_violations` | Show recent unresolved violations |
+| `atlas_team_sync` | Trigger a team graph sync |
 
-See [docs/mcp-tools.md](docs/mcp-tools.md) for input schemas and example output.
+See [docs/mcp-tools.md](docs/mcp-tools.md) for the reference.
 
-## Adapters
+## Asset IDs
 
-| Adapter | Schema | Query Traffic | Lineage | Execute |
-|---------|--------|---------------|---------|---------|
-| BigQuery | Yes | Yes (INFORMATION_SCHEMA.JOBS) | Yes | Yes |
-| Snowflake | Yes | Yes (ACCOUNT_USAGE.QUERY_HISTORY) | Yes | Yes |
-| PostgreSQL | Yes | Yes (pg_stat_statements / logs) | Yes | Yes |
-| dbt | Yes (manifest + catalog) | No | Yes (depends_on) | No |
+Atlas uses canonical asset IDs in the form:
 
-See [docs/adapters.md](docs/adapters.md) for prerequisites, config options, and limitations per adapter.
+```text
+{source_id}::{object_ref}
+```
+
+Examples:
+
+- `bigquery:my-project::analytics.orders`
+- `postgres:customer:public::public.users`
+- `dbt:analytics::marts.fct_orders`
+- `looker:bi-example::ecommerce.orders`
+
+If you do not know an ID, use `atlas_search` or `alma-atlas search` first.
+
+## Learning
+
+Learning is ACP-only. Configure agent-backed learning in `atlas.yml` with `provider: acp` (or an `agent.command`) for the specific agents you want to run. `mock` is still available for tests and local no-op flows.
 
 ## IDE Configuration
 
 ### Claude Desktop
-
-Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
 
 ```json
 {
@@ -88,8 +117,6 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
 
 ### Cursor
 
-Create or edit `.cursor/mcp.json` in your project root:
-
 ```json
 {
   "mcpServers": {
@@ -101,92 +128,45 @@ Create or edit `.cursor/mcp.json` in your project root:
 }
 ```
 
-Restart the IDE after saving. The MCP tools (`atlas_search`, `atlas_lineage`, etc.) will appear automatically.
+Restart your IDE after saving.
 
 ## Architecture
 
 ```mermaid
-graph TD
-    subgraph Sources
-        BQ[BigQuery]
-        SF[Snowflake]
-        PG[PostgreSQL]
-        DBT[dbt]
-    end
-
-    subgraph alma-connectors
-        BQA[BigQuery Adapter]
-        SFA[Snowflake Adapter]
-        PGA[Postgres Adapter]
-        DBTA[dbt Adapter]
-    end
-
-    subgraph alma-atlas
-        PIPE[Scan Pipeline]
-        CLI[CLI]
-        MCP[MCP Server]
-    end
-
-    subgraph Storage
-        DB[(atlas.db\nSQLite)]
-    end
-
-    subgraph Consumers
-        CLAUDE[Claude Desktop]
-        CURSOR[Cursor]
-        CLINE[Cline / Continue]
-    end
-
-    BQ --> BQA
-    SF --> SFA
-    PG --> PGA
-    DBT --> DBTA
-
-    BQA --> PIPE
-    SFA --> PIPE
-    PGA --> PIPE
-    DBTA --> PIPE
-
-    PIPE --> DB
-    DB --> CLI
-    DB --> MCP
-
-    MCP -->|MCP stdio / SSE| CLAUDE
-    MCP -->|MCP stdio / SSE| CURSOR
-    MCP -->|MCP stdio / SSE| CLINE
+flowchart TD
+    sources[Sources] --> adapters[SourceAdapterV2 adapters]
+    adapters --> scanner[Canonical scan orchestrator]
+    scanner --> graph["SQLite graph: assets / edges / schema / queries / contracts / violations / annotations"]
+    graph --> cli[CLI]
+    graph --> mcp[MCP server]
+    graph --> sync[Team sync]
 ```
 
-## Package Structure
-
-Alma Atlas is a Python monorepo. Each package has a single responsibility:
+## Package Layout
 
 | Package | Purpose |
 |---------|---------|
-| `alma-atlas` | CLI, MCP server, scan pipeline orchestration |
-| `alma-atlas-store` | SQLite persistence (assets, edges, schemas, queries) |
-| `alma-ports` | Protocol interfaces — zero runtime dependencies |
-| `alma-connectors` | Source adapters (BigQuery, Snowflake, Postgres, dbt) |
-| `alma-analysis` | Pure analysis functions (lineage, consumer identity) |
-| `alma-sqlkit` | SQL parsing and normalization utilities |
-| `alma-algebrakit` | SQL algebraic fingerprinting for query deduplication |
+| `alma-atlas` | CLI, MCP server, scan orchestration, learning, sync |
+| `alma-atlas-store` | SQLite repositories and migrations |
+| `alma-connectors` | Source adapters |
+| `alma-analysis` | Graph and lineage analysis |
+| `alma-sqlkit` | SQL parsing and normalization |
+| `alma-algebrakit` | SQL algebra and fingerprinting |
+| `alma-ports` | Shared protocols and safety helpers |
 
 ## Documentation
 
-- [Quickstart](docs/quickstart.md) — step-by-step setup for each adapter
-- [MCP Tools Reference](docs/mcp-tools.md) — tool names, input schemas, example output
-- [Config Reference](docs/config-reference.md) — `sources.json` format and environment variables
-- [Adapters](docs/adapters.md) — prerequisites, config options, and limitations per adapter
+- [Quickstart](docs/quickstart.md)
+- [MCP Tools Reference](docs/mcp-tools.md)
+- [Config Reference](docs/config-reference.md)
+- [Adapters](docs/adapters.md)
 
 ## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, code style, and how to add a new connector.
-
-Requirements: Python 3.12+, [uv](https://docs.astral.sh/uv/)
 
 ```bash
 git clone https://github.com/almaos/atlas.git
 cd atlas
-uv sync
+uv sync --all-packages
 uv run alma-atlas --help
 ```
 

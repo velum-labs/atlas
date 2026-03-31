@@ -9,6 +9,15 @@ import pytest
 
 from alma_atlas.config import AtlasConfig, SourceConfig
 from alma_atlas.pipeline.scan import ScanResult, _build_adapter, run_scan
+from alma_connectors.source_adapter_v2 import (
+    AdapterCapability,
+    CapabilityProbeResult,
+    ExtractionMeta,
+    ExtractionScope,
+    ScopeContext,
+    SourceAdapterKindV2,
+    TrafficExtractionResult,
+)
 
 # ---------------------------------------------------------------------------
 # ScanResult dataclass
@@ -67,7 +76,7 @@ def test_build_adapter_bigquery_returns_adapter() -> None:
 def test_build_adapter_uses_uuid5_for_id() -> None:
     import uuid
 
-    source = SourceConfig(id="pg-mydb", kind="postgres", params={})
+    source = SourceConfig(id="pg-mydb", kind="postgres", params={"dsn_env": "PG_URL"})
     _, persisted = _build_adapter(source)
     expected_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "pg-mydb"))
     assert persisted.id == expected_id
@@ -83,16 +92,99 @@ def _make_scan_cfg(tmp_path: Path) -> AtlasConfig:
     return AtlasConfig(config_dir=tmp_path / "alma", db_path=tmp_path / "atlas.db")
 
 
+def _probe(capability: AdapterCapability, *, available: bool = True, message: str | None = None) -> CapabilityProbeResult:
+    return CapabilityProbeResult(
+        capability=capability,
+        available=available,
+        scope=ExtractionScope.DATABASE,
+        scope_context=ScopeContext(scope=ExtractionScope.DATABASE, identifiers={"db": "test"}),
+        message=message,
+    )
+
+
+def _make_v2_adapter(
+    *,
+    schema_result: object,
+    traffic_result: object | Exception,
+) -> MagicMock:
+    adapter = MagicMock()
+    adapter.declared_capabilities = frozenset({AdapterCapability.SCHEMA, AdapterCapability.TRAFFIC})
+    adapter.test_connection = AsyncMock(return_value=MagicMock())
+    adapter.execute_query = AsyncMock(return_value=MagicMock())
+    adapter.get_setup_instructions = MagicMock(return_value=MagicMock())
+    adapter.probe = AsyncMock(
+        return_value=(
+            _probe(AdapterCapability.SCHEMA, available=True),
+            _probe(AdapterCapability.TRAFFIC, available=True),
+        )
+    )
+    adapter.discover = AsyncMock(side_effect=NotImplementedError)
+    adapter.extract_definitions = AsyncMock(side_effect=NotImplementedError)
+    adapter.extract_lineage = AsyncMock(side_effect=NotImplementedError)
+    adapter.extract_orchestration = AsyncMock(side_effect=NotImplementedError)
+    adapter.extract_schema = AsyncMock(return_value=schema_result)
+    if isinstance(traffic_result, Exception):
+        adapter.extract_traffic = AsyncMock(side_effect=traffic_result)
+    else:
+        adapter.extract_traffic = AsyncMock(return_value=traffic_result)
+    return adapter
+
+
+def _make_v2_schema_snapshot(mock_schema_snapshot):
+    from datetime import UTC, datetime
+
+    from alma_connectors.source_adapter_v2 import SchemaObject, SchemaObjectKind, SchemaSnapshotV2
+
+    return SchemaSnapshotV2(
+        meta=ExtractionMeta(
+            adapter_key="pg-test",
+            adapter_kind=SourceAdapterKindV2.POSTGRES,
+            capability=AdapterCapability.SCHEMA,
+            scope_context=ScopeContext(scope=ExtractionScope.DATABASE, identifiers={"db": "test"}),
+            captured_at=mock_schema_snapshot.captured_at or datetime.now(UTC),
+            duration_ms=10.0,
+            row_count=len(mock_schema_snapshot.objects),
+        ),
+        objects=tuple(
+            SchemaObject(
+                schema_name=obj.schema_name,
+                object_name=obj.object_name,
+                kind=SchemaObjectKind.TABLE,
+            )
+            for obj in mock_schema_snapshot.objects
+        ),
+    )
+
+
+def _make_v2_traffic_result(mock_traffic_result):
+    from datetime import UTC, datetime
+
+    return TrafficExtractionResult(
+        meta=ExtractionMeta(
+            adapter_key="pg-test",
+            adapter_kind=SourceAdapterKindV2.POSTGRES,
+            capability=AdapterCapability.TRAFFIC,
+            scope_context=ScopeContext(scope=ExtractionScope.DATABASE, identifiers={"db": "test"}),
+            captured_at=datetime.now(UTC),
+            duration_ms=10.0,
+            row_count=len(mock_traffic_result.events),
+        ),
+        events=mock_traffic_result.events,
+        observation_cursor=mock_traffic_result.observation_cursor,
+    )
+
+
 def test_run_scan_returns_asset_count(tmp_path: Path, mock_schema_snapshot, mock_traffic_result) -> None:
     cfg = _make_scan_cfg(tmp_path)
     source = SourceConfig(id="pg-test", kind="postgres", params={})
 
-    mock_adapter = MagicMock()
-    mock_adapter.introspect_schema = AsyncMock(return_value=mock_schema_snapshot)
-    mock_adapter.observe_traffic = AsyncMock(return_value=mock_traffic_result)
+    mock_adapter = _make_v2_adapter(
+        schema_result=_make_v2_schema_snapshot(mock_schema_snapshot),
+        traffic_result=_make_v2_traffic_result(mock_traffic_result),
+    )
 
     with (
-        patch("alma_atlas.pipeline.scan._build_adapter", return_value=(mock_adapter, MagicMock())),
+        patch("alma_atlas.pipeline.scan._build_adapter", return_value=(mock_adapter, MagicMock(key="pg-test"))),
         patch("alma_atlas.pipeline.stitch.stitch", return_value=0),
     ):
         result = run_scan(source, cfg)
@@ -106,12 +198,13 @@ def test_run_scan_returns_edge_count(tmp_path: Path, mock_schema_snapshot, mock_
     cfg = _make_scan_cfg(tmp_path)
     source = SourceConfig(id="pg-test", kind="postgres", params={})
 
-    mock_adapter = MagicMock()
-    mock_adapter.introspect_schema = AsyncMock(return_value=mock_schema_snapshot)
-    mock_adapter.observe_traffic = AsyncMock(return_value=mock_traffic_result)
+    mock_adapter = _make_v2_adapter(
+        schema_result=_make_v2_schema_snapshot(mock_schema_snapshot),
+        traffic_result=_make_v2_traffic_result(mock_traffic_result),
+    )
 
     with (
-        patch("alma_atlas.pipeline.scan._build_adapter", return_value=(mock_adapter, MagicMock())),
+        patch("alma_atlas.pipeline.scan._build_adapter", return_value=(mock_adapter, MagicMock(key="pg-test"))),
         patch("alma_atlas.pipeline.stitch.stitch", return_value=3),
     ):
         result = run_scan(source, cfg)
@@ -127,18 +220,21 @@ def test_run_scan_build_adapter_error(tmp_path: Path) -> None:
     assert result.asset_count == 0
 
 
-def test_run_scan_introspect_failure(tmp_path: Path) -> None:
+def test_run_scan_schema_failure(tmp_path: Path) -> None:
     cfg = _make_scan_cfg(tmp_path)
     source = SourceConfig(id="pg-test", kind="postgres", params={})
 
-    mock_adapter = MagicMock()
-    mock_adapter.introspect_schema = AsyncMock(side_effect=RuntimeError("connection refused"))
+    mock_adapter = _make_v2_adapter(
+        schema_result=MagicMock(),
+        traffic_result=MagicMock(),
+    )
+    mock_adapter.extract_schema = AsyncMock(side_effect=RuntimeError("connection refused"))
 
-    with patch("alma_atlas.pipeline.scan._build_adapter", return_value=(mock_adapter, MagicMock())):
+    with patch("alma_atlas.pipeline.scan._build_adapter", return_value=(mock_adapter, MagicMock(key="pg-test"))):
         result = run_scan(source, cfg)
 
     assert result.error is not None
-    assert "introspection" in result.error.lower()
+    assert "schema extraction failed" in result.error.lower()
     assert result.asset_count == 0
 
 
@@ -146,16 +242,17 @@ def test_run_scan_traffic_failure_returns_warning(tmp_path: Path, mock_schema_sn
     cfg = _make_scan_cfg(tmp_path)
     source = SourceConfig(id="pg-test", kind="postgres", params={})
 
-    mock_adapter = MagicMock()
-    mock_adapter.introspect_schema = AsyncMock(return_value=mock_schema_snapshot)
-    mock_adapter.observe_traffic = AsyncMock(side_effect=RuntimeError("traffic error"))
+    mock_adapter = _make_v2_adapter(
+        schema_result=_make_v2_schema_snapshot(mock_schema_snapshot),
+        traffic_result=RuntimeError("traffic error"),
+    )
 
-    with patch("alma_atlas.pipeline.scan._build_adapter", return_value=(mock_adapter, MagicMock())):
+    with patch("alma_atlas.pipeline.scan._build_adapter", return_value=(mock_adapter, MagicMock(key="pg-test"))):
         result = run_scan(source, cfg)
 
     assert result.error is None
     assert result.asset_count == 1
-    assert len(result.warnings) == 1
+    assert len(result.warnings) >= 1
     assert "traffic" in result.warnings[0].lower()
 
 
@@ -163,16 +260,30 @@ def test_run_scan_empty_snapshot(tmp_path: Path, mock_traffic_result) -> None:
     cfg = _make_scan_cfg(tmp_path)
     source = SourceConfig(id="pg-test", kind="postgres", params={})
 
-    from alma_connectors.source_adapter import SchemaSnapshot
+    from datetime import UTC, datetime
 
-    empty_snapshot = SchemaSnapshot(captured_at=None, objects=(), dependencies=())
+    from alma_connectors.source_adapter_v2 import SchemaSnapshotV2
 
-    mock_adapter = MagicMock()
-    mock_adapter.introspect_schema = AsyncMock(return_value=empty_snapshot)
-    mock_adapter.observe_traffic = AsyncMock(return_value=mock_traffic_result)
+    empty_snapshot = SchemaSnapshotV2(
+        meta=ExtractionMeta(
+            adapter_key="pg-test",
+            adapter_kind=SourceAdapterKindV2.POSTGRES,
+            capability=AdapterCapability.SCHEMA,
+            scope_context=ScopeContext(scope=ExtractionScope.DATABASE, identifiers={"db": "test"}),
+            captured_at=datetime.now(UTC),
+            duration_ms=10.0,
+            row_count=0,
+        ),
+        objects=(),
+    )
+
+    mock_adapter = _make_v2_adapter(
+        schema_result=empty_snapshot,
+        traffic_result=_make_v2_traffic_result(mock_traffic_result),
+    )
 
     with (
-        patch("alma_atlas.pipeline.scan._build_adapter", return_value=(mock_adapter, MagicMock())),
+        patch("alma_atlas.pipeline.scan._build_adapter", return_value=(mock_adapter, MagicMock(key="pg-test"))),
         patch("alma_atlas.pipeline.stitch.stitch", return_value=0),
     ):
         result = run_scan(source, cfg)

@@ -41,7 +41,7 @@ def test_connect_bigquery(tmp_path: Path) -> None:
     sources = cfg.load_sources()
     assert len(sources) == 1
     assert sources[0].kind == "bigquery"
-    assert sources[0].params["project"] == "my-project"
+    assert sources[0].params["project_id"] == "my-project"
 
 
 def test_connect_bigquery_with_credentials(tmp_path: Path) -> None:
@@ -68,6 +68,7 @@ def test_connect_postgres(tmp_path: Path) -> None:
     sources = cfg.load_sources()
     assert sources[0].id == "postgres:mydb"
     assert sources[0].kind == "postgres"
+    assert sources[0].params["include_schemas"] == ["public"]
 
 
 # ---------------------------------------------------------------------------
@@ -78,12 +79,110 @@ def test_connect_postgres(tmp_path: Path) -> None:
 def test_connect_dbt(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
     manifest = str(tmp_path / "manifest.json")
+    Path(manifest).write_text('{"metadata":{"project_name":"analytics"}}')
     with patch("alma_atlas.cli.connect.get_config", return_value=cfg):
         result = runner.invoke(app, ["connect", "dbt", "--manifest", manifest])
     assert result.exit_code == 0
     sources = cfg.load_sources()
     assert sources[0].kind == "dbt"
     assert sources[0].params["manifest_path"] == manifest
+    assert sources[0].id == "dbt:analytics"
+    assert sources[0].params["project_name"] == "analytics"
+
+
+def test_connect_snowflake(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    with patch("alma_atlas.cli.connect.get_config", return_value=cfg):
+        result = runner.invoke(
+            app,
+            [
+                "connect",
+                "snowflake",
+                "--account",
+                "xy12345.us-east-1",
+                "--account-secret-env",
+                "SNOWFLAKE_CONNECTION_JSON",
+                "--role",
+                "ANALYST",
+                "--schema",
+                "ANALYTICS",
+            ],
+        )
+    assert result.exit_code == 0
+    sources = cfg.load_sources()
+    assert sources[0].kind == "snowflake"
+    assert sources[0].params["account_secret_env"] == "SNOWFLAKE_CONNECTION_JSON"
+    assert sources[0].params["role"] == "ANALYST"
+    assert sources[0].params["include_schemas"] == ["ANALYTICS"]
+
+
+def test_connect_airflow(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    with patch("alma_atlas.cli.connect.get_config", return_value=cfg):
+        result = runner.invoke(
+            app,
+            ["connect", "airflow", "--base-url", "https://airflow.example.com", "--auth-token-env", "AIRFLOW_AUTH_TOKEN"],
+        )
+    assert result.exit_code == 0
+    source = cfg.load_sources()[0]
+    assert source.kind == "airflow"
+    assert source.params["base_url"] == "https://airflow.example.com"
+    assert source.params["auth_token_env"] == "AIRFLOW_AUTH_TOKEN"
+
+
+def test_connect_looker(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    with patch("alma_atlas.cli.connect.get_config", return_value=cfg):
+        result = runner.invoke(
+            app,
+            [
+                "connect",
+                "looker",
+                "--instance-url",
+                "https://looker.example.com",
+                "--client-id-env",
+                "LOOKER_CLIENT_ID",
+                "--client-secret-env",
+                "LOOKER_CLIENT_SECRET",
+            ],
+        )
+    assert result.exit_code == 0
+    source = cfg.load_sources()[0]
+    assert source.kind == "looker"
+    assert source.params["instance_url"] == "https://looker.example.com"
+
+
+def test_connect_fivetran(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    with patch("alma_atlas.cli.connect.get_config", return_value=cfg):
+        result = runner.invoke(
+            app,
+            [
+                "connect",
+                "fivetran",
+                "--api-key-env",
+                "FIVETRAN_API_KEY",
+                "--api-secret-env",
+                "FIVETRAN_API_SECRET",
+            ],
+        )
+    assert result.exit_code == 0
+    source = cfg.load_sources()[0]
+    assert source.kind == "fivetran"
+    assert source.params["api_key_env"] == "FIVETRAN_API_KEY"
+
+
+def test_connect_metabase(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    with patch("alma_atlas.cli.connect.get_config", return_value=cfg):
+        result = runner.invoke(
+            app,
+            ["connect", "metabase", "--instance-url", "https://metabase.example.com", "--api-key-env", "METABASE_API_KEY"],
+        )
+    assert result.exit_code == 0
+    source = cfg.load_sources()[0]
+    assert source.kind == "metabase"
+    assert source.params["api_key_env"] == "METABASE_API_KEY"
 
 
 # ---------------------------------------------------------------------------

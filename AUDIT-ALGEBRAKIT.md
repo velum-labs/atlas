@@ -1,3 +1,9 @@
+# Historical Audit Note
+
+This document is retained for context only.
+
+Some findings remain useful background, but this file is not the current source of truth for the repaired repo state.
+
 # Technical Audit: alma-algebrakit
 
 **Audited package:** `packages/alma-algebrakit/src/alma_algebrakit/`

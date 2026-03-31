@@ -78,7 +78,9 @@ def scan(
         # Suppress noisy sqlglot parse warnings (e.g. TRUNCATE unsupported syntax)
         _logging.getLogger("sqlglot").setLevel(_logging.ERROR)
 
-    if config_file is None and connections is None:
+    persist_sources = config_file is None and connections is None
+
+    if persist_sources:
         cfg = get_config()
         sources = cfg.load_sources()
     else:
@@ -129,6 +131,7 @@ def scan(
     cfg.ensure_dir()
     failed_sources: list[str] = []
     scan_error: str | None = None
+    sync_error: str | None = None
     all_result = None
 
     if normalized_output_format == "json":
@@ -137,6 +140,8 @@ def scan(
             for result in all_result.results:
                 if result.error:
                     failed_sources.append(result.source_id)
+            if persist_sources:
+                cfg.save_sources(sources)
             write_payload(serialize_scan_result(all_result), output=output)
         except Exception as e:
             scan_error = str(e)
@@ -155,6 +160,10 @@ def scan(
                             f"  [green]Done:[/green] {result.source_id} — "
                             f"{result.asset_count} assets, {result.edge_count} edges"
                         )
+                    for warning in result.warnings:
+                        rprint(f"  [yellow]Warning:[/yellow] {result.source_id} — {warning}")
+                if persist_sources:
+                    cfg.save_sources(sources)
                 progress.update(
                     task,
                     description=(
@@ -201,7 +210,7 @@ def scan(
     # Auto-sync if team is configured and --no-sync not passed
     if not no_sync:
         cfg.load_team_config()
-        if cfg.team_server_url and cfg.team_api_key:
+        if cfg.team_server_url and cfg.team_api_key and cfg.db_path is not None:
             import asyncio
 
             from alma_atlas.sync.auth import TeamAuth
@@ -210,17 +219,24 @@ def scan(
 
             try:
                 auth = TeamAuth(cfg.team_api_key)
-                client = SyncClient(cfg.team_server_url, auth, cfg.team_id or "default")
-                with Database(cfg.db_path) as db:
-                    asyncio.run(client.full_sync(db, cfg))
+                server_url = cfg.team_server_url
+                db_path = cfg.db_path
+
+                async def _run_sync() -> None:
+                    async with SyncClient(server_url, auth, cfg.team_id or "default") as client:
+                        with Database(db_path) as db:
+                            await client.full_sync(db, cfg)
+
+                asyncio.run(_run_sync())
                 if normalized_output_format != "json":
                     rprint("[dim]Team sync complete.[/dim]")
             except Exception as exc:
-                if verbose and normalized_output_format != "json":
-                    rprint(f"[yellow]Team sync failed (continuing):[/yellow] {exc}")
+                sync_error = str(exc)
+                if normalized_output_format != "json":
+                    rprint(f"[yellow]Team sync failed:[/yellow] {exc}")
 
     # Exit codes: 0 = all succeeded, 1 = partial (some sources failed), 3 = complete failure
     if scan_error is not None:
         raise typer.Exit(3)
-    if failed_sources:
+    if failed_sources or sync_error is not None:
         raise typer.Exit(1)

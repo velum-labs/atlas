@@ -646,7 +646,7 @@ def test_load_atlas_yml_enrichment_section(tmp_path: Path) -> None:
         textwrap.dedent("""\
         version: 1
         learning:
-          provider: anthropic
+          provider: acp
           model: claude-opus-4-6
           api_key_env: MY_ANTHROPIC_KEY
           timeout: 60
@@ -654,7 +654,7 @@ def test_load_atlas_yml_enrichment_section(tmp_path: Path) -> None:
         """)
     )
     cfg = load_atlas_yml(yml)
-    assert cfg.learning.provider == "anthropic"
+    assert cfg.learning.provider == "acp"
     assert cfg.learning.model == "claude-opus-4-6"
     assert cfg.learning.api_key_env == "MY_ANTHROPIC_KEY"
     assert cfg.learning.timeout == 60

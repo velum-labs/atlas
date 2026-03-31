@@ -1,3 +1,9 @@
+# Historical Audit Note
+
+This document is retained for context only.
+
+Connector/runtime packaging and scan orchestration have changed since this audit. Use the repaired runtime, current tests, and current docs as the source of truth.
+
 # Deep Audit: alma-connectors
 **Date:** 2026-03-24
 **Auditor:** Claude Sonnet 4.6 — second-pass, post-hardening

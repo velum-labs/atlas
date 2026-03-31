@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 from alma_atlas.config import AtlasConfig
 from alma_atlas.mcp.tools import (
@@ -12,9 +13,11 @@ from alma_atlas.mcp.tools import (
     _handle_get_schema,
     _handle_impact,
     _handle_lineage,
+    _handle_list_violations,
     _handle_search,
     _handle_status,
     _handle_suggest_tables,
+    _handle_team_sync,
 )
 from alma_atlas_store.asset_repository import Asset, AssetRepository
 from alma_atlas_store.contract_repository import Contract, ContractRepository
@@ -22,6 +25,7 @@ from alma_atlas_store.db import Database
 from alma_atlas_store.edge_repository import Edge, EdgeRepository
 from alma_atlas_store.query_repository import QueryObservation, QueryRepository
 from alma_atlas_store.schema_repository import ColumnInfo, SchemaRepository, SchemaSnapshot
+from alma_atlas_store.violation_repository import Violation, ViolationRepository
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -472,6 +476,45 @@ def test_check_contract_no_snapshot(tmp_path: Path) -> None:
     result = _handle_check_contract(cfg, {"asset_id": "pg::public.orders"})
     assert "FAILED" in result[0].text
     assert "No schema snapshot" in result[0].text
+
+
+def test_list_violations_empty(tmp_path: Path) -> None:
+    cfg = _make_cfg(tmp_path)
+    result = _handle_list_violations(cfg, {})
+    assert "No open violations" in result[0].text
+
+
+def test_list_violations_for_asset(tmp_path: Path) -> None:
+    cfg = _make_cfg(tmp_path)
+    with Database(cfg.db_path) as db:
+        ViolationRepository(db).insert(
+            Violation(
+                asset_id="pg::public.orders",
+                violation_type="type_changed",
+                severity="error",
+                details={"message": "orders.id changed type"},
+            )
+        )
+    result = _handle_list_violations(cfg, {"asset_id": "pg::public.orders"})
+    assert "pg::public.orders" in result[0].text
+    assert "type_changed" in result[0].text
+
+
+async def test_team_sync_handler_returns_summary(tmp_path: Path) -> None:
+    from alma_atlas.sync.protocol import SyncResponse
+
+    cfg = _make_cfg(tmp_path)
+    cfg.team_server_url = "https://team.example.com"
+    cfg.team_api_key = "token"
+    cfg.team_id = "eng"
+    cfg.save_team_config()
+
+    with patch(
+        "alma_atlas.sync.client.SyncClient.full_sync",
+        AsyncMock(return_value=SyncResponse(accepted_count=7, rejected=[], new_cursor="2024-06-01T00:00:00Z")),
+    ):
+        result = await _handle_team_sync(cfg)
+    assert "7 record(s) accepted" in result[0].text
 
 
 # ---------------------------------------------------------------------------

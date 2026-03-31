@@ -19,7 +19,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from alma_atlas.config import AtlasConfig, SourceConfig
 from alma_ports.errors import ConfigurationError, ExtractionError
@@ -54,6 +54,450 @@ class ScanAllResult:
 
     results: list[ScanResult] = field(default_factory=list)
     cross_system_edge_count: int = 0
+
+
+def _capability_skip_warnings(plan: Any) -> list[str]:
+    warnings: list[str] = []
+    for capability in getattr(plan, "skipped", []):
+        probe_result = getattr(plan, "probe_results", {}).get(capability)
+        if probe_result is None:
+            warnings.append(f"capability_skipped:{capability.value}")
+            continue
+        parts = [f"capability_skipped:{capability.value}"]
+        if probe_result.message:
+            parts.append(str(probe_result.message))
+        if probe_result.permissions_missing:
+            missing = ", ".join(probe_result.permissions_missing)
+            parts.append(f"missing permissions: {missing}")
+        warnings.append(" — ".join(parts))
+    return warnings
+
+
+def _canonical_object_ref(source_kind: str, ref: str) -> str:
+    normalized = ref.strip().replace('"', "")
+    if source_kind == "airflow" and normalized.startswith("airflow://"):
+        dag_id = normalized.rsplit("/", 1)[-1]
+        return f"airflow://{dag_id}"
+    if source_kind == "looker" and normalized.startswith("looker://explore/"):
+        parts = normalized.split("/")
+        if len(parts) >= 5:
+            return f"{parts[-2]}.{parts[-1]}"
+    return normalized
+
+
+def _canonical_asset_id(source_id: str, source_kind: str, ref: str) -> str:
+    return f"{source_id}::{_canonical_object_ref(source_kind, ref)}"
+
+
+def _infer_placeholder_kind(ref: str) -> str:
+    if ref.startswith("airflow://"):
+        return "dag"
+    if ref.startswith("fivetran://connector/"):
+        return "connector"
+    if ref.startswith("looker://"):
+        return "semantic_model"
+    if ref.startswith("metabase://database/"):
+        return "database"
+    if ref.startswith("metabase://collection/"):
+        return "collection"
+    if "." in ref:
+        return "table"
+    return "external"
+
+
+def _merge_tags(existing: list[str], incoming: list[str]) -> list[str]:
+    seen: set[str] = set()
+    merged: list[str] = []
+    for tag in [*existing, *incoming]:
+        if tag in seen:
+            continue
+        seen.add(tag)
+        merged.append(tag)
+    return merged
+
+
+def _upsert_asset(
+    repo: Any,
+    *,
+    asset_id: str,
+    source_id: str,
+    kind: str,
+    name: str,
+    description: str | None = None,
+    tags: list[str] | None = None,
+    metadata: dict[str, Any] | None = None,
+    preserve_existing_kind: bool = False,
+) -> bool:
+    from alma_atlas_store.asset_repository import Asset
+
+    existing = repo.get(asset_id)
+    merged_metadata = {
+        **(existing.metadata if existing is not None else {}),
+        **(metadata or {}),
+    }
+    merged_tags = _merge_tags(existing.tags if existing is not None else [], tags or [])
+    repo.upsert(
+        Asset(
+            id=asset_id,
+            source=source_id,
+            kind=(
+                existing.kind
+                if preserve_existing_kind and existing is not None
+                else kind or (existing.kind if existing is not None else "external")
+            ),
+            name=name or (existing.name if existing is not None else asset_id),
+            description=description or (existing.description if existing is not None else None),
+            tags=merged_tags,
+            metadata=merged_metadata,
+        )
+    )
+    return existing is None
+
+
+def _ensure_allowed_source_params(source: SourceConfig, allowed: set[str]) -> None:
+    unknown = sorted(set(source.params) - allowed)
+    if unknown:
+        raise ValueError(
+            f"Unknown params for source {source.id!r} ({source.kind}): {unknown}. "
+            f"Allowed keys: {sorted(allowed)}"
+        )
+
+
+def _schema_snapshot_v1_from_v2(schema_result: Any) -> Any:
+    from alma_connectors.source_adapter import (
+        SchemaObjectKind as V1SchemaObjectKind,
+    )
+    from alma_connectors.source_adapter import (
+        SchemaSnapshot,
+        SourceColumnSchema,
+        SourceObjectDependency,
+        SourceTableSchema,
+    )
+
+    kind_map = {
+        "table": V1SchemaObjectKind.TABLE,
+        "view": V1SchemaObjectKind.VIEW,
+        "materialized_view": V1SchemaObjectKind.MATERIALIZED_VIEW,
+        "external_table": V1SchemaObjectKind.TABLE,
+    }
+
+    objects: list[SourceTableSchema] = []
+    supported_keys: set[tuple[str, str]] = set()
+    for obj in schema_result.objects:
+        mapped_kind = kind_map.get(obj.kind.value)
+        if mapped_kind is None:
+            continue
+        supported_keys.add((obj.schema_name, obj.object_name))
+        objects.append(
+            SourceTableSchema(
+                schema_name=obj.schema_name,
+                object_name=obj.object_name,
+                object_kind=mapped_kind,
+                columns=tuple(
+                    SourceColumnSchema(
+                        name=column.name,
+                        data_type=column.data_type,
+                        is_nullable=column.is_nullable,
+                    )
+                    for column in obj.columns
+                ),
+                row_count=obj.row_count,
+                size_bytes=obj.size_bytes,
+                partition_column=obj.partition_column,
+                clustering_columns=obj.clustering_columns,
+            )
+        )
+
+    dependencies = tuple(
+        SourceObjectDependency(
+            source_schema=dependency.source_schema,
+            source_object=dependency.source_object,
+            target_schema=dependency.target_schema,
+            target_object=dependency.target_object,
+        )
+        for dependency in schema_result.dependencies
+        if (dependency.source_schema, dependency.source_object) in supported_keys
+        and (dependency.target_schema, dependency.target_object) in supported_keys
+    )
+
+    return SchemaSnapshot(
+        captured_at=schema_result.meta.captured_at,
+        objects=tuple(objects),
+        dependencies=dependencies,
+    )
+
+
+def _store_discovery_assets(
+    *,
+    db: Any,
+    source: SourceConfig,
+    discovery_result: Any,
+) -> int:
+    from alma_atlas_store.asset_repository import AssetRepository
+
+    asset_repo = AssetRepository(db)
+    written = 0
+    for container in discovery_result.containers:
+        canonical_ref = _canonical_object_ref(source.kind, container.container_id)
+        written += int(_upsert_asset(
+            asset_repo,
+            asset_id=f"{source.id}::{canonical_ref}",
+            source_id=source.id,
+            kind=container.container_type,
+            name=container.display_name,
+            metadata={
+                "container_id": container.container_id,
+                "location": container.location,
+                **container.metadata,
+            },
+        ))
+    return written
+
+
+def _store_orchestration_assets(
+    *,
+    db: Any,
+    source: SourceConfig,
+    orchestration_result: Any,
+) -> int:
+    from alma_atlas_store.asset_repository import AssetRepository
+
+    asset_repo = AssetRepository(db)
+    written = 0
+    for unit in orchestration_result.units:
+        canonical_ref = _canonical_object_ref(source.kind, unit.unit_id)
+        written += int(_upsert_asset(
+            asset_repo,
+            asset_id=f"{source.id}::{canonical_ref}",
+            source_id=source.id,
+            kind=unit.unit_type,
+            name=unit.display_name,
+            metadata={
+                "schedule": unit.schedule,
+                "last_run_at": unit.last_run_at.isoformat() if unit.last_run_at else None,
+                "last_run_status": unit.last_run_status,
+                "task_count": len(unit.tasks),
+                **unit.metadata,
+            },
+        ))
+    return written
+
+
+def _store_schema_projection(
+    *,
+    db: Any,
+    source: SourceConfig,
+    schema_result: Any,
+    definition_result: Any | None,
+) -> tuple[int, int, Any]:
+    from alma_atlas_store.asset_repository import AssetRepository
+    from alma_atlas_store.edge_repository import Edge, EdgeRepository
+    from alma_atlas_store.schema_repository import ColumnInfo, SchemaRepository
+    from alma_atlas_store.schema_repository import SchemaSnapshot as StoreSnapshot
+
+    asset_repo = AssetRepository(db)
+    edge_repo = EdgeRepository(db)
+    schema_repo = SchemaRepository(db)
+
+    definitions_by_key: dict[tuple[str, str], Any] = {}
+    if definition_result is not None:
+        definitions_by_key = {
+            (definition.schema_name, definition.object_name): definition
+            for definition in definition_result.definitions
+        }
+
+    asset_id_map: dict[tuple[str, str], str] = {}
+    asset_count = 0
+    edge_count = 0
+    for obj in schema_result.objects:
+        asset_id = f"{source.id}::{obj.schema_name}.{obj.object_name}"
+        definition = definitions_by_key.get((obj.schema_name, obj.object_name))
+        metadata: dict[str, Any] = {
+            "row_count": obj.row_count,
+            "size_bytes": obj.size_bytes,
+            "language": obj.language,
+            "return_type": obj.return_type,
+            "model_type": obj.model_type,
+            "feature_columns": list(obj.feature_columns),
+            "label_column": obj.label_column,
+            "partition_column": obj.partition_column,
+            "clustering_columns": list(obj.clustering_columns),
+            "owner": obj.owner,
+            "source_metadata": dict(obj.metadata),
+        }
+        if definition is not None:
+            metadata["definition_text"] = definition.definition_text
+            metadata["definition_language"] = definition.definition_language
+            metadata["definition_metadata"] = dict(definition.metadata)
+
+        asset_count += int(_upsert_asset(
+            asset_repo,
+            asset_id=asset_id,
+            source_id=source.id,
+            kind=obj.kind.value,
+            name=f"{obj.schema_name}.{obj.object_name}",
+            description=obj.description,
+            tags=list(obj.tags),
+            metadata=metadata,
+        ))
+        asset_id_map[(obj.schema_name, obj.object_name)] = asset_id
+
+        if obj.columns:
+            schema_repo.upsert(
+                StoreSnapshot(
+                    asset_id=asset_id,
+                    columns=[
+                        ColumnInfo(
+                            name=column.name,
+                            type=column.data_type,
+                            nullable=column.is_nullable,
+                            description=column.description,
+                        )
+                        for column in obj.columns
+                    ],
+                )
+            )
+
+    for dependency in schema_result.dependencies:
+        upstream_id = asset_id_map.get((dependency.target_schema, dependency.target_object))
+        downstream_id = asset_id_map.get((dependency.source_schema, dependency.source_object))
+        if upstream_id is None or downstream_id is None:
+            continue
+        edge_repo.upsert(
+            Edge(
+                upstream_id=upstream_id,
+                downstream_id=downstream_id,
+                kind="depends_on",
+            )
+        )
+        edge_count += 1
+
+    return asset_count, edge_count, _schema_snapshot_v1_from_v2(schema_result)
+
+
+def _store_lineage_projection(
+    *,
+    db: Any,
+    source: SourceConfig,
+    lineage_result: Any,
+) -> tuple[int, int]:
+    from alma_atlas_store.asset_repository import AssetRepository
+    from alma_atlas_store.edge_repository import Edge, EdgeRepository
+
+    asset_repo = AssetRepository(db)
+    edge_repo = EdgeRepository(db)
+
+    asset_count = 0
+    edge_count = 0
+    for lineage_edge in lineage_result.edges:
+        upstream_ref = _canonical_object_ref(source.kind, lineage_edge.source_object)
+        downstream_ref = _canonical_object_ref(source.kind, lineage_edge.target_object)
+        upstream_id = f"{source.id}::{upstream_ref}"
+        downstream_id = f"{source.id}::{downstream_ref}"
+        edge_kind = "depends_on" if source.kind == "dbt" else lineage_edge.edge_kind.value
+
+        asset_count += int(_upsert_asset(
+            asset_repo,
+            asset_id=upstream_id,
+            source_id=source.id,
+            kind=_infer_placeholder_kind(upstream_ref),
+            name=upstream_ref,
+            preserve_existing_kind=True,
+        ))
+        asset_count += int(_upsert_asset(
+            asset_repo,
+            asset_id=downstream_id,
+            source_id=source.id,
+            kind=_infer_placeholder_kind(downstream_ref),
+            name=downstream_ref,
+            preserve_existing_kind=True,
+        ))
+        edge_repo.upsert(
+            Edge(
+                upstream_id=upstream_id,
+                downstream_id=downstream_id,
+                kind=edge_kind,
+                metadata={
+                    "confidence": lineage_edge.confidence,
+                    "column_mappings": [list(pair) for pair in lineage_edge.column_mappings],
+                    "transformation_sql": lineage_edge.transformation_sql,
+                    **lineage_edge.metadata,
+                },
+            )
+        )
+        edge_count += 1
+
+    return asset_count, edge_count
+
+
+def _store_scan_results(
+    *,
+    db: Any,
+    source: SourceConfig,
+    persisted: Any,
+    results: dict[Any, Any],
+) -> tuple[int, int, Any | None]:
+    from alma_atlas.pipeline.scanner_v2 import _upsert_extraction_result
+    from alma_atlas.pipeline.stitch import stitch
+    from alma_connectors.source_adapter_v2 import AdapterCapability
+
+    for capability, result in results.items():
+        _upsert_extraction_result(db, persisted.key, capability, result)
+
+    asset_count = 0
+    edge_count = 0
+    snapshot_v1 = None
+
+    schema_result = results.get(AdapterCapability.SCHEMA)
+    definition_result = results.get(AdapterCapability.DEFINITIONS)
+    discovery_result = results.get(AdapterCapability.DISCOVER)
+    lineage_result = results.get(AdapterCapability.LINEAGE)
+    traffic_result = results.get(AdapterCapability.TRAFFIC)
+    orchestration_result = results.get(AdapterCapability.ORCHESTRATION)
+
+    if schema_result is not None:
+        stored_assets, stored_edges, snapshot_v1 = _store_schema_projection(
+            db=db,
+            source=source,
+            schema_result=schema_result,
+            definition_result=definition_result,
+        )
+        asset_count += stored_assets
+        edge_count += stored_edges
+    elif discovery_result is not None:
+        asset_count += _store_discovery_assets(
+            db=db,
+            source=source,
+            discovery_result=discovery_result,
+        )
+
+    if orchestration_result is not None and schema_result is None:
+        asset_count += _store_orchestration_assets(
+            db=db,
+            source=source,
+            orchestration_result=orchestration_result,
+        )
+
+    if lineage_result is not None:
+        lineage_assets, lineage_edges = _store_lineage_projection(
+            db=db,
+            source=source,
+            lineage_result=lineage_result,
+        )
+        asset_count += lineage_assets
+        edge_count += lineage_edges
+
+    if traffic_result is not None:
+        edge_count += stitch(
+            traffic_result,
+            db,
+            source_id=source.id,
+            source_kind=source.kind,
+        )
+        if traffic_result.observation_cursor is not None:
+            source.params["observation_cursor"] = dict(traffic_result.observation_cursor)
+
+    return asset_count, edge_count, snapshot_v1
 
 
 async def run_scan_async(
@@ -110,9 +554,12 @@ async def _run_scan_impl(
     dry_run: bool = False,
 ) -> ScanResult:
     """Inner implementation of run_scan_async (no timeout wrapper)."""
-    from alma_atlas.pipeline.stitch import stitch
-    from alma_atlas_store.asset_repository import Asset, AssetRepository
+    from alma_atlas.pipeline.scanner_v2 import CapabilityRouter, ExtractionPipeline
     from alma_atlas_store.db import Database
+    from alma_connectors.source_adapter_v2 import SourceAdapterV2
+
+    if cfg.db_path is None:
+        raise ConfigurationError("Atlas db_path is not configured")
 
     t0 = time.monotonic()
     logger.info("[scan/%s] Starting scan (kind=%s, dry_run=%s)", source.id, source.kind, dry_run)
@@ -128,134 +575,106 @@ async def _run_scan_impl(
         logger.info("[scan/%s] Dry-run complete — adapter constructed successfully.", source.id)
         return ScanResult(source_id=source.id)
 
-    # Phase: schema introspection.
-    t_schema = time.monotonic()
-    logger.info("[scan/%s] Phase: schema introspection", source.id)
+    if not isinstance(adapter, SourceAdapterV2):
+        raise ExtractionError(
+            f"Adapter {type(adapter).__name__} does not implement SourceAdapterV2; "
+            "the legacy v1 scan path has been removed"
+        )
+
+    # Phase: capability probing.
+    t_probe = time.monotonic()
+    logger.info("[scan/%s] Phase: capability probe", source.id)
     try:
-        snapshot = await adapter.introspect_schema(persisted)
+        probe_results = await adapter.probe(persisted)
     except Exception as exc:
-        raise ExtractionError(f"Schema introspection failed: {exc}") from exc
+        raise ExtractionError(f"Capability probe failed: {exc}") from exc
     logger.info(
-        "[scan/%s] Schema introspection complete: %d object(s) in %.2fs",
+        "[scan/%s] Capability probe complete: %d result(s) in %.2fs",
         source.id,
-        len(snapshot.objects),
-        time.monotonic() - t_schema,
+        len(probe_results),
+        time.monotonic() - t_probe,
     )
 
-    with Database(cfg.db_path) as db:  # type: ignore[arg-type]
-        repo = AssetRepository(db)
-
-        from alma_atlas_store.schema_repository import ColumnInfo, SchemaRepository
-        from alma_atlas_store.schema_repository import SchemaSnapshot as StoreSnapshot
-
-        schema_repo = SchemaRepository(db)
-
-        asset_id_map: dict[tuple[str, str], str] = {}
-        for obj in snapshot.objects:
-            asset_id = f"{source.id}::{obj.schema_name}.{obj.object_name}"
-            repo.upsert(
-                Asset(
-                    id=asset_id,
-                    source=source.id,
-                    kind=obj.object_kind.value,
-                    name=f"{obj.schema_name}.{obj.object_name}",
-                )
-            )
-            asset_id_map[(obj.schema_name, obj.object_name)] = asset_id
-
-            # Persist schema snapshot (column-level info) for every asset —
-            # enables atlas_get_schema, atlas_check_contract, and drift detection.
-            if obj.columns:
-                store_snapshot = StoreSnapshot(
-                    asset_id=asset_id,
-                    columns=[
-                        ColumnInfo(
-                            name=c.name,
-                            type=getattr(c, "data_type", None) or getattr(c, "type", "unknown"),
-                            nullable=getattr(c, "nullable", True),
-                        )
-                        for c in obj.columns
-                    ],
-                )
-                schema_repo.upsert(store_snapshot)
-
-        # Persist schema-level dependency edges (e.g. from dbt manifest lineage).
-        dep_edge_count = 0
-        if snapshot.dependencies:
-            from alma_atlas_store.edge_repository import Edge, EdgeRepository
-
-            edge_repo = EdgeRepository(db)
-            for dep in snapshot.dependencies:
-                upstream_id = asset_id_map.get((dep.target_schema, dep.target_object))
-                downstream_id = asset_id_map.get((dep.source_schema, dep.source_object))
-                if upstream_id and downstream_id:
-                    edge_repo.upsert(
-                        Edge(
-                            upstream_id=upstream_id,
-                            downstream_id=downstream_id,
-                            kind="depends_on",
-                        )
-                    )
-                    dep_edge_count += 1
-
-        # Phase: traffic observation.
-        t_traffic = time.monotonic()
-        logger.info("[scan/%s] Phase: traffic observation", source.id)
-        try:
-            traffic = await adapter.observe_traffic(persisted)
-        except Exception as exc:
-            logger.warning("Traffic observation failed for source %s: %s", source.id, exc)
-            return ScanResult(
-                source_id=source.id,
-                asset_count=len(snapshot.objects),
-                edge_count=dep_edge_count,
-                warnings=[f"ExtractionError: Traffic observation failed: {exc}"],
-                snapshot=snapshot,
-            )
-        logger.info(
-            "[scan/%s] Traffic observation complete: %d event(s) in %.2fs",
-            source.id,
-            getattr(traffic, "scanned_records", 0),
-            time.monotonic() - t_traffic,
+    router = CapabilityRouter()
+    plan = router.build_plan(probe_results)
+    warnings = _capability_skip_warnings(plan)
+    if not plan.capabilities:
+        return ScanResult(
+            source_id=source.id,
+            warnings=warnings or ["No capabilities available; nothing extracted."],
         )
 
-        # Phase: stitch (lineage edge derivation).
-        t_stitch = time.monotonic()
-        logger.info("[scan/%s] Phase: stitch", source.id)
-        edge_count = stitch(traffic, db, source_id=source.id, source_kind=source.kind) + dep_edge_count
+    # Phase: extraction.
+    t_extract = time.monotonic()
+    logger.info("[scan/%s] Phase: capability extraction", source.id)
+    try:
+        results, extraction_warnings = await ExtractionPipeline(adapter, persisted).execute(plan)
+    except Exception as exc:
+        raise ExtractionError(f"Capability extraction failed: {exc}") from exc
+    warnings.extend(extraction_warnings)
+    from alma_connectors.source_adapter_v2 import AdapterCapability
+
+    if (
+        AdapterCapability.SCHEMA in plan.capabilities
+        and AdapterCapability.SCHEMA not in results
+    ):
+        raise ExtractionError("Schema extraction failed")
+    logger.info(
+        "[scan/%s] Capability extraction complete: %d capability result(s) in %.2fs",
+        source.id,
+        len(results),
+        time.monotonic() - t_extract,
+    )
+
+    snapshot = None
+    asset_count = 0
+    edge_count = 0
+    enforcement_blocked = False
+    enforcement_violations = False
+
+    with Database(cfg.db_path) as db:
+        t_store = time.monotonic()
+        logger.info("[scan/%s] Phase: projection + persistence", source.id)
+        asset_count, edge_count, snapshot = _store_scan_results(
+            db=db,
+            source=source,
+            persisted=persisted,
+            results=results,
+        )
         logger.info(
-            "[scan/%s] Stitch complete: %d edge(s) in %.2fs",
+            "[scan/%s] Projection complete: %d asset(s), %d edge(s) in %.2fs",
             source.id,
+            asset_count,
             edge_count,
-            time.monotonic() - t_stitch,
+            time.monotonic() - t_store,
         )
 
-        # Phase: enforcement.
-        t_enforce = time.monotonic()
-        logger.info("[scan/%s] Phase: enforcement", source.id)
-        enforcement_blocked = False
-        enforcement_violations = False
-        try:
-            enforcement_blocked, enforcement_violations = _run_enforcement(snapshot, source.id, db)
-        except Exception as exc:
-            logger.exception("Enforcement check failed for source %s: %s", source.id, exc)
-        logger.info(
-            "[scan/%s] Enforcement complete in %.2fs",
-            source.id,
-            time.monotonic() - t_enforce,
-        )
+        if snapshot is not None:
+            t_enforce = time.monotonic()
+            logger.info("[scan/%s] Phase: enforcement", source.id)
+            try:
+                enforcement_blocked, enforcement_violations = _run_enforcement(snapshot, source.id, db)
+            except Exception as exc:
+                logger.exception("Enforcement check failed for source %s: %s", source.id, exc)
+                warnings.append(f"EnforcementError: {exc}")
+            logger.info(
+                "[scan/%s] Enforcement complete in %.2fs",
+                source.id,
+                time.monotonic() - t_enforce,
+            )
 
     logger.info(
         "[scan/%s] Scan finished: %d asset(s), %d edge(s) in %.2fs",
         source.id,
-        len(snapshot.objects),
+        asset_count,
         edge_count,
         time.monotonic() - t0,
     )
     result = ScanResult(
         source_id=source.id,
-        asset_count=len(snapshot.objects),
+        asset_count=asset_count,
         edge_count=edge_count,
+        warnings=warnings,
         snapshot=snapshot,
     )
     if enforcement_blocked:
@@ -274,7 +693,7 @@ async def _run_scan_impl(
             timestamp=datetime.now(UTC).isoformat(),
             data={
                 "blocked": enforcement_blocked,
-                "asset_count": len(snapshot.objects),
+                "asset_count": asset_count,
             },
         )
         await executor.fire(event)
@@ -301,7 +720,7 @@ def run_scan(
     return asyncio.run(run_scan_async(source, cfg, timeout=timeout))
 
 
-def _run_enforcement(snapshot: SchemaSnapshot, source_id: str, db: object) -> tuple[bool, bool]:
+def _run_enforcement(snapshot: SchemaSnapshot, source_id: str, db: Any) -> tuple[bool, bool]:
     """Run drift detection + enforcement for any assets that have contracts.
 
     Silently skips assets without contracts.  Enforcement violations are
@@ -340,10 +759,6 @@ def _run_enforcement(snapshot: SchemaSnapshot, source_id: str, db: object) -> tu
     for obj in snapshot.objects:
         asset_id = f"{source_id}::{obj.schema_name}.{obj.object_name}"
         contracts = contract_repo.list_for_asset(asset_id)
-        if not contracts:
-            continue
-
-        previous = schema_repo.get_latest(asset_id)
         # Build current StoreSnapshot from the connector SchemaSnapshot object.
         current_cols = [
             ColumnInfo(
@@ -355,8 +770,14 @@ def _run_enforcement(snapshot: SchemaSnapshot, source_id: str, db: object) -> tu
         ]
         current = StoreSnapshot(asset_id=asset_id, columns=current_cols)
 
+        history = schema_repo.list_history(asset_id)
+        previous = history[1] if len(history) >= 2 else None
+
         # Persist the current snapshot so future scans can detect drift.
         schema_repo.upsert(current)
+
+        if not contracts:
+            continue
 
         report = detector.detect(asset_id, previous, current)
         if not report.has_violations:
@@ -394,6 +815,8 @@ async def _run_scan_all_async(
     from alma_atlas_store.db import Database
 
     semaphore = asyncio.Semaphore(max_concurrent)
+    if cfg.db_path is None:
+        raise ConfigurationError("Atlas db_path is not configured")
 
     async def _scan_with_sem(source: SourceConfig) -> ScanResult:
         async with semaphore:
@@ -422,18 +845,26 @@ async def _run_scan_all_async(
 
     cross_system_edge_count = 0
     if len(snapshots) >= 2:
-        with Database(cfg.db_path) as db:  # type: ignore[arg-type]
+        with Database(cfg.db_path) as db:
             cross_system_edge_count = discover_cross_system_edges(snapshots, db)
             cross_system_edge_count += resolve_dbt_source_edges(dbt_snapshots, warehouse_snapshots, db)
 
-    # Run learning phase if repo_path provided and a real (non-mock) provider is configured.
-    if repo_path is not None and not no_learn and cfg.learning.provider != "mock":
-        from alma_atlas.pipeline.learn import run_asset_annotation, run_edge_learning
+    # Run learning phase only when the required non-mock agent configs exist.
+    if repo_path is not None and not no_learn:
+        from alma_atlas.pipeline.learn import (
+            asset_annotation_is_enabled,
+            edge_learning_is_enabled,
+            run_asset_annotation,
+            run_edge_learning,
+        )
 
-        with Database(cfg.db_path) as db:  # type: ignore[arg-type]
-            logger.info("[scan] Running learning phase from %s", repo_path)
-            await run_edge_learning(db, repo_path, config=cfg.learning)
-            await run_asset_annotation(db, repo_path, config=cfg.learning)
+        with Database(cfg.db_path) as db:
+            if edge_learning_is_enabled(cfg.learning):
+                logger.info("[scan] Running edge learning from %s", repo_path)
+                await run_edge_learning(db, repo_path, config=cfg.learning)
+            if asset_annotation_is_enabled(cfg.learning):
+                logger.info("[scan] Running asset annotation from %s", repo_path)
+                await run_asset_annotation(db, repo_path, config=cfg.learning)
 
     return ScanAllResult(results=results, cross_system_edge_count=cross_system_edge_count)
 
@@ -502,6 +933,8 @@ def _build_adapter(source: SourceConfig):  # type: ignore[return]
     from alma_connectors.source_adapter import (
         ExternalSecretRef,
         PersistedSourceAdapter,
+        PostgresLogCaptureConfig,
+        PostgresReadReplicaConfig,
         SourceAdapterSecret,
         SourceAdapterStatus,
     )
@@ -517,19 +950,56 @@ def _build_adapter(source: SourceConfig):  # type: ignore[return]
             return ref or ""
         return os.environ.get(ref, "") if ref else ""
 
+    def _observation_cursor() -> dict[str, object] | None:
+        cursor = source.params.get("observation_cursor")
+        return dict(cursor) if isinstance(cursor, dict) else None
+
     kind = source.kind
 
     if kind == "bigquery":
         from alma_connectors.adapters.bigquery import BigQueryAdapter
         from alma_connectors.source_adapter import BigQueryAdapterConfig, SourceAdapterKind
 
-        config = BigQueryAdapterConfig(
-            service_account_secret=ExternalSecretRef(
+        _ensure_allowed_source_params(
+            source,
+            {
+                "credentials",
+                "lookback_hours",
+                "location",
+                "max_column_rows",
+                "max_job_rows",
+                "observation_cursor",
+                "probe_target",
+                "project",
+                "project_id",
+                "service_account_env",
+            },
+        )
+        if "credentials" in source.params and "service_account_env" in source.params:
+            raise ValueError("bigquery sources may set only one of 'credentials' or 'service_account_env'")
+
+        if "credentials" in source.params:
+            credentials_path = Path(str(source.params["credentials"])).expanduser()
+            if not credentials_path.exists():
+                raise ValueError(f"BigQuery credentials file not found: {credentials_path}")
+            service_account_secret = ExternalSecretRef(
+                provider="literal",
+                reference=credentials_path.read_text(encoding="utf-8"),
+            )
+        else:
+            service_account_secret = ExternalSecretRef(
                 provider="env",
                 reference=source.params.get("service_account_env", "BQ_SERVICE_ACCOUNT_JSON"),
-            ),
+            )
+
+        config = BigQueryAdapterConfig(
+            service_account_secret=service_account_secret,
             project_id=source.params.get("project_id") or source.params["project"],
             location=source.params.get("location", "us"),
+            lookback_hours=int(source.params.get("lookback_hours", 24)),
+            max_job_rows=int(source.params.get("max_job_rows", 10_000)),
+            max_column_rows=int(source.params.get("max_column_rows", 20_000)),
+            probe_target=source.params.get("probe_target"),
         )
         persisted = PersistedSourceAdapter(
             id=adapter_id,
@@ -539,6 +1009,7 @@ def _build_adapter(source: SourceConfig):  # type: ignore[return]
             target_id=source.id,
             status=SourceAdapterStatus.READY,
             config=config,
+            observation_cursor=_observation_cursor(),
         )
         return BigQueryAdapter(resolve_secret=_resolve_env), persisted
 
@@ -546,6 +1017,20 @@ def _build_adapter(source: SourceConfig):  # type: ignore[return]
         from alma_connectors.adapters.postgres import PostgresAdapter
         from alma_connectors.source_adapter import PostgresAdapterConfig, SourceAdapterKind
 
+        _ensure_allowed_source_params(
+            source,
+            {
+                "dsn",
+                "dsn_env",
+                "exclude_schemas",
+                "include_schemas",
+                "log_capture",
+                "observation_cursor",
+                "probe_target",
+                "read_replica",
+                "schema",
+            },
+        )
         # Support direct DSN from params or env-var reference
         if "dsn" in source.params:
             db_secret: SourceAdapterSecret = ExternalSecretRef(
@@ -553,9 +1038,12 @@ def _build_adapter(source: SourceConfig):  # type: ignore[return]
                 reference=source.params["dsn"],
             )
         else:
+            dsn_env = source.params.get("dsn_env")
+            if not isinstance(dsn_env, str) or not dsn_env:
+                raise ValueError("postgres sources require either 'dsn' or 'dsn_env'")
             db_secret = ExternalSecretRef(
                 provider="env",
-                reference=source.params.get("dsn_env", "PG_DATABASE_URL"),
+                reference=dsn_env,
             )
 
         # Pass through schema filter if provided.
@@ -568,9 +1056,45 @@ def _build_adapter(source: SourceConfig):  # type: ignore[return]
         else:
             include_schemas = ("public",)
 
+        exclude_schemas = tuple(source.params.get("exclude_schemas", ("pg_catalog", "information_schema")))
+        log_capture_raw = source.params.get("log_capture")
+        log_capture = None
+        if isinstance(log_capture_raw, dict):
+            log_capture = PostgresLogCaptureConfig(
+                log_path=log_capture_raw["log_path"],
+                default_source=log_capture_raw.get("default_source"),
+                default_database_name=log_capture_raw.get("default_database_name"),
+                default_database_user=log_capture_raw.get("default_database_user"),
+            )
+
+        read_replica_raw = source.params.get("read_replica")
+        read_replica = None
+        if isinstance(read_replica_raw, dict):
+            replica_secret: SourceAdapterSecret | None = None
+            if "dsn" in read_replica_raw:
+                replica_secret = ExternalSecretRef(
+                    provider="literal",
+                    reference=read_replica_raw["dsn"],
+                )
+            elif "dsn_env" in read_replica_raw:
+                replica_secret = ExternalSecretRef(
+                    provider="env",
+                    reference=read_replica_raw["dsn_env"],
+                )
+            read_replica = PostgresReadReplicaConfig(
+                database_secret=replica_secret,
+                host=read_replica_raw.get("host"),
+                port=read_replica_raw.get("port"),
+                expected_lag_seconds=int(read_replica_raw.get("expected_lag_seconds", 0)),
+            )
+
         config = PostgresAdapterConfig(
             database_secret=db_secret,
             include_schemas=include_schemas,
+            exclude_schemas=exclude_schemas,
+            log_capture=log_capture,
+            probe_target=source.params.get("probe_target"),
+            read_replica=read_replica,
         )
         persisted = PersistedSourceAdapter(
             id=adapter_id,
@@ -580,6 +1104,7 @@ def _build_adapter(source: SourceConfig):  # type: ignore[return]
             target_id=source.id,
             status=SourceAdapterStatus.READY,
             config=config,
+            observation_cursor=_observation_cursor(),
         )
         return PostgresAdapter(resolve_secret=_resolve_env), persisted
 
@@ -587,6 +1112,16 @@ def _build_adapter(source: SourceConfig):  # type: ignore[return]
         from alma_connectors.adapters.dbt import DbtAdapter
         from alma_connectors.source_adapter import DbtAdapterConfig, SourceAdapterKind
 
+        _ensure_allowed_source_params(
+            source,
+            {
+                "catalog_path",
+                "manifest_path",
+                "observation_cursor",
+                "project_name",
+                "run_results_path",
+            },
+        )
         manifest_path = source.params.get("manifest_path", "")
         catalog_path = source.params.get("catalog_path")
         run_results_path = source.params.get("run_results_path")
@@ -605,6 +1140,7 @@ def _build_adapter(source: SourceConfig):  # type: ignore[return]
             target_id=source.id,
             status=SourceAdapterStatus.READY,
             config=config,
+            observation_cursor=_observation_cursor(),
         )
         return DbtAdapter(
             manifest_path=manifest_path,
@@ -617,15 +1153,39 @@ def _build_adapter(source: SourceConfig):  # type: ignore[return]
         from alma_connectors.adapters.snowflake import SnowflakeAdapter
         from alma_connectors.source_adapter import SnowflakeAdapterConfig, SourceAdapterKind
 
+        _ensure_allowed_source_params(
+            source,
+            {
+                "account",
+                "account_secret_env",
+                "database",
+                "exclude_schemas",
+                "include_schemas",
+                "lookback_hours",
+                "max_query_rows",
+                "observation_cursor",
+                "probe_target",
+                "role",
+                "warehouse",
+            },
+        )
+        account_secret_env = source.params.get("account_secret_env")
+        if not isinstance(account_secret_env, str) or not account_secret_env:
+            raise ValueError("snowflake sources require 'account_secret_env'")
         config = SnowflakeAdapterConfig(
             account_secret=ExternalSecretRef(
                 provider="env",
-                reference=source.params.get("account_secret_env", "SNOWFLAKE_CONNECTION_JSON"),
+                reference=account_secret_env,
             ),
             account=source.params.get("account", ""),
             warehouse=source.params.get("warehouse", "COMPUTE_WH"),
             database=source.params.get("database", ""),
             role=source.params.get("role", ""),
+            include_schemas=tuple(source.params.get("include_schemas", ())),
+            exclude_schemas=tuple(source.params.get("exclude_schemas", ("INFORMATION_SCHEMA",))),
+            lookback_hours=int(source.params.get("lookback_hours", 168)),
+            max_query_rows=int(source.params.get("max_query_rows", 10_000)),
+            probe_target=source.params.get("probe_target"),
         )
         persisted = PersistedSourceAdapter(
             id=adapter_id,
@@ -635,6 +1195,7 @@ def _build_adapter(source: SourceConfig):  # type: ignore[return]
             target_id=source.id,
             status=SourceAdapterStatus.READY,
             config=config,
+            observation_cursor=_observation_cursor(),
         )
         return SnowflakeAdapter(resolve_secret=_resolve_env), persisted
 
@@ -642,11 +1203,26 @@ def _build_adapter(source: SourceConfig):  # type: ignore[return]
         from alma_connectors.adapters.airflow import AirflowAdapter
         from alma_connectors.source_adapter_v2 import SourceAdapterKindV2
 
+        _ensure_allowed_source_params(
+            source,
+            {
+                "auth_token",
+                "auth_token_env",
+                "base_url",
+                "observation_cursor",
+                "password",
+                "username",
+            },
+        )
         auth_token: str | None = source.params.get("auth_token") or (
             os.environ.get(source.params["auth_token_env"])
             if "auth_token_env" in source.params
-            else os.environ.get("AIRFLOW_AUTH_TOKEN") or None
+            else None
         )
+        if auth_token is None and not (source.params.get("username") and source.params.get("password")):
+            raise ValueError(
+                "airflow sources require 'auth_token', 'auth_token_env', or username/password"
+            )
         adapter = AirflowAdapter(
             base_url=source.params.get("base_url", ""),
             auth_token=auth_token,
@@ -657,10 +1233,11 @@ def _build_adapter(source: SourceConfig):  # type: ignore[return]
             id=adapter_id,
             key=adapter_key,
             display_name=source.id,
-            kind=SourceAdapterKindV2.AIRFLOW,  # type: ignore[arg-type]
+            kind=cast(Any, SourceAdapterKindV2.AIRFLOW),
             target_id=source.id,
             status=SourceAdapterStatus.READY,
-            config=None,  # type: ignore[arg-type]
+            config=cast(Any, None),
+            observation_cursor=_observation_cursor(),
         )
         return adapter, persisted
 
@@ -668,12 +1245,33 @@ def _build_adapter(source: SourceConfig):  # type: ignore[return]
         from alma_connectors.adapters.looker import LookerAdapter
         from alma_connectors.source_adapter_v2 import SourceAdapterKindV2
 
-        client_id = source.params.get("client_id") or os.environ.get(
-            source.params.get("client_id_env", "LOOKER_CLIENT_ID"), ""
+        _ensure_allowed_source_params(
+            source,
+            {
+                "client_id",
+                "client_id_env",
+                "client_secret",
+                "client_secret_env",
+                "instance_url",
+                "observation_cursor",
+                "port",
+            },
         )
-        client_secret = source.params.get("client_secret") or os.environ.get(
-            source.params.get("client_secret_env", "LOOKER_CLIENT_SECRET"), ""
+        client_id = source.params.get("client_id") or (
+            os.environ.get(source.params["client_id_env"])
+            if "client_id_env" in source.params
+            else ""
         )
+        client_secret = source.params.get("client_secret") or (
+            os.environ.get(source.params["client_secret_env"])
+            if "client_secret_env" in source.params
+            else ""
+        )
+        if not client_id or not client_secret:
+            raise ValueError(
+                "looker sources require client credentials via 'client_id'/'client_secret' "
+                "or explicit 'client_id_env'/'client_secret_env'"
+            )
         adapter = LookerAdapter(
             instance_url=source.params.get("instance_url", ""),
             client_id=client_id,
@@ -684,10 +1282,11 @@ def _build_adapter(source: SourceConfig):  # type: ignore[return]
             id=adapter_id,
             key=adapter_key,
             display_name=source.id,
-            kind=SourceAdapterKindV2.LOOKER,  # type: ignore[arg-type]
+            kind=cast(Any, SourceAdapterKindV2.LOOKER),
             target_id=source.id,
             status=SourceAdapterStatus.READY,
-            config=None,  # type: ignore[arg-type]
+            config=cast(Any, None),
+            observation_cursor=_observation_cursor(),
         )
         return adapter, persisted
 
@@ -695,12 +1294,31 @@ def _build_adapter(source: SourceConfig):  # type: ignore[return]
         from alma_connectors.adapters.fivetran import FivetranAdapter
         from alma_connectors.source_adapter_v2 import SourceAdapterKindV2
 
-        api_key = source.params.get("api_key") or os.environ.get(
-            source.params.get("api_key_env", "FIVETRAN_API_KEY"), ""
+        _ensure_allowed_source_params(
+            source,
+            {
+                "api_key",
+                "api_key_env",
+                "api_secret",
+                "api_secret_env",
+                "observation_cursor",
+            },
         )
-        api_secret = source.params.get("api_secret") or os.environ.get(
-            source.params.get("api_secret_env", "FIVETRAN_API_SECRET"), ""
+        api_key = source.params.get("api_key") or (
+            os.environ.get(source.params["api_key_env"])
+            if "api_key_env" in source.params
+            else ""
         )
+        api_secret = source.params.get("api_secret") or (
+            os.environ.get(source.params["api_secret_env"])
+            if "api_secret_env" in source.params
+            else ""
+        )
+        if not api_key or not api_secret:
+            raise ValueError(
+                "fivetran sources require API credentials via 'api_key'/'api_secret' "
+                "or explicit 'api_key_env'/'api_secret_env'"
+            )
         adapter = FivetranAdapter(
             api_key=api_key,
             api_secret=api_secret,
@@ -709,10 +1327,11 @@ def _build_adapter(source: SourceConfig):  # type: ignore[return]
             id=adapter_id,
             key=adapter_key,
             display_name=source.id,
-            kind=SourceAdapterKindV2.FIVETRAN,  # type: ignore[arg-type]
+            kind=cast(Any, SourceAdapterKindV2.FIVETRAN),
             target_id=source.id,
             status=SourceAdapterStatus.READY,
-            config=None,  # type: ignore[arg-type]
+            config=cast(Any, None),
+            observation_cursor=_observation_cursor(),
         )
         return adapter, persisted
 
@@ -720,9 +1339,26 @@ def _build_adapter(source: SourceConfig):  # type: ignore[return]
         from alma_connectors.adapters.metabase import MetabaseAdapter
         from alma_connectors.source_adapter_v2 import SourceAdapterKindV2
 
-        api_key_mb: str | None = source.params.get("api_key") or os.environ.get(
-            source.params.get("api_key_env", "METABASE_API_KEY")
-        ) or None
+        _ensure_allowed_source_params(
+            source,
+            {
+                "api_key",
+                "api_key_env",
+                "instance_url",
+                "observation_cursor",
+                "password",
+                "username",
+            },
+        )
+        api_key_mb: str | None = source.params.get("api_key") or (
+            os.environ.get(source.params["api_key_env"])
+            if "api_key_env" in source.params
+            else None
+        )
+        if api_key_mb is None and not (source.params.get("username") and source.params.get("password")):
+            raise ValueError(
+                "metabase sources require 'api_key', 'api_key_env', or username/password"
+            )
         adapter = MetabaseAdapter(
             instance_url=source.params.get("instance_url", ""),
             api_key=api_key_mb,
@@ -733,10 +1369,11 @@ def _build_adapter(source: SourceConfig):  # type: ignore[return]
             id=adapter_id,
             key=adapter_key,
             display_name=source.id,
-            kind=SourceAdapterKindV2.METABASE,  # type: ignore[arg-type]
+            kind=cast(Any, SourceAdapterKindV2.METABASE),
             target_id=source.id,
             status=SourceAdapterStatus.READY,
-            config=None,  # type: ignore[arg-type]
+            config=cast(Any, None),
+            observation_cursor=_observation_cursor(),
         )
         return adapter, persisted
 

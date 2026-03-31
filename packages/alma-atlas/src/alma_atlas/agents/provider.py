@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import abc
 import logging
-from typing import TypeVar
+from typing import TypeVar, cast
 
 from pydantic import BaseModel
 
@@ -139,11 +139,14 @@ def make_provider(
     if provider_name == "acp":
         from .acp_provider import ACPProvider
 
-        return ACPProvider(
-            command=agent_command,
-            args=agent_args,
-            env=agent_env,
-            cwd=agent_cwd,
+        return cast(
+            LLMProvider,
+            ACPProvider(
+                command=agent_command,
+                args=agent_args,
+                env=agent_env,
+                cwd=agent_cwd,
+            ),
         )
     if provider_name == "mock":
         return MockProvider()

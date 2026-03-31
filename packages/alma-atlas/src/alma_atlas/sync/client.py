@@ -80,6 +80,19 @@ def _validate_response(data: Any) -> dict:
     return data
 
 
+def _latest_cursor(*cursors: str) -> str:
+    latest = ""
+    latest_dt = datetime.min.replace(tzinfo=UTC)
+    for cursor in cursors:
+        if not cursor:
+            continue
+        parsed = _parse_ts(cursor)
+        if parsed >= latest_dt:
+            latest_dt = parsed
+            latest = cursor
+    return latest
+
+
 class SyncClient:
     """Async HTTP client for syncing Atlas graphs with a team server."""
 
@@ -177,10 +190,12 @@ class SyncClient:
 
         if last_exc is not None:
             raise last_exc
-        raise httpx.HTTPStatusError(  # type: ignore[call-arg]
+        request = httpx.Request("POST", url)
+        response = httpx.Response(599, request=request)
+        raise httpx.HTTPStatusError(
             message=f"Max retries exceeded for POST {path}",
-            request=None,  # type: ignore[arg-type]
-            response=None,  # type: ignore[arg-type]
+            request=request,
+            response=response,
         )
 
     async def _get(self, path: str, params: dict | None = None) -> dict:
@@ -234,10 +249,12 @@ class SyncClient:
 
         if last_exc is not None:
             raise last_exc
-        raise httpx.HTTPStatusError(  # type: ignore[call-arg]
+        request = httpx.Request("GET", url)
+        response = httpx.Response(599, request=request)
+        raise httpx.HTTPStatusError(
             message=f"Max retries exceeded for GET {path}",
-            request=None,  # type: ignore[arg-type]
-            response=None,  # type: ignore[arg-type]
+            request=request,
+            response=response,
         )
 
     # ------------------------------------------------------------------ push
@@ -336,7 +353,12 @@ class SyncClient:
         if violation_resp.rejected:
             log.warning("[sync] server rejected %d violation(s)", len(violation_resp.rejected))
 
-        new_cursor = asset_resp.new_cursor or cursor
+        new_cursor = _latest_cursor(
+            asset_resp.new_cursor,
+            edge_resp.new_cursor,
+            contract_push_resp.new_cursor,
+            violation_resp.new_cursor,
+        ) or cursor
 
         # Pull team contracts (server-wins)
         resolver = ConflictResolver()
@@ -362,8 +384,18 @@ class SyncClient:
             cfg.save_sync_cursor(new_cursor)
 
         return SyncResponse(
-            accepted_count=asset_resp.accepted_count,
-            rejected=asset_resp.rejected,
+            accepted_count=(
+                asset_resp.accepted_count
+                + edge_resp.accepted_count
+                + contract_push_resp.accepted_count
+                + violation_resp.accepted_count
+            ),
+            rejected=[
+                *asset_resp.rejected,
+                *edge_resp.rejected,
+                *contract_push_resp.rejected,
+                *violation_resp.rejected,
+            ],
             new_cursor=new_cursor,
         )
 

@@ -9,20 +9,16 @@ from __future__ import annotations
 
 import json
 import textwrap
+import warnings
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from pydantic import BaseModel
 
-import warnings
-
-from alma_atlas.agents.acp_provider import ACPProvider, MAX_RETRIES, SimpleClient
+from alma_atlas.agents.acp_provider import MAX_RETRIES, ACPProvider, SimpleClient
 from alma_atlas.agents.schemas import PipelineAnalysisResult
 from alma_atlas.config import AgentConfig, AgentProcessConfig, LearningConfig, load_atlas_yml
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -376,9 +372,11 @@ async def test_acp_provider_analyze_raises_after_max_retries(tmp_path: Path) -> 
     conn.prompt = AsyncMock(side_effect=_bad_prompt)
 
     provider = ACPProvider(cwd=str(tmp_path))
-    with patch("alma_atlas.agents.acp_provider.spawn_agent_process", _make_spawn_cm(conn)):
-        with pytest.raises(ValueError, match="failed to get valid response"):
-            await provider.analyze("sys", "usr", PipelineAnalysisResult)
+    with (
+        patch("alma_atlas.agents.acp_provider.spawn_agent_process", _make_spawn_cm(conn)),
+        pytest.raises(ValueError, match="failed to get valid response"),
+    ):
+        await provider.analyze("sys", "usr", PipelineAnalysisResult)
 
     assert conn.prompt.call_count == MAX_RETRIES
     await provider.aclose()
@@ -390,9 +388,11 @@ async def test_acp_provider_analyze_raises_when_file_not_written(tmp_path: Path)
     # conn.prompt does NOT write anything to _written_files.
 
     provider = ACPProvider(cwd=str(tmp_path))
-    with patch("alma_atlas.agents.acp_provider.spawn_agent_process", _make_spawn_cm(conn)):
-        with pytest.raises(ValueError, match="failed to get valid response"):
-            await provider.analyze("sys", "usr", PipelineAnalysisResult)
+    with (
+        patch("alma_atlas.agents.acp_provider.spawn_agent_process", _make_spawn_cm(conn)),
+        pytest.raises(ValueError, match="failed to get valid response"),
+    ):
+        await provider.analyze("sys", "usr", PipelineAnalysisResult)
 
     assert conn.prompt.call_count == MAX_RETRIES
     await provider.aclose()
@@ -536,7 +536,7 @@ def test_load_atlas_yml_per_agent_agent_key(tmp_path: Path) -> None:
               command: codex
               args: []
           pipeline_analyzer:
-            provider: anthropic
+            provider: mock
             model: claude-opus-4-6
         """)
     )
@@ -611,8 +611,8 @@ def test_load_atlas_yml_agent_command_produces_acp_provider(tmp_path: Path) -> N
     assert provider._command == "claude-agent-acp"
 
 
-def test_load_atlas_yml_flat_anthropic_emits_deprecation_warning(tmp_path: Path) -> None:
-    """Flat atlas.yml with provider: anthropic must emit a DeprecationWarning."""
+def test_load_atlas_yml_flat_unsupported_provider_raises(tmp_path: Path) -> None:
+    """Flat atlas.yml with unsupported provider must fail closed."""
     yml = tmp_path / "atlas.yml"
     yml.write_text(
         textwrap.dedent("""\
@@ -623,18 +623,12 @@ def test_load_atlas_yml_flat_anthropic_emits_deprecation_warning(tmp_path: Path)
           api_key_env: ANTHROPIC_API_KEY
         """)
     )
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    with pytest.raises(ValueError, match="unsupported learning.provider"):
         load_atlas_yml(yml)
 
-    dep_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]
-    assert len(dep_warnings) == 1
-    assert "learning.provider: anthropic" in str(dep_warnings[0].message)
-    assert "agent.command" in str(dep_warnings[0].message)
 
-
-def test_load_atlas_yml_flat_openai_emits_deprecation_warning(tmp_path: Path) -> None:
-    """Flat atlas.yml with provider: openai must emit a DeprecationWarning."""
+def test_load_atlas_yml_flat_openai_raises(tmp_path: Path) -> None:
+    """Flat atlas.yml with unsupported provider must fail closed."""
     yml = tmp_path / "atlas.yml"
     yml.write_text(
         textwrap.dedent("""\
@@ -644,13 +638,8 @@ def test_load_atlas_yml_flat_openai_emits_deprecation_warning(tmp_path: Path) ->
           model: gpt-4o
         """)
     )
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    with pytest.raises(ValueError, match="unsupported learning.provider"):
         load_atlas_yml(yml)
-
-    dep_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]
-    assert len(dep_warnings) == 1
-    assert "learning.provider: openai" in str(dep_warnings[0].message)
 
 
 def test_load_atlas_yml_flat_mock_no_deprecation_warning(tmp_path: Path) -> None:
@@ -665,8 +654,8 @@ def test_load_atlas_yml_flat_mock_no_deprecation_warning(tmp_path: Path) -> None
     assert not dep_warnings
 
 
-def test_load_atlas_yml_nested_anthropic_emits_deprecation_warning(tmp_path: Path) -> None:
-    """Nested atlas.yml with per-agent provider: anthropic must emit DeprecationWarning."""
+def test_load_atlas_yml_nested_unsupported_provider_raises(tmp_path: Path) -> None:
+    """Nested atlas.yml with unsupported provider must fail closed."""
     yml = tmp_path / "atlas.yml"
     yml.write_text(
         textwrap.dedent("""\
@@ -680,15 +669,8 @@ def test_load_atlas_yml_nested_anthropic_emits_deprecation_warning(tmp_path: Pat
             model: claude-opus-4-6
         """)
     )
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    with pytest.raises(ValueError, match="unsupported learning provider"):
         load_atlas_yml(yml)
-
-    dep_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]
-    # Two agents with provider: anthropic -> two warnings.
-    assert len(dep_warnings) == 2
-    for w in dep_warnings:
-        assert "agent.command" in str(w.message)
 
 
 def test_load_atlas_yml_agent_command_no_deprecation_warning(tmp_path: Path) -> None:

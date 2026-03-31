@@ -20,6 +20,15 @@ from alma_atlas.config import AtlasConfig, SourceConfig, load_atlas_yml
 from alma_atlas.sync.auth import TeamAuth
 from alma_atlas.sync.client import SyncClient
 from alma_atlas_store.db import Database
+from alma_connectors.source_adapter_v2 import (
+    AdapterCapability,
+    CapabilityProbeResult,
+    ExtractionMeta,
+    ExtractionScope,
+    ScopeContext,
+    SourceAdapterKindV2,
+    TrafficExtractionResult,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fixtures
@@ -40,6 +49,80 @@ def db():
 @pytest.fixture
 def auth() -> TeamAuth:
     return TeamAuth("test-api-key-hardening")
+
+
+def _probe(capability: AdapterCapability, *, available: bool = True) -> CapabilityProbeResult:
+    return CapabilityProbeResult(
+        capability=capability,
+        available=available,
+        scope=ExtractionScope.DATABASE,
+        scope_context=ScopeContext(scope=ExtractionScope.DATABASE, identifiers={"db": "test"}),
+    )
+
+
+def _empty_schema_result():
+    from datetime import UTC, datetime
+
+    from alma_connectors.source_adapter_v2 import SchemaSnapshotV2
+
+    return SchemaSnapshotV2(
+        meta=ExtractionMeta(
+            adapter_key="pg-test",
+            adapter_kind=SourceAdapterKindV2.POSTGRES,
+            capability=AdapterCapability.SCHEMA,
+            scope_context=ScopeContext(scope=ExtractionScope.DATABASE, identifiers={"db": "test"}),
+            captured_at=datetime.now(UTC),
+            duration_ms=10.0,
+            row_count=0,
+        ),
+        objects=(),
+    )
+
+
+def _empty_traffic_result():
+    from datetime import UTC, datetime
+
+    return TrafficExtractionResult(
+        meta=ExtractionMeta(
+            adapter_key="pg-test",
+            adapter_kind=SourceAdapterKindV2.POSTGRES,
+            capability=AdapterCapability.TRAFFIC,
+            scope_context=ScopeContext(scope=ExtractionScope.DATABASE, identifiers={"db": "test"}),
+            captured_at=datetime.now(UTC),
+            duration_ms=10.0,
+            row_count=0,
+        ),
+        events=(),
+    )
+
+
+def _make_v2_adapter(
+    *,
+    schema_result: object | None = None,
+    traffic_result: object | None = None,
+    schema_side_effect: Exception | None = None,
+):
+    adapter = MagicMock()
+    adapter.declared_capabilities = frozenset({AdapterCapability.SCHEMA, AdapterCapability.TRAFFIC})
+    adapter.test_connection = AsyncMock(return_value=MagicMock())
+    adapter.execute_query = AsyncMock(return_value=MagicMock())
+    adapter.get_setup_instructions = MagicMock(return_value=MagicMock())
+    adapter.probe = AsyncMock(
+        return_value=(
+            _probe(AdapterCapability.SCHEMA, available=True),
+            _probe(AdapterCapability.TRAFFIC, available=True),
+        )
+    )
+    adapter.discover = AsyncMock(side_effect=NotImplementedError)
+    adapter.extract_definitions = AsyncMock(side_effect=NotImplementedError)
+    adapter.extract_lineage = AsyncMock(side_effect=NotImplementedError)
+    adapter.extract_orchestration = AsyncMock(side_effect=NotImplementedError)
+    if schema_side_effect is not None:
+        adapter.extract_schema = AsyncMock(side_effect=schema_side_effect)
+    else:
+        adapter.extract_schema = AsyncMock(return_value=schema_result or _empty_schema_result())
+    adapter.extract_traffic = AsyncMock(return_value=traffic_result or _empty_traffic_result())
+    return adapter
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -274,14 +357,14 @@ class TestScanPipelineHardening:
         cfg = AtlasConfig(config_dir=tmp_path / "alma", db_path=tmp_path / "atlas.db")
         source = SourceConfig(id="pg-slow", kind="postgres", params={})
 
-        async def slow_introspect(persisted):
+        async def slow_probe(persisted):
             await asyncio.sleep(10)  # longer than our 0.01s timeout
             raise AssertionError("should not reach here")
 
-        mock_adapter = MagicMock()
-        mock_adapter.introspect_schema = AsyncMock(side_effect=slow_introspect)
+        mock_adapter = _make_v2_adapter()
+        mock_adapter.probe = AsyncMock(side_effect=slow_probe)
 
-        with patch("alma_atlas.pipeline.scan._build_adapter", return_value=(mock_adapter, MagicMock())):
+        with patch("alma_atlas.pipeline.scan._build_adapter", return_value=(mock_adapter, MagicMock(key="pg-slow"))):
             result = run_scan(source, cfg, timeout=0.01)
 
         assert result.error is not None
@@ -300,26 +383,25 @@ class TestScanPipelineHardening:
         assert result.asset_count == 0
 
     def test_dry_run_skips_data_extraction(self, tmp_path: Path):
-        """dry_run=True returns without calling introspect_schema."""
+        """dry_run=True returns without calling probe/extract methods."""
         from alma_atlas.pipeline.scan import run_scan_async
 
         cfg = AtlasConfig(config_dir=tmp_path / "alma", db_path=tmp_path / "atlas.db")
         source = SourceConfig(id="pg-test", kind="postgres", params={})
 
-        mock_adapter = MagicMock()
-        mock_adapter.introspect_schema = AsyncMock()
+        mock_adapter = _make_v2_adapter()
 
-        with patch("alma_atlas.pipeline.scan._build_adapter", return_value=(mock_adapter, MagicMock())):
+        with patch("alma_atlas.pipeline.scan._build_adapter", return_value=(mock_adapter, MagicMock(key="pg-test"))):
             result = asyncio.run(run_scan_async(source, cfg, dry_run=True))
 
-        mock_adapter.introspect_schema.assert_not_called()
+        mock_adapter.probe.assert_not_called()
+        mock_adapter.extract_schema.assert_not_called()
         assert result.error is None
         assert result.asset_count == 0
 
     def test_scan_all_runs_concurrently_with_semaphore(self, tmp_path: Path):
         """run_scan_all uses asyncio.Semaphore to cap concurrency."""
         from alma_atlas.pipeline.scan import run_scan_all
-        from alma_connectors.source_adapter import SchemaSnapshot
 
         cfg = AtlasConfig(config_dir=tmp_path / "alma", db_path=tmp_path / "atlas.db")
         sources = [
@@ -327,16 +409,10 @@ class TestScanPipelineHardening:
             for i in range(6)
         ]
 
-        empty_snapshot = SchemaSnapshot(captured_at=None, objects=(), dependencies=())
-
-        mock_adapter = MagicMock()
-        mock_adapter.introspect_schema = AsyncMock(return_value=empty_snapshot)
-        mock_adapter.observe_traffic = AsyncMock(
-            return_value=MagicMock(scanned_records=0, events=())
-        )
+        mock_adapter = _make_v2_adapter()
 
         with (
-            patch("alma_atlas.pipeline.scan._build_adapter", return_value=(mock_adapter, MagicMock())),
+            patch("alma_atlas.pipeline.scan._build_adapter", return_value=(mock_adapter, MagicMock(key="pg-test"))),
             patch("alma_atlas.pipeline.stitch.stitch", return_value=0),
         ):
             result = run_scan_all(sources, cfg, max_concurrent=2)
@@ -356,19 +432,12 @@ class TestScanPipelineHardening:
             SourceConfig(id="pg-good2", kind="postgres", params={}),
         ]
 
-        from alma_connectors.source_adapter import SchemaSnapshot
-
-        empty_snapshot = SchemaSnapshot(captured_at=None, objects=(), dependencies=())
-        mock_adapter = MagicMock()
-        mock_adapter.introspect_schema = AsyncMock(return_value=empty_snapshot)
-        mock_adapter.observe_traffic = AsyncMock(
-            return_value=MagicMock(scanned_records=0, events=())
-        )
+        mock_adapter = _make_v2_adapter()
 
         def build_adapter_side_effect(source):
             if source.kind == "unsupported_kind":
                 raise ValueError("Unknown source kind")
-            return mock_adapter, MagicMock()
+            return mock_adapter, MagicMock(key=source.id)
 
         with (
             patch("alma_atlas.pipeline.scan._build_adapter", side_effect=build_adapter_side_effect),

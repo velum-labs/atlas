@@ -34,6 +34,7 @@ from alma_atlas_store.edge_repository import Edge, EdgeRepository
 
 if TYPE_CHECKING:
     from alma_atlas.agents.provider import LLMProvider
+    from alma_atlas.agents.schemas import EdgeEnrichment
     from alma_atlas.config import AgentConfig, LearningConfig
     from alma_atlas_store.db import Database
 
@@ -51,6 +52,26 @@ def _is_real_provider(provider_name: str) -> bool:
     return provider_name != "mock"
 
 
+def _effective_provider_name(agent_cfg: AgentConfig) -> str:
+    """Return the runtime provider name for one agent config."""
+    return "acp" if agent_cfg.agent is not None else agent_cfg.provider
+
+
+def agent_config_is_enabled(agent_cfg: AgentConfig) -> bool:
+    """Return True when one agent config is configured for non-mock execution."""
+    return _is_real_provider(_effective_provider_name(agent_cfg))
+
+
+def edge_learning_is_enabled(config: LearningConfig) -> bool:
+    """Return True when edge learning has the required non-mock agents."""
+    return agent_config_is_enabled(config.explorer) and agent_config_is_enabled(config.pipeline_analyzer)
+
+
+def asset_annotation_is_enabled(config: LearningConfig) -> bool:
+    """Return True when asset annotation has the required non-mock agents."""
+    return agent_config_is_enabled(config.explorer) and agent_config_is_enabled(config.annotator)
+
+
 def _provider_from_agent_config(agent_cfg: AgentConfig) -> LLMProvider:
     """Instantiate an LLMProvider from an :class:`~alma_atlas.config.AgentConfig`.
 
@@ -63,7 +84,7 @@ def _provider_from_agent_config(agent_cfg: AgentConfig) -> LLMProvider:
     apc = agent_cfg.agent  # AgentProcessConfig or None
 
     # If an agent process config is present, default to ACP automatically.
-    effective_provider = "acp" if apc is not None else agent_cfg.provider
+    effective_provider = _effective_provider_name(agent_cfg)
 
     api_key: str | None = None
     if agent_cfg.api_key_env and effective_provider != "acp":
@@ -161,6 +182,10 @@ async def run_edge_learning(
     )
 
     if config is not None:
+        if not edge_learning_is_enabled(config):
+            raise ValueError(
+                "run_edge_learning requires non-mock explorer and pipeline_analyzer agent configs"
+            )
         # Lead/specialist pattern.
         from alma_atlas.agents.codebase_explorer import explore_for_edges
 
@@ -222,7 +247,7 @@ async def run_edge_learning(
 
     # Index enrichments by (schema.table, schema.table) for O(1) lookup.
     # Be forgiving: some models include system prefixes (e.g. "pg::raw.users").
-    enrichment_index: dict[tuple[str, str], object] = {
+    enrichment_index: dict[tuple[str, str], EdgeEnrichment] = {
         (_object_part(e.source_table), _object_part(e.dest_table)): e
         for e in enrichments
     }
@@ -333,8 +358,12 @@ async def run_asset_annotation(
 
     # Resolve provider and provenance from config or legacy args.
     if config is not None:
+        if not asset_annotation_is_enabled(config):
+            raise ValueError(
+                "run_asset_annotation requires non-mock explorer and annotator agent configs"
+            )
         enricher_provider = _provider_from_agent_config(config.annotator)
-        _provider_name = config.annotator.provider
+        _provider_name = _effective_provider_name(config.annotator)
         _model = config.annotator.model
     elif provider is not None:
         enricher_provider = provider
