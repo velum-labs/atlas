@@ -83,7 +83,12 @@ If you do not know an ID, use `atlas_search` or `alma-atlas search` first.
 
 ## Learning
 
-Learning is ACP-only. Configure agent-backed learning in `atlas.yml` with `provider: acp` (or an `agent.command`) for the specific agents you want to run. `mock` is still available for tests and local no-op flows.
+Learning is ACP-only. Configure learning in `atlas.yml` with `learning.agent.command`
+or `provider: acp`; ACP is the runtime boundary, while `explorer`,
+`pipeline_analyzer`, and `annotator` are workflow roles on top. When those
+roles resolve to the same ACP subprocess settings, Atlas reuses one ACP session
+per learning invocation. `mock` is still available for tests and local no-op
+flows.
 
 ## IDE Configuration
 

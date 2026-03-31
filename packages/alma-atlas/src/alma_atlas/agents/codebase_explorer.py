@@ -1,9 +1,12 @@
-"""Codebase explorer — two-pass file selection for enrichment agents.
+"""Codebase explorer fallback workflow for Atlas learning.
 
 Performs an LLM-free *index pass* to build a file tree, then an LLM
 *relevance pass* (using a cheap model) to rank files by their likely
 usefulness for a given set of edges or assets.  Falls back to the
 standard glob scan if the LLM call fails or returns no files.
+
+When the ACP runtime exposes direct repository access, Atlas can skip this
+workflow entirely and let the external ACP agent inspect the repo directly.
 
 This module is READ-ONLY with respect to the repository.
 """

@@ -23,6 +23,9 @@ The current runtime model is:
 
 ## Notes
 
-- Learning is ACP-first: real runs use `provider: acp` and `learning.agent.command`
+- Learning is ACP-native: `learning.agent.command` (or `provider: acp`) defines the runtime boundary for real learning runs
+- `explorer`, `pipeline_analyzer`, and `annotator` are workflow roles, not necessarily separate subprocesses
+- When those roles resolve to the same ACP subprocess settings, Atlas reuses one ACP session per learning invocation
+- When the ACP runtime exposes direct repo access, Atlas can skip the custom codebase explorer fallback and let the external agent inspect the repo directly
 - `sources.json` is the persisted registry for `alma-atlas connect`
 - `atlas.yml` and `--connections` can override runtime sources without mutating persisted state

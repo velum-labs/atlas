@@ -365,6 +365,52 @@ async def test_run_edge_learning_with_config(db: Database, tmp_path: Path) -> No
     assert edges[0].metadata["transport_kind"] == "CUSTOM_SCRIPT"
 
 
+async def test_run_edge_learning_direct_repo_skips_explorer(db: Database, tmp_path: Path) -> None:
+    from alma_atlas.agents.provider import LLMProvider
+
+    _seed_edge(db, _make_edge("src::raw.users", "dst::staging.stg_users", kind="schema_match"))
+
+    fixed = PipelineAnalysisResult(
+        edges=[
+            EdgeEnrichment(
+                source_table="raw.users",
+                dest_table="staging.stg_users",
+                transport_kind="CUSTOM_SCRIPT",
+                confidence_note="Found via direct ACP repo access",
+            )
+        ]
+    )
+
+    class DirectRepoProvider(LLMProvider):
+        supports_direct_repo_exploration = True
+
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        async def analyze(self, system_prompt, user_prompt, response_schema):
+            self.prompts.append(user_prompt)
+            return fixed
+
+    provider = DirectRepoProvider()
+    learning_cfg = LearningConfig(
+        explorer=AgentConfig(provider="acp"),
+        pipeline_analyzer=AgentConfig(provider="acp"),
+    )
+
+    with (
+        patch("alma_atlas.pipeline.learn._provider_from_agent_config", return_value=provider),
+        patch(
+            "alma_atlas.agents.codebase_explorer.explore_for_edges",
+            side_effect=AssertionError("explorer should not run when ACP repo access is available"),
+        ),
+    ):
+        count = await run_edge_learning(db, tmp_path, config=learning_cfg)
+
+    assert count == 1
+    assert provider.prompts
+    assert "current working directory is the repository root" in provider.prompts[0]
+
+
 async def test_run_edge_learning_no_provider_no_config_raises(db: Database, tmp_path: Path) -> None:
     _seed_edge(db, _make_edge("src::raw.x", "dst::stg.x"))
     with pytest.raises(ValueError, match="requires either"):
@@ -430,6 +476,59 @@ async def test_run_asset_annotation_with_config(db: Database, tmp_path: Path) ->
     record = AnnotationRepository(db).get(asset_id)
     assert record is not None
     assert record.ownership == "analytics"
+
+
+async def test_run_asset_annotation_direct_repo_skips_explorer(db: Database, tmp_path: Path) -> None:
+    from alma_atlas.agents.provider import LLMProvider
+
+    asset_id = "pg::public.items"
+    AssetRepository(db).upsert(Asset(id=asset_id, source="pg:test", kind="table", name="public.items"))
+    SchemaRepository(db).upsert(
+        SchemaSnapshot(
+            asset_id=asset_id,
+            columns=[ColumnInfo(name="item_id", type="int")],
+        )
+    )
+
+    fixed = AnnotationResult(
+        annotations=[
+            AssetAnnotation(
+                asset_id=asset_id,
+                ownership="analytics",
+                granularity="one row per item",
+                join_keys=["item_id"],
+            )
+        ]
+    )
+
+    class DirectRepoProvider(LLMProvider):
+        supports_direct_repo_exploration = True
+
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        async def analyze(self, system_prompt, user_prompt, response_schema):
+            self.prompts.append(user_prompt)
+            return fixed
+
+    provider = DirectRepoProvider()
+    learning_cfg = LearningConfig(
+        explorer=AgentConfig(provider="acp"),
+        annotator=AgentConfig(provider="acp"),
+    )
+
+    with (
+        patch("alma_atlas.pipeline.learn._provider_from_agent_config", return_value=provider),
+        patch(
+            "alma_atlas.agents.codebase_explorer.explore_for_assets",
+            side_effect=AssertionError("explorer should not run when ACP repo access is available"),
+        ),
+    ):
+        count = await run_asset_annotation(db, tmp_path, config=learning_cfg)
+
+    assert count == 1
+    assert provider.prompts
+    assert "current working directory is the repository root" in provider.prompts[0]
 
 
 async def test_run_asset_annotation_no_provider_no_config_raises(db: Database, tmp_path: Path) -> None:

@@ -195,33 +195,52 @@ Source definitions in `atlas.yml` use the same raw wire shape as `sources.json`,
 
 ACP is the only supported non-mock learning provider.
 
-`agent.command` is the authoritative execution setting for real learning runs.
-`model`, `api_key_env`, `timeout`, and `max_tokens` are retained only for
-backward-compatible config parsing and tests; the ACP runtime does not use them
-to choose or authenticate the underlying model process.
+`learning.agent.command` is the authoritative execution setting for real
+learning runs. The nested `explorer`, `pipeline_analyzer`, and `annotator`
+blocks describe workflow-role overrides, not necessarily separate long-lived
+agent runtimes.
 
-Example:
+When those workflow-role blocks resolve to the same ACP subprocess settings,
+Atlas reuses one ACP session per learning invocation. If Atlas exposes direct
+repo access over ACP (for example terminal support and/or injected MCP tools),
+the analyzer or annotator may inspect the repo directly from the session `cwd`
+and Atlas skips the custom `codebase_explorer` fallback. If direct repo access
+is unavailable, Atlas falls back to local `repo_scanner` plus
+`codebase_explorer`.
+
+`model`, `api_key_env`, `timeout`, and `max_tokens` are retained only for
+backward-compatible config parsing, provenance, and tests; the ACP runtime does
+not use them to choose or authenticate the underlying model process unless the
+spawned ACP agent exposes its own config options and Atlas chooses to map them.
+
+Preferred shape:
 
 ```yaml
 version: 1
 learning:
-  explorer:
-    provider: acp
-    agent:
-      command: claude-agent-acp
-  pipeline_analyzer:
-    provider: acp
-    agent:
-      command: claude-agent-acp
-  annotator:
-    provider: acp
-    agent:
-      command: claude-agent-acp
+  provider: acp
+  agent:
+    command: claude-agent-acp
 ```
 
 `mock` remains available for tests and no-op local flows.
 
-Legacy flat format is still accepted:
+Advanced per-role override:
+
+```yaml
+version: 1
+learning:
+  agent:
+    command: claude-agent-acp
+  explorer:
+    provider: acp
+  pipeline_analyzer:
+    provider: acp
+  annotator:
+    provider: acp
+```
+
+Legacy flat format is still accepted and expands to all workflow roles:
 
 ```yaml
 version: 1

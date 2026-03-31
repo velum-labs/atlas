@@ -1,8 +1,13 @@
-"""Pipeline analyzer — scans a code repository and enriches cross-system edges.
+"""Pipeline analyzer workflow for cross-system edge enrichment.
 
 Collects relevant pipeline files (dbt models, Airflow DAGs, Python scripts,
 SQL files) and asks the configured LLM provider to infer transport metadata
 for a batch of unenriched edges.
+
+When Atlas is running against an ACP runtime with direct repository access, the
+workflow can also instruct the external agent to inspect the repository via ACP
+file-system and terminal tools instead of relying on pre-filtered inline file
+snippets.
 
 This module is READ-ONLY with respect to the repository: it never modifies
 any file in the scanned path.
@@ -60,6 +65,8 @@ Rules:
 - Do NOT invent additional edges beyond the provided list.
 - Use UNKNOWN when the code does not provide evidence.
 - Do not guess beyond what the code shows.
+- If the prompt says direct repository access is available, inspect the repo \
+  using ACP file-system and terminal tools before answering.
 - Agents are READ-ONLY: never suggest modifying the repository.\
 """
 
@@ -68,6 +75,8 @@ def _build_user_prompt(
     edges: list[Edge],
     repo_files: list[tuple[Path, str]],
     repo_path: Path,
+    *,
+    allow_repo_exploration: bool,
 ) -> str:
     """Compose the user-facing portion of the LLM prompt."""
     parts: list[str] = ["## Edge pairs to analyze\n"]
@@ -82,6 +91,17 @@ def _build_user_prompt(
             f"   expected_dest_table: {expected_dest}"
         )
 
+    if allow_repo_exploration:
+        parts.append("\n## Repository access\n")
+        parts.append(
+            "You are running inside an ACP session whose current working directory "
+            f"is the repository root: {repo_path}"
+        )
+        parts.append(
+            "Use ACP file-system and terminal tools to inspect the repository "
+            "directly. Prefer targeted search/read commands over broad scans."
+        )
+
     parts.append("\n## Repository files\n")
     for file_path, content in repo_files:
         try:
@@ -93,7 +113,10 @@ def _build_user_prompt(
         parts.append("")
 
     if not repo_files:
-        parts.append("(no relevant files found in repository)")
+        if allow_repo_exploration:
+            parts.append("(no inline file excerpts were pre-selected; inspect the repository directly)")
+        else:
+            parts.append("(no relevant files found in repository)")
 
     return "\n".join(parts)
 
@@ -104,6 +127,7 @@ async def analyze_edges(
     provider: LLMProvider,
     *,
     pre_filtered_files: list[tuple[Path, str]] | None = None,
+    allow_repo_exploration: bool = False,
 ) -> list[EdgeEnrichment]:
     """Analyze a batch of edges against a repository and return enrichment data.
 
@@ -119,6 +143,9 @@ async def analyze_edges(
         pre_filtered_files:  Optional pre-selected ``(path, content)`` pairs from the
                              codebase explorer.  When provided, file scanning is skipped.
                              When ``None``, the standard glob scan is used.
+        allow_repo_exploration:
+                            When True, do not pre-scan files locally. Instead, instruct
+                            the ACP-backed runtime to inspect the repository directly.
 
     Returns:
         Zero or more :class:`EdgeEnrichment` instances as returned by the agent.
@@ -126,16 +153,27 @@ async def analyze_edges(
     if not edges:
         return []
 
-    repo_files = pre_filtered_files if pre_filtered_files is not None else _collect_repo_files(repo_path)
+    if pre_filtered_files is not None:
+        repo_files = pre_filtered_files
+    elif allow_repo_exploration:
+        repo_files = []
+    else:
+        repo_files = _collect_repo_files(repo_path)
 
     logger.debug(
-        "pipeline_analyzer: %d edge(s), %d repo file(s) from %s",
+        "pipeline_analyzer: %d edge(s), %d repo file(s) from %s (direct_repo=%s)",
         len(edges),
         len(repo_files),
         repo_path,
+        allow_repo_exploration,
     )
 
-    user_prompt = _build_user_prompt(edges, repo_files, repo_path)
+    user_prompt = _build_user_prompt(
+        edges,
+        repo_files,
+        repo_path,
+        allow_repo_exploration=allow_repo_exploration,
+    )
     try:
         result: PipelineAnalysisResult = await provider.analyze(
             _SYSTEM_PROMPT, user_prompt, PipelineAnalysisResult

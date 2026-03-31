@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import textwrap
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
@@ -101,26 +102,26 @@ def test_edge_enrichment_optional_fields_default_to_none() -> None:
 
 def test_edge_enrichment_missing_required_fields_raises() -> None:
     with pytest.raises(ValidationError):
-        EdgeEnrichment()  # type: ignore[call-arg]
+        cast(Any, EdgeEnrichment)()
 
 
 def test_edge_enrichment_missing_confidence_note_raises() -> None:
     with pytest.raises(ValidationError):
-        EdgeEnrichment(
+        cast(Any, EdgeEnrichment)(
             source_table="a.b",
             dest_table="c.d",
             transport_kind="UNKNOWN",
             # confidence_note is required
-        )  # type: ignore[call-arg]
+        )
 
 
 def test_edge_enrichment_missing_source_table_raises() -> None:
     with pytest.raises(ValidationError):
-        EdgeEnrichment(
+        cast(Any, EdgeEnrichment)(
             dest_table="c.d",
             transport_kind="UNKNOWN",
             confidence_note="x",
-        )  # type: ignore[call-arg]
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +154,7 @@ def test_pipeline_analysis_result_with_edges() -> None:
 
 def test_pipeline_analysis_result_invalid_type_raises() -> None:
     with pytest.raises((ValidationError, TypeError)):
-        PipelineAnalysisResult(edges="not-a-list")  # type: ignore[arg-type]
+        PipelineAnalysisResult(edges=cast(Any, "not-a-list"))
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +237,12 @@ def test_build_user_prompt_lists_edges() -> None:
         _make_edge("src::raw.users", "dst::staging.stg_users"),
         _make_edge("src::raw.orders", "dst::staging.stg_orders", kind="dbt_source_ref"),
     ]
-    prompt = _build_user_prompt(edges, [], Path("/repo"))
+    prompt = _build_user_prompt(
+        edges,
+        [],
+        Path("/repo"),
+        allow_repo_exploration=False,
+    )
     assert "src::raw.users" in prompt
     assert "dst::staging.stg_users" in prompt
     assert "src::raw.orders" in prompt
@@ -248,15 +254,38 @@ def test_build_user_prompt_includes_file_contents(tmp_path: Path) -> None:
     py_file.write_text("# airflow dag\nwith DAG('pipeline'):\n    pass\n")
     edges = [_make_edge("src::raw.a", "dst::prod.a")]
     files = [(py_file, py_file.read_text())]
-    prompt = _build_user_prompt(edges, files, tmp_path)
+    prompt = _build_user_prompt(
+        edges,
+        files,
+        tmp_path,
+        allow_repo_exploration=False,
+    )
     assert "airflow dag" in prompt
     assert "load.py" in prompt
 
 
 def test_build_user_prompt_no_files_shows_placeholder() -> None:
     edges = [_make_edge("a::x.y", "b::x.y")]
-    prompt = _build_user_prompt(edges, [], Path("/repo"))
+    prompt = _build_user_prompt(
+        edges,
+        [],
+        Path("/repo"),
+        allow_repo_exploration=False,
+    )
     assert "no relevant files found" in prompt
+
+
+def test_build_user_prompt_direct_repo_instructions() -> None:
+    edges = [_make_edge("a::x.y", "b::x.y")]
+    prompt = _build_user_prompt(
+        edges,
+        [],
+        Path("/repo"),
+        allow_repo_exploration=True,
+    )
+    assert "current working directory is the repository root" in prompt
+    assert "inspect the repository directly" in prompt
+    assert "no inline file excerpts were pre-selected" in prompt
 
 
 def test_collect_repo_files_finds_py_and_sql(tmp_path: Path) -> None:

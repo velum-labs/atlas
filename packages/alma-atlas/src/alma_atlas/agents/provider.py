@@ -1,4 +1,4 @@
-"""Pluggable LLM provider backends for pipeline analysis.
+"""Runtime backends for Atlas learning workflows.
 
 Providers implement the :class:`LLMProvider` interface and can be selected
 via Atlas configuration.
@@ -12,13 +12,16 @@ from __future__ import annotations
 
 import abc
 import logging
-from typing import TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
+
+if TYPE_CHECKING:
+    from alma_atlas.agents.acp_provider import ACPSessionRuntime
 
 
 class LLMProvider(abc.ABC):
@@ -108,6 +111,9 @@ def make_provider(
     agent_args: list[str] | None = None,
     agent_env: dict[str, str] | None = None,
     agent_cwd: str | None = None,
+    runtime: ACPSessionRuntime | None = None,
+    enable_terminal: bool = True,
+    mcp_servers: list[Any] | None = None,
 ) -> LLMProvider:
     """Instantiate an LLM provider by name.
 
@@ -121,6 +127,10 @@ def make_provider(
         agent_args:     Extra CLI arguments for the ACP agent subprocess.
         agent_env:      Extra environment variables for the ACP agent subprocess.
         agent_cwd:      Working directory for the ACP agent session.
+        runtime:        Optional shared ACP runtime/session manager.
+        enable_terminal:
+                        Whether Atlas should advertise ACP terminal support.
+        mcp_servers:    Optional MCP server configs injected during ``session/new``.
 
     Returns:
         A configured :class:`LLMProvider` instance.
@@ -146,6 +156,9 @@ def make_provider(
                 args=agent_args,
                 env=agent_env,
                 cwd=agent_cwd,
+                runtime=runtime,
+                enable_terminal=enable_terminal,
+                mcp_servers=mcp_servers,
             ),
         )
     if provider_name == "mock":

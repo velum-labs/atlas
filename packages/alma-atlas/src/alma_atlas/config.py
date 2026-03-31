@@ -73,12 +73,16 @@ class AgentProcessConfig:
 
 @dataclass
 class AgentConfig:
-    """Configuration for a single learning agent.
+    """Configuration for one learning workflow role.
 
     Atlas only supports ``mock`` and ACP-backed agents at runtime.
     ``model``, ``api_key_env``, ``timeout``, and ``max_tokens`` are preserved
     as compatibility metadata for existing configs and tests; ACP execution is
     controlled by ``agent`` / ``provider`` rather than these fields.
+
+    Despite the historical name, these configs describe workflow roles such as
+    ``explorer`` or ``annotator``; Atlas may reuse one ACP runtime/session
+    across multiple roles when they resolve to the same subprocess settings.
     """
 
     provider: str = DEFAULT_AGENT_PROVIDER  # mock | acp
@@ -96,14 +100,14 @@ class AgentConfig:
 
 @dataclass
 class LearningConfig:
-    """Configuration for the learning pipeline agents.
+    """Configuration for ACP-backed learning workflows.
 
     Supports two formats in ``atlas.yml``:
 
     *Flat (legacy)*: top-level ``provider``, ``model``, etc. fields are applied
-    to all three agents for backward compatibility.
+    to all three workflow roles for backward compatibility.
 
-    *Nested (per-agent)*: ``explorer``, ``pipeline_analyzer``, and
+    *Nested (per-role)*: ``explorer``, ``pipeline_analyzer``, and
     ``annotator`` sub-sections each carry their own :class:`AgentConfig`.
     """
 
@@ -116,7 +120,7 @@ class LearningConfig:
     # ACP agent subprocess config. Set when provider == "acp" or via agent: key.
     agent: AgentProcessConfig | None = None
 
-    # Per-agent configs.  When the flat YAML format is used these are
+    # Per-role configs.  When the flat YAML format is used these are
     # populated from the flat fields by ``load_atlas_yml``.
     explorer: AgentConfig = field(
         default_factory=lambda: AgentConfig(

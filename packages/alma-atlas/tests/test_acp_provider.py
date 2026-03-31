@@ -8,6 +8,7 @@ method to simulate what a real ACP agent would do.
 from __future__ import annotations
 
 import json
+import sys
 import textwrap
 import warnings
 from contextlib import asynccontextmanager
@@ -59,6 +60,11 @@ def _make_spawn_cm(conn, proc=None):
         yield conn, fake_proc
 
     return _cm
+
+
+def _require_client(provider: ACPProvider) -> SimpleClient:
+    assert provider._client is not None
+    return provider._client
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +153,21 @@ async def test_simple_client_session_update_does_not_raise() -> None:
     await client.session_update(session_id="s", update=MagicMock())
 
 
+async def test_simple_client_session_update_accumulates_snapshot() -> None:
+    from acp import text_block, update_agent_message
+
+    client = SimpleClient()
+    await client.session_update(
+        session_id="s",
+        update=update_agent_message(text_block("hello from agent")),
+    )
+
+    snapshot = client.session_snapshot
+    assert snapshot.session_id == "s"
+    assert len(snapshot.agent_messages) == 1
+    assert snapshot.agent_messages[0].content.text == "hello from agent"
+
+
 async def test_simple_client_read_text_file_returns_content(tmp_path: Path) -> None:
     p = tmp_path / "data.txt"
     p.write_text("hello")
@@ -161,6 +182,51 @@ async def test_simple_client_read_text_file_missing_returns_empty(tmp_path: Path
         path=str(tmp_path / "no_such_file.txt"), session_id="s"
     )
     assert resp.content == ""
+
+
+async def test_simple_client_read_text_file_respects_line_and_limit(tmp_path: Path) -> None:
+    p = tmp_path / "data.txt"
+    p.write_text("line-1\nline-2\nline-3\n")
+    client = SimpleClient()
+    resp = await client.read_text_file(path=str(p), session_id="s", line=2, limit=1)
+    assert resp.content == "line-2\n"
+
+
+async def test_simple_client_terminal_lifecycle(tmp_path: Path) -> None:
+    client = SimpleClient()
+    created = await client.create_terminal(
+        command=sys.executable,
+        args=[
+            "-c",
+            "import sys; sys.stdout.write('hello\\n'); sys.stderr.write('err\\n')",
+        ],
+        cwd=str(tmp_path),
+        session_id="s",
+        output_byte_limit=1024,
+    )
+
+    waited = await client.wait_for_terminal_exit(session_id="s", terminal_id=created.terminal_id)
+    output = await client.terminal_output(session_id="s", terminal_id=created.terminal_id)
+
+    assert waited.exit_code == 0
+    assert "hello" in output.output
+    assert "err" in output.output
+    assert output.exit_status is not None
+    assert output.exit_status.exit_code == 0
+
+    await client.release_terminal(session_id="s", terminal_id=created.terminal_id)
+    assert created.terminal_id not in client._terminals
+
+
+async def test_simple_client_terminal_disabled_raises(tmp_path: Path) -> None:
+    client = SimpleClient(enable_terminal=False)
+    with pytest.raises(RuntimeError, match="disabled"):
+        await client.create_terminal(
+            command=sys.executable,
+            args=["-c", "print('nope')"],
+            cwd=str(tmp_path),
+            session_id="s",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +267,7 @@ async def test_acp_provider_analyze_returns_validated_model(tmp_path: Path) -> N
         for line in prompt_text.splitlines():
             if line.startswith("Write your results as valid JSON to: "):
                 path = line.split(": ", 1)[1].strip()
-                provider._client._written_files[path] = valid_json
+                _require_client(provider)._written_files[path] = valid_json
                 break
         return _FakePromptResp()
 
@@ -227,7 +293,7 @@ async def test_acp_provider_analyze_session_reuse(tmp_path: Path) -> None:
         for line in prompt_text.splitlines():
             if line.startswith("Write your results as valid JSON to: "):
                 path = line.split(": ", 1)[1].strip()
-                provider._client._written_files[path] = valid_json
+                _require_client(provider)._written_files[path] = valid_json
                 break
         return _FakePromptResp()
 
@@ -252,6 +318,107 @@ async def test_acp_provider_analyze_session_reuse(tmp_path: Path) -> None:
     await provider.aclose()
 
 
+async def test_acp_provider_initialize_passes_capabilities_and_client_info(tmp_path: Path) -> None:
+    valid_json = json.dumps({"edges": [], "repo_summary": "ok"})
+    conn = _make_fake_conn()
+
+    async def _prompt_side_effect(**kwargs):
+        for line in kwargs["prompt"][0].text.splitlines():
+            if line.startswith("Write your results as valid JSON to: "):
+                path = line.split(": ", 1)[1].strip()
+                _require_client(provider)._written_files[path] = valid_json
+                break
+        return _FakePromptResp()
+
+    conn.prompt = AsyncMock(side_effect=_prompt_side_effect)
+
+    provider = ACPProvider(cwd=str(tmp_path))
+    with patch("alma_atlas.agents.acp_provider.spawn_agent_process", _make_spawn_cm(conn)):
+        await provider.analyze("sys", "usr", PipelineAnalysisResult)
+
+    initialize_kwargs = conn.initialize.call_args.kwargs
+    capabilities = initialize_kwargs["client_capabilities"]
+    client_info = initialize_kwargs["client_info"]
+
+    assert capabilities.fs.read_text_file is True
+    assert capabilities.fs.write_text_file is True
+    assert capabilities.terminal is True
+    assert client_info.name == "alma-atlas"
+    assert client_info.title == "Alma Atlas"
+    assert client_info.version
+    await provider.aclose()
+
+
+async def test_acp_provider_stores_initialize_and_session_metadata(tmp_path: Path) -> None:
+    from acp.schema import (
+        AgentCapabilities,
+        InitializeResponse,
+        NewSessionResponse,
+        SessionCapabilities,
+        SessionListCapabilities,
+    )
+
+    valid_json = json.dumps({"edges": []})
+    conn = _make_fake_conn()
+    conn.initialize = AsyncMock(
+        return_value=InitializeResponse(
+            protocol_version=1,
+            agent_capabilities=AgentCapabilities(
+                session_capabilities=SessionCapabilities(
+                    list=SessionListCapabilities(),
+                )
+            ),
+        )
+    )
+    conn.new_session = AsyncMock(return_value=NewSessionResponse(session_id="shared-session"))
+
+    async def _prompt_side_effect(**kwargs):
+        for line in kwargs["prompt"][0].text.splitlines():
+            if line.startswith("Write your results as valid JSON to: "):
+                path = line.split(": ", 1)[1].strip()
+                _require_client(provider)._written_files[path] = valid_json
+                break
+        return _FakePromptResp()
+
+    conn.prompt = AsyncMock(side_effect=_prompt_side_effect)
+
+    provider = ACPProvider(cwd=str(tmp_path))
+    with patch("alma_atlas.agents.acp_provider.spawn_agent_process", _make_spawn_cm(conn)):
+        await provider.analyze("sys", "usr", PipelineAnalysisResult)
+
+    assert provider.initialize_response is not None
+    capabilities = provider.initialize_response.agent_capabilities
+    assert capabilities is not None
+    assert capabilities.session_capabilities is not None
+    assert capabilities.session_capabilities.list is not None
+    assert provider.session_response is not None
+    assert provider.session_response.session_id == "shared-session"
+    await provider.aclose()
+
+
+async def test_acp_provider_forwards_mcp_servers_to_new_session(tmp_path: Path) -> None:
+    valid_json = json.dumps({"edges": []})
+    conn = _make_fake_conn()
+    fake_mcp = MagicMock(name="filesystem-mcp")
+
+    async def _prompt_side_effect(**kwargs):
+        for line in kwargs["prompt"][0].text.splitlines():
+            if line.startswith("Write your results as valid JSON to: "):
+                path = line.split(": ", 1)[1].strip()
+                _require_client(provider)._written_files[path] = valid_json
+                break
+        return _FakePromptResp()
+
+    conn.prompt = AsyncMock(side_effect=_prompt_side_effect)
+
+    provider = ACPProvider(cwd=str(tmp_path), mcp_servers=[fake_mcp])
+    with patch("alma_atlas.agents.acp_provider.spawn_agent_process", _make_spawn_cm(conn)):
+        await provider.analyze("sys", "usr", PipelineAnalysisResult)
+
+    assert conn.new_session.call_args.kwargs["mcp_servers"] == [fake_mcp]
+    await provider.aclose()
+
+
 async def test_acp_provider_analyze_cleans_up_temp_file(tmp_path: Path) -> None:
     """Temp file is deleted after successful validation."""
     valid_json = json.dumps({"edges": []})
@@ -263,7 +430,7 @@ async def test_acp_provider_analyze_cleans_up_temp_file(tmp_path: Path) -> None:
         for line in prompt_text.splitlines():
             if line.startswith("Write your results as valid JSON to: "):
                 path = line.split(": ", 1)[1].strip()
-                provider._client._written_files[path] = valid_json
+                _require_client(provider)._written_files[path] = valid_json
                 written_path.append(path)
                 break
         return _FakePromptResp()
@@ -275,7 +442,7 @@ async def test_acp_provider_analyze_cleans_up_temp_file(tmp_path: Path) -> None:
         await provider.analyze("sys", "usr", PipelineAnalysisResult)
 
     assert written_path, "Prompt must have included a file path"
-    assert str(written_path[0]) not in provider._client._written_files
+    assert str(written_path[0]) not in _require_client(provider)._written_files
 
 
 # ---------------------------------------------------------------------------
@@ -307,10 +474,10 @@ async def test_acp_provider_analyze_self_healing_succeeds_on_retry(tmp_path: Pat
         if path is not None:
             if call_count == 1:
                 # First attempt: write garbage
-                provider._client._written_files[path] = "not valid json"
+                _require_client(provider)._written_files[path] = "not valid json"
             else:
                 # Second attempt: write valid JSON
-                provider._client._written_files[path] = valid_json
+                _require_client(provider)._written_files[path] = valid_json
         return _FakePromptResp()
 
     conn.prompt = AsyncMock(side_effect=_prompt_side_effect)
@@ -340,9 +507,9 @@ async def test_acp_provider_analyze_healing_prompt_contains_errors(tmp_path: Pat
         path = _extract_path_from_prompt(text)
         if path is not None:
             if call_count == 1:
-                provider._client._written_files[path] = "broken"
+                _require_client(provider)._written_files[path] = "broken"
             else:
-                provider._client._written_files[path] = valid_json
+                _require_client(provider)._written_files[path] = valid_json
         return _FakePromptResp()
 
     conn.prompt = AsyncMock(side_effect=_prompt_side_effect)
@@ -365,7 +532,7 @@ async def test_acp_provider_analyze_raises_after_max_retries(tmp_path: Path) -> 
         for line in kwargs["prompt"][0].text.splitlines():
             if line.startswith("Write your results as valid JSON to: "):
                 path = line.split(": ", 1)[1].strip()
-                provider._client._written_files[path] = "always bad json ]["
+                _require_client(provider)._written_files[path] = "always bad json ]["
                 break
         return _FakePromptResp()
 
@@ -426,7 +593,7 @@ async def test_acp_provider_aclose_resets_state(tmp_path: Path) -> None:
         for line in kwargs["prompt"][0].text.splitlines():
             if line.startswith("Write your results as valid JSON to: "):
                 path = line.split(": ", 1)[1].strip()
-                provider._client._written_files[path] = valid_json
+                _require_client(provider)._written_files[path] = valid_json
                 break
         return _FakePromptResp()
 
