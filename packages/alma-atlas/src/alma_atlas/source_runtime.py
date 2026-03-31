@@ -11,14 +11,19 @@ from typing import Any
 from alma_atlas.config import SourceConfig
 from alma_atlas.source_registry import SUPPORTED_SOURCE_KINDS
 from alma_atlas.source_specs import (
+    DEFAULT_AIRFLOW_AUTH_TOKEN_ENV,
     DEFAULT_BIGQUERY_LOCATION,
     DEFAULT_BIGQUERY_LOOKBACK_HOURS,
     DEFAULT_BIGQUERY_MAX_COLUMN_ROWS,
     DEFAULT_BIGQUERY_MAX_JOB_ROWS,
-    DEFAULT_BIGQUERY_SERVICE_ACCOUNT_ENV,
+    DEFAULT_FIVETRAN_API_KEY_ENV,
+    DEFAULT_FIVETRAN_API_SECRET_ENV,
+    DEFAULT_LOOKER_CLIENT_ID_ENV,
+    DEFAULT_LOOKER_CLIENT_SECRET_ENV,
     DEFAULT_LOOKER_PORT,
     DEFAULT_POSTGRES_EXCLUDE_SCHEMAS,
     DEFAULT_POSTGRES_SCHEMA,
+    DEFAULT_SNOWFLAKE_ACCOUNT_SECRET_ENV,
     DEFAULT_SNOWFLAKE_EXCLUDE_SCHEMAS,
     DEFAULT_SNOWFLAKE_LOOKBACK_HOURS,
     DEFAULT_SNOWFLAKE_MAX_QUERY_ROWS,
@@ -64,8 +69,16 @@ def _resolve_env(secret: object) -> str:
     provider = getattr(secret, "provider", "env")
     ref = getattr(secret, "reference", None)
     if provider == "literal":
-        return ref or ""
-    return os.environ.get(ref, "") if ref else ""
+        value = str(ref or "")
+        if not value:
+            raise ValueError("literal secrets must be non-empty")
+        return value
+    if not ref:
+        raise ValueError("environment-backed secrets require a reference")
+    value = os.environ.get(str(ref))
+    if value is None:
+        raise ValueError(f"environment variable {ref!r} is not configured for adapter secret")
+    return value
 
 
 def _observation_cursor(source: SourceConfig) -> dict[str, object] | None:
@@ -107,6 +120,14 @@ def _required_secret(
     return secret
 
 
+def _normalize_schema_tuple(value: object, *, default: tuple[str, ...]) -> tuple[str, ...]:
+    if value is None:
+        return default
+    if isinstance(value, (list, tuple)):
+        return tuple(str(item) for item in value)
+    return (str(value),)
+
+
 def _build_bigquery_config(source: SourceConfig) -> BigQueryAdapterConfig:
     params = source.params
     if "credentials" in params and "service_account_env" in params:
@@ -116,11 +137,13 @@ def _build_bigquery_config(source: SourceConfig) -> BigQueryAdapterConfig:
         if not credentials_path.exists():
             raise ValueError(f"BigQuery credentials file not found: {credentials_path}")
         service_account_secret = _literal_secret(credentials_path.read_text(encoding="utf-8"))
+    elif "service_account_env" in params:
+        service_account_secret = _env_secret(params["service_account_env"])
     else:
-        service_account_secret = _env_secret(params.get("service_account_env", DEFAULT_BIGQUERY_SERVICE_ACCOUNT_ENV))
+        service_account_secret = None
     return BigQueryAdapterConfig(
-        service_account_secret=service_account_secret,
         project_id=params.get("project_id") or params["project"],
+        service_account_secret=service_account_secret,
         location=params.get("location", DEFAULT_BIGQUERY_LOCATION),
         lookback_hours=int(params.get("lookback_hours", DEFAULT_BIGQUERY_LOOKBACK_HOURS)),
         max_job_rows=int(params.get("max_job_rows", DEFAULT_BIGQUERY_MAX_JOB_ROWS)),
@@ -165,7 +188,10 @@ def _build_postgres_config(source: SourceConfig) -> PostgresAdapterConfig:
     return PostgresAdapterConfig(
         database_secret=database_secret,
         include_schemas=include_schemas,
-        exclude_schemas=tuple(params.get("exclude_schemas", DEFAULT_POSTGRES_EXCLUDE_SCHEMAS)),
+        exclude_schemas=_normalize_schema_tuple(
+            params.get("exclude_schemas"),
+            default=DEFAULT_POSTGRES_EXCLUDE_SCHEMAS,
+        ),
         log_capture=log_capture,
         probe_target=params.get("probe_target"),
         read_replica=read_replica,
@@ -184,17 +210,20 @@ def _build_dbt_config(source: SourceConfig) -> DbtAdapterConfig:
 
 def _build_snowflake_config(source: SourceConfig) -> SnowflakeAdapterConfig:
     params = source.params
-    account_secret_env = params.get("account_secret_env")
+    account_secret_env = params.get("account_secret_env", DEFAULT_SNOWFLAKE_ACCOUNT_SECRET_ENV)
     if not isinstance(account_secret_env, str) or not account_secret_env:
-        raise ValueError("snowflake sources require 'account_secret_env'")
+        raise ValueError("snowflake sources require a non-empty 'account_secret_env'")
     return SnowflakeAdapterConfig(
         account_secret=_env_secret(account_secret_env),
         account=params.get("account", ""),
         warehouse=params.get("warehouse", DEFAULT_SNOWFLAKE_WAREHOUSE),
         database=params.get("database", ""),
         role=params.get("role", ""),
-        include_schemas=tuple(params.get("include_schemas", ())),
-        exclude_schemas=tuple(params.get("exclude_schemas", DEFAULT_SNOWFLAKE_EXCLUDE_SCHEMAS)),
+        include_schemas=_normalize_schema_tuple(params.get("include_schemas"), default=()),
+        exclude_schemas=_normalize_schema_tuple(
+            params.get("exclude_schemas"),
+            default=DEFAULT_SNOWFLAKE_EXCLUDE_SCHEMAS,
+        ),
         lookback_hours=int(params.get("lookback_hours", DEFAULT_SNOWFLAKE_LOOKBACK_HOURS)),
         max_query_rows=int(params.get("max_query_rows", DEFAULT_SNOWFLAKE_MAX_QUERY_ROWS)),
         probe_target=params.get("probe_target"),
@@ -203,8 +232,11 @@ def _build_snowflake_config(source: SourceConfig) -> SnowflakeAdapterConfig:
 
 def _build_airflow_config(source: SourceConfig) -> AirflowAdapterConfig:
     params = source.params
+    has_basic_auth = bool(params.get("username")) and bool(params.get("password") or params.get("password_env"))
     auth_token_secret = _optional_secret(params, literal_key="auth_token", env_key="auth_token_env")
-    if auth_token_secret is None and not (params.get("username") and params.get("password")):
+    if auth_token_secret is None and not has_basic_auth:
+        auth_token_secret = _env_secret(DEFAULT_AIRFLOW_AUTH_TOKEN_ENV)
+    if auth_token_secret is None and not has_basic_auth:
         raise ValueError("airflow sources require 'auth_token', 'auth_token_env', or username/password")
     return AirflowAdapterConfig(
         base_url=params.get("base_url", ""),
@@ -216,24 +248,14 @@ def _build_airflow_config(source: SourceConfig) -> AirflowAdapterConfig:
 
 def _build_looker_config(source: SourceConfig) -> LookerAdapterConfig:
     params = source.params
-    client_id = _required_secret(
-        params,
-        literal_key="client_id",
-        env_key="client_id_env",
-        error_message=(
-            "looker sources require client credentials via 'client_id'/'client_secret' "
-            "or explicit 'client_id_env'/'client_secret_env'"
-        ),
+    client_id = _optional_secret(params, literal_key="client_id", env_key="client_id_env") or _env_secret(
+        DEFAULT_LOOKER_CLIENT_ID_ENV
     )
-    client_secret = _required_secret(
+    client_secret = _optional_secret(
         params,
         literal_key="client_secret",
         env_key="client_secret_env",
-        error_message=(
-            "looker sources require client credentials via 'client_id'/'client_secret' "
-            "or explicit 'client_id_env'/'client_secret_env'"
-        ),
-    )
+    ) or _env_secret(DEFAULT_LOOKER_CLIENT_SECRET_ENV)
     return LookerAdapterConfig(
         instance_url=params.get("instance_url", ""),
         client_id=client_id,
@@ -244,23 +266,11 @@ def _build_looker_config(source: SourceConfig) -> LookerAdapterConfig:
 
 def _build_fivetran_config(source: SourceConfig) -> FivetranAdapterConfig:
     params = source.params
-    api_key = _required_secret(
-        params,
-        literal_key="api_key",
-        env_key="api_key_env",
-        error_message=(
-            "fivetran sources require API credentials via 'api_key'/'api_secret' "
-            "or explicit 'api_key_env'/'api_secret_env'"
-        ),
+    api_key = _optional_secret(params, literal_key="api_key", env_key="api_key_env") or _env_secret(
+        DEFAULT_FIVETRAN_API_KEY_ENV
     )
-    api_secret = _required_secret(
-        params,
-        literal_key="api_secret",
-        env_key="api_secret_env",
-        error_message=(
-            "fivetran sources require API credentials via 'api_key'/'api_secret' "
-            "or explicit 'api_key_env'/'api_secret_env'"
-        ),
+    api_secret = _optional_secret(params, literal_key="api_secret", env_key="api_secret_env") or _env_secret(
+        DEFAULT_FIVETRAN_API_SECRET_ENV
     )
     return FivetranAdapterConfig(api_key=api_key, api_secret=api_secret)
 
@@ -268,7 +278,8 @@ def _build_fivetran_config(source: SourceConfig) -> FivetranAdapterConfig:
 def _build_metabase_config(source: SourceConfig) -> MetabaseAdapterConfig:
     params = source.params
     api_key = _optional_secret(params, literal_key="api_key", env_key="api_key_env")
-    if api_key is None and not (params.get("username") and params.get("password")):
+    has_basic_auth = bool(params.get("username")) and bool(params.get("password") or params.get("password_env"))
+    if api_key is None and not has_basic_auth:
         raise ValueError("metabase sources require 'api_key', 'api_key_env', or username/password")
     return MetabaseAdapterConfig(
         instance_url=params.get("instance_url", ""),

@@ -29,7 +29,7 @@ from alma_sqlkit.parse import extract_tables, parse_sql
 from alma_sqlkit.parser import ParsingConfig, SQLParser
 from alma_sqlkit.table_refs import TableRef, extract_table_names, extract_tables_from_sql
 
-__version__ = "0.2.0"
+__version__ = "0.1.0"
 
 
 __all__ = [

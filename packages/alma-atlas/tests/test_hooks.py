@@ -13,6 +13,7 @@ from alma_atlas.hooks import (
     HookEvent,
     HookExecutor,
     HookResult,
+    HookRuntimeConfig,
     make_drift_detected_event,
     make_hook_event,
     make_scan_result_event,
@@ -169,175 +170,59 @@ async def test_webhook_hook_posts_correct_payload() -> None:
     executor = HookExecutor([hook])
     event = _make_event()
 
-    captured_calls: list[dict] = []
+    captured_call: dict = {}
 
-    def fake_urlopen(req, timeout=None):
-        captured_calls.append(
-            {
-                "url": req.full_url,
-                "method": req.get_method(),
-                "data": json.loads(req.data),
-                "headers": {k.lower(): v for k, v in req.header_items()},
-                "timeout": timeout,
-            }
-        )
-        resp = MagicMock()
-        resp.__enter__ = lambda s: s
-        resp.__exit__ = MagicMock(return_value=False)
-        resp.read = MagicMock(return_value=b"ok")
-        resp.status = 200
-        return resp
+    async def fake_request_with_retry(client, **kwargs):
+        captured_call.update(kwargs)
+        return MagicMock()
 
-    with patch("urllib.request.urlopen", fake_urlopen):
+    with patch("alma_atlas.hooks.async_request_with_retry", side_effect=fake_request_with_retry):
         results = await executor.fire(event)
 
     assert len(results) == 1
     assert results[0].success is True
-    assert len(captured_calls) == 1
-    call = captured_calls[0]
-    assert call["url"] == "http://example.com/hook"
-    assert call["method"] == "POST"
-    assert call["data"]["event_type"] == "scan_complete"
-    assert call["data"]["source_id"] == "src1"
-    assert call["timeout"] == 10
-    # Custom header should be sent
-    assert "x-test" in call["headers"]
+    assert captured_call["url"] == "http://example.com/hook"
+    assert captured_call["method"] == "POST"
+    assert captured_call["json_body"]["event_type"] == "scan_complete"
+    assert captured_call["json_body"]["source_id"] == "src1"
+    assert captured_call["max_retries"] == 1
+    assert captured_call["backoff_base"] == 1.0
+    assert captured_call["headers"]["Content-Type"] == "application/json"
+    assert captured_call["headers"]["X-Test"] == "1"
 
 
 @pytest.mark.asyncio
-async def test_webhook_hook_includes_content_type_header() -> None:
+async def test_webhook_hook_uses_runtime_settings() -> None:
     hook = _webhook_hook()
-    executor = HookExecutor([hook])
+    runtime = HookRuntimeConfig(webhook_timeout_seconds=7.5, max_retries=3, backoff_base_seconds=2.0)
+    executor = HookExecutor([hook], runtime=runtime)
+    captured_call: dict = {}
 
-    captured_headers: dict = {}
+    async def fake_request_with_retry(client, **kwargs):
+        captured_call.update(kwargs)
+        return MagicMock()
 
-    def fake_urlopen(req, timeout=None):
-        captured_headers.update({k.lower(): v for k, v in req.header_items()})
-        resp = MagicMock()
-        resp.__enter__ = lambda s: s
-        resp.__exit__ = MagicMock(return_value=False)
-        resp.read = MagicMock(return_value=b"")
-        resp.status = 200
-        return resp
-
-    with patch("urllib.request.urlopen", fake_urlopen):
-        await executor.fire(_make_event())
-
-    assert captured_headers.get("content-type") == "application/json"
-
-
-# ---------------------------------------------------------------------------
-# Webhook hook — retry on 5xx
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_webhook_retries_on_5xx() -> None:
-    import urllib.error
-
-    hook = _webhook_hook()
-    executor = HookExecutor([hook])
-    call_count = 0
-
-    def fake_urlopen(req, timeout=None):
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            raise urllib.error.HTTPError(url=req.full_url, code=503, msg="Service Unavailable", hdrs=None, fp=None)
-        resp = MagicMock()
-        resp.__enter__ = lambda s: s
-        resp.__exit__ = MagicMock(return_value=False)
-        resp.read = MagicMock(return_value=b"ok")
-        resp.status = 200
-        return resp
-
-    with patch("urllib.request.urlopen", fake_urlopen):
+    with patch("alma_atlas.hooks.async_request_with_retry", side_effect=fake_request_with_retry):
         results = await executor.fire(_make_event())
 
-    assert call_count == 2
     assert results[0].success is True
+    assert captured_call["max_retries"] == 3
+    assert captured_call["backoff_base"] == 2.0
 
 
 @pytest.mark.asyncio
-async def test_webhook_fails_after_two_5xx() -> None:
-    import urllib.error
-
+async def test_webhook_returns_failure_when_request_helper_raises() -> None:
     hook = _webhook_hook()
     executor = HookExecutor([hook])
 
-    def fake_urlopen(req, timeout=None):
-        raise urllib.error.HTTPError(url=req.full_url, code=500, msg="Internal Server Error", hdrs=None, fp=None)
+    async def fake_request_with_retry(client, **kwargs):
+        raise RuntimeError("connection refused")
 
-    with patch("urllib.request.urlopen", fake_urlopen):
+    with patch("alma_atlas.hooks.async_request_with_retry", side_effect=fake_request_with_retry):
         results = await executor.fire(_make_event())
 
     assert results[0].success is False
-    assert "500" in (results[0].error or "")
-
-
-@pytest.mark.asyncio
-async def test_webhook_does_not_retry_on_4xx() -> None:
-    import urllib.error
-
-    hook = _webhook_hook()
-    executor = HookExecutor([hook])
-    call_count = 0
-
-    def fake_urlopen(req, timeout=None):
-        nonlocal call_count
-        call_count += 1
-        raise urllib.error.HTTPError(url=req.full_url, code=404, msg="Not Found", hdrs=None, fp=None)
-
-    with patch("urllib.request.urlopen", fake_urlopen):
-        results = await executor.fire(_make_event())
-
-    assert call_count == 1
-    assert results[0].success is False
-
-
-# ---------------------------------------------------------------------------
-# Webhook hook — retry on timeout
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_webhook_retries_on_timeout() -> None:
-
-    hook = _webhook_hook()
-    executor = HookExecutor([hook])
-    call_count = 0
-
-    def fake_urlopen(req, timeout=None):
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            raise TimeoutError("timed out")
-        resp = MagicMock()
-        resp.__enter__ = lambda s: s
-        resp.__exit__ = MagicMock(return_value=False)
-        resp.read = MagicMock(return_value=b"ok")
-        resp.status = 200
-        return resp
-
-    with patch("urllib.request.urlopen", fake_urlopen):
-        results = await executor.fire(_make_event())
-
-    assert call_count == 2
-    assert results[0].success is True
-
-
-@pytest.mark.asyncio
-async def test_webhook_fails_after_two_timeouts() -> None:
-    hook = _webhook_hook()
-    executor = HookExecutor([hook])
-
-    def fake_urlopen(req, timeout=None):
-        raise TimeoutError("timed out")
-
-    with patch("urllib.request.urlopen", fake_urlopen):
-        results = await executor.fire(_make_event())
-
-    assert results[0].success is False
+    assert "connection refused" in (results[0].error or "")
 
 
 # ---------------------------------------------------------------------------
@@ -353,10 +238,10 @@ async def test_error_in_one_hook_does_not_block_others(capsys) -> None:
     ]
     executor = HookExecutor(hooks)
 
-    def fake_urlopen(req, timeout=None):
+    async def fake_request_with_retry(client, **kwargs):
         raise RuntimeError("connection refused")
 
-    with patch("urllib.request.urlopen", fake_urlopen):
+    with patch("alma_atlas.hooks.async_request_with_retry", side_effect=fake_request_with_retry):
         results = await executor.fire(_make_event())
 
     assert len(results) == 2

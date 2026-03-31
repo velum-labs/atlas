@@ -40,8 +40,7 @@ def test_select_star_falls_back_to_table_level() -> None:
 
 def test_select_star_reports_column_extraction_method() -> None:
     result = extract_lineage("SELECT * FROM public.users", dialect="postgres")
-    # algebrakit parses fine but yields no edges for star
-    assert result.extraction_method == "column"
+    assert result.extraction_method == "table"
 
 
 # ---------------------------------------------------------------------------

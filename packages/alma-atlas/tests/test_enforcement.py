@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from alma_atlas_store.db import Database
@@ -283,3 +285,47 @@ class TestViolationStorage:
         recent = repo.list_recent(limit=10)
         assert any(v.asset_id == "c::t" for v in recent)
         assert all(v.resolved_at is None for v in recent)
+
+
+def test_runtime_enforcement_validates_contract_spec(db):
+    from alma_atlas.enforcement.runtime import run_enforcement_for_snapshot
+    from alma_atlas_store.asset_repository import Asset, AssetRepository
+    from alma_atlas_store.contract_repository import Contract, ContractRepository
+    from alma_atlas_store.violation_repository import ViolationRepository
+
+    AssetRepository(db).upsert(
+        Asset(
+            id="pg::public.orders",
+            source="pg",
+            kind="table",
+            name="public.orders",
+        )
+    )
+    ContractRepository(db).upsert(
+        Contract(
+            id="contract.orders",
+            asset_id="pg::public.orders",
+            version="1.0",
+            spec={"columns": [{"name": "id", "type": "INTEGER", "nullable": False}]},
+            status="active",
+            mode="enforce",
+        )
+    )
+
+    snapshot = SimpleNamespace(
+        objects=[
+            SimpleNamespace(
+                schema_name="public",
+                object_name="orders",
+                columns=[SimpleNamespace(name="id", data_type="TEXT", nullable=False)],
+            )
+        ]
+    )
+
+    blocked, has_violations = run_enforcement_for_snapshot(snapshot, "pg", db)
+
+    stored = ViolationRepository(db).list_for_asset("pg::public.orders")
+    assert has_violations is True
+    assert blocked is True
+    assert len(stored) == 1
+    assert stored[0].violation_type == "type_mismatch"

@@ -14,7 +14,9 @@ Returns a ``ScanResult`` summarising what was written.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,12 +30,38 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a float, got {raw!r}") from exc
+    if value <= 0:
+        raise ValueError(f"{name} must be > 0, got {raw!r}")
+    return value
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
+    if value <= 0:
+        raise ValueError(f"{name} must be > 0, got {raw!r}")
+    return value
+
 @dataclass(frozen=True)
 class ScanRuntimeConfig:
     """Operational defaults for Atlas scan execution."""
 
-    timeout_seconds: float = 300
-    max_concurrent: int = 4
+    timeout_seconds: float = field(default_factory=lambda: _env_float("ALMA_SCAN_TIMEOUT_SECONDS", 300.0))
+    max_concurrent: int = field(default_factory=lambda: _env_int("ALMA_SCAN_MAX_CONCURRENT", 4))
 
 
 DEFAULT_SCAN_RUNTIME_CONFIG = ScanRuntimeConfig()
@@ -48,6 +76,8 @@ class ScanResult:
     """Summary of a completed scan for one source."""
 
     source_id: str
+    capabilities_run: list[str] = field(default_factory=list)
+    capabilities_skipped: list[str] = field(default_factory=list)
     asset_count: int = 0
     edge_count: int = 0
     error: str | None = None
@@ -90,6 +120,17 @@ def _canonical_object_ref(source_kind: str, ref: str) -> str:
         if len(parts) >= 5:
             return f"{parts[-2]}.{parts[-1]}"
     return normalized
+
+
+async def _close_runtime_adapter(adapter: object) -> None:
+    for method_name in ("aclose", "close"):
+        closer = getattr(adapter, method_name, None)
+        if closer is None:
+            continue
+        result = closer()
+        if inspect.isawaitable(result):
+            await result
+        return
 
 
 def _canonical_asset_id(source_id: str, source_kind: str, ref: str) -> str:
@@ -567,89 +608,94 @@ async def _run_scan_impl(
     except (ValueError, ImportError) as exc:
         raise ConfigurationError(str(exc)) from exc
 
-    # Dry-run: validate config and build the adapter without extracting data.
-    if dry_run:
-        logger.info("[scan/%s] Dry-run complete — adapter constructed successfully.", source.id)
-        return ScanResult(source_id=source.id)
-
-    if not isinstance(adapter, SourceAdapterV2):
-        raise ExtractionError(
-            f"Adapter {type(adapter).__name__} does not implement SourceAdapterV2; "
-            "the legacy v1 scan path has been removed"
-        )
-
-    # Phase: capability probing.
-    t_probe = time.monotonic()
-    logger.info("[scan/%s] Phase: capability probe", source.id)
     try:
-        probe_results = await adapter.probe(persisted)
-    except Exception as exc:
-        raise ExtractionError(f"Capability probe failed: {exc}") from exc
-    logger.info(
-        "[scan/%s] Capability probe complete: %d result(s) in %.2fs",
-        source.id,
-        len(probe_results),
-        time.monotonic() - t_probe,
-    )
+        # Dry-run: validate config and build the adapter without extracting data.
+        if dry_run:
+            logger.info("[scan/%s] Dry-run complete — adapter constructed successfully.", source.id)
+            return ScanResult(source_id=source.id)
 
-    router = CapabilityRouter()
-    plan = router.build_plan(probe_results)
-    warnings = _capability_skip_warnings(plan)
-    if not plan.capabilities:
-        return ScanResult(
-            source_id=source.id,
-            warnings=warnings or ["No capabilities available; nothing extracted."],
-        )
+        if not isinstance(adapter, SourceAdapterV2):
+            raise ExtractionError(
+                f"Adapter {type(adapter).__name__} does not implement SourceAdapterV2; "
+                "the legacy v1 scan path has been removed"
+            )
 
-    # Phase: extraction.
-    t_extract = time.monotonic()
-    logger.info("[scan/%s] Phase: capability extraction", source.id)
-    try:
-        results, extraction_warnings = await ExtractionPipeline(adapter, persisted).execute(plan)
-    except Exception as exc:
-        raise ExtractionError(f"Capability extraction failed: {exc}") from exc
-    warnings.extend(extraction_warnings)
-    from alma_connectors.source_adapter_v2 import AdapterCapability
-
-    if (
-        AdapterCapability.SCHEMA in plan.capabilities
-        and AdapterCapability.SCHEMA not in results
-    ):
-        raise ExtractionError("Schema extraction failed")
-    logger.info(
-        "[scan/%s] Capability extraction complete: %d capability result(s) in %.2fs",
-        source.id,
-        len(results),
-        time.monotonic() - t_extract,
-    )
-
-    snapshot = None
-    asset_count = 0
-    edge_count = 0
-    enforcement_blocked = False
-    enforcement_violations = False
-
-    with Database(cfg.db_path) as db, db.transaction():
-        t_store = time.monotonic()
-        logger.info("[scan/%s] Phase: projection + persistence", source.id)
-        asset_count, edge_count, snapshot = _store_scan_results(
-            db=db,
-            source=source,
-            persisted=persisted,
-            results=results,
-        )
+        # Phase: capability probing.
+        t_probe = time.monotonic()
+        logger.info("[scan/%s] Phase: capability probe", source.id)
+        try:
+            probe_results = await adapter.probe(persisted)
+        except Exception as exc:
+            raise ExtractionError(f"Capability probe failed: {exc}") from exc
         logger.info(
-            "[scan/%s] Projection complete: %d asset(s), %d edge(s) in %.2fs",
+            "[scan/%s] Capability probe complete: %d result(s) in %.2fs",
             source.id,
-            asset_count,
-            edge_count,
-            time.monotonic() - t_store,
+            len(probe_results),
+            time.monotonic() - t_probe,
         )
 
-        if snapshot is not None:
-            t_enforce = time.monotonic()
-            logger.info("[scan/%s] Phase: enforcement", source.id)
-            try:
+        router = CapabilityRouter()
+        plan = router.build_plan(probe_results)
+        warnings = _capability_skip_warnings(plan)
+        capabilities_run = [cap.value for cap in plan.capabilities]
+        capabilities_skipped = [cap.value for cap in plan.skipped]
+        if not plan.capabilities:
+            return ScanResult(
+                source_id=source.id,
+                capabilities_run=capabilities_run,
+                capabilities_skipped=capabilities_skipped,
+                warnings=warnings or ["No capabilities available; nothing extracted."],
+            )
+
+        # Phase: extraction.
+        t_extract = time.monotonic()
+        logger.info("[scan/%s] Phase: capability extraction", source.id)
+        try:
+            results, extraction_warnings = await ExtractionPipeline(adapter, persisted).execute(plan)
+        except Exception as exc:
+            raise ExtractionError(f"Capability extraction failed: {exc}") from exc
+        warnings.extend(extraction_warnings)
+        from alma_connectors.source_adapter_v2 import AdapterCapability
+
+        if (
+            AdapterCapability.SCHEMA in plan.capabilities
+            and AdapterCapability.SCHEMA not in results
+        ):
+            raise ExtractionError("Schema extraction failed")
+        logger.info(
+            "[scan/%s] Capability extraction complete: %d capability result(s) in %.2fs",
+            source.id,
+            len(results),
+            time.monotonic() - t_extract,
+        )
+
+        snapshot = None
+        asset_count = 0
+        edge_count = 0
+        enforcement_blocked = False
+        enforcement_violations = False
+
+        with Database(cfg.db_path) as db, db.transaction():
+            t_store = time.monotonic()
+            logger.info("[scan/%s] Phase: projection + persistence", source.id)
+            asset_count, edge_count, snapshot = _store_scan_results(
+                db=db,
+                source=source,
+                persisted=persisted,
+                results=results,
+            )
+            logger.info(
+                "[scan/%s] Projection complete: %d asset(s), %d edge(s) in %.2fs",
+                source.id,
+                asset_count,
+                edge_count,
+                time.monotonic() - t_store,
+            )
+
+            if snapshot is not None:
+                t_enforce = time.monotonic()
+                logger.info("[scan/%s] Phase: enforcement", source.id)
+                try:
                     from alma_atlas.enforcement.runtime import run_enforcement_for_snapshot
 
                     enforcement_blocked, enforcement_violations = run_enforcement_for_snapshot(
@@ -657,45 +703,49 @@ async def _run_scan_impl(
                         source.id,
                         db,
                     )
-            except Exception as exc:
-                logger.exception("Enforcement check failed for source %s: %s", source.id, exc)
-                warnings.append(f"EnforcementError: {exc}")
-            logger.info(
-                "[scan/%s] Enforcement complete in %.2fs",
-                source.id,
-                time.monotonic() - t_enforce,
-            )
+                except Exception as exc:
+                    logger.exception("Enforcement check failed for source %s: %s", source.id, exc)
+                    warnings.append(f"EnforcementError: {exc}")
+                logger.info(
+                    "[scan/%s] Enforcement complete in %.2fs",
+                    source.id,
+                    time.monotonic() - t_enforce,
+                )
 
-    logger.info(
-        "[scan/%s] Scan finished: %d asset(s), %d edge(s) in %.2fs",
-        source.id,
-        asset_count,
-        edge_count,
-        time.monotonic() - t0,
-    )
-    result = ScanResult(
-        source_id=source.id,
-        asset_count=asset_count,
-        edge_count=edge_count,
-        warnings=warnings,
-        snapshot=snapshot,
-    )
-    if enforcement_blocked:
-        result.warnings.append("enforcement_blocked: schema violations detected in enforce mode")
-
-    # Fire drift_detected hooks if any violations were found.
-    if enforcement_violations and cfg.hooks:
-        from alma_atlas.hooks import HookExecutor, make_drift_detected_event
-
-        executor = HookExecutor(cfg.hooks)
-        event = make_drift_detected_event(
-            source_id=source.id,
-            blocked=enforcement_blocked,
-            asset_count=asset_count,
+        logger.info(
+            "[scan/%s] Scan finished: %d asset(s), %d edge(s) in %.2fs",
+            source.id,
+            asset_count,
+            edge_count,
+            time.monotonic() - t0,
         )
-        await executor.fire(event)
+        result = ScanResult(
+            source_id=source.id,
+            capabilities_run=capabilities_run,
+            capabilities_skipped=capabilities_skipped,
+            asset_count=asset_count,
+            edge_count=edge_count,
+            warnings=warnings,
+            snapshot=snapshot,
+        )
+        if enforcement_blocked:
+            result.warnings.append("enforcement_blocked: schema violations detected in enforce mode")
 
-    return result
+        # Fire drift_detected hooks if any violations were found.
+        if enforcement_violations and cfg.hooks:
+            from alma_atlas.hooks import HookExecutor, make_drift_detected_event
+
+            executor = HookExecutor(cfg.hooks)
+            event = make_drift_detected_event(
+                source_id=source.id,
+                blocked=enforcement_blocked,
+                asset_count=asset_count,
+            )
+            await executor.fire(event)
+
+        return result
+    finally:
+        await _close_runtime_adapter(adapter)
 
 
 def run_scan(

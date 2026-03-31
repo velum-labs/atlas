@@ -7,7 +7,7 @@
 #   2. Syncs all package versions via sync-versions.py
 #   3. Commits the version bump
 #   4. Tags the commit (vX.Y.Z)
-#   5. Pushes the tag — this triggers the publish workflow
+#   5. Pushes the commit and tag — this triggers the publish workflow
 
 set -euo pipefail
 
@@ -43,7 +43,7 @@ echo "$VERSION" > VERSION
 python3 scripts/sync-versions.py
 
 # --- Commit ---
-git add VERSION packages/*/pyproject.toml
+git add VERSION pyproject.toml packages/*/pyproject.toml packages/*/src/*/__init__.py
 git commit -m "chore: bump version to ${VERSION}"
 
 # --- Tag ---
@@ -51,7 +51,8 @@ git tag -a "$TAG" -m "Release ${TAG}"
 
 echo ""
 echo "Created commit + tag ${TAG}."
-echo "Pushing tag to origin (this triggers the publish workflow)..."
+echo "Pushing commit and tag to origin (this triggers the publish workflow)..."
+git push origin HEAD
 git push origin "$TAG"
 
 echo ""

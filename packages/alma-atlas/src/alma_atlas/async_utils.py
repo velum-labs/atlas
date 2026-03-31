@@ -5,12 +5,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Coroutine
 from threading import Thread
-from typing import Any, TypeVar
-
-T = TypeVar("T")
+from typing import Any
 
 
-def run_sync(coro: Coroutine[Any, Any, T]) -> T:
+def run_sync[T](coro: Coroutine[Any, Any, T]) -> T:
     """Run a coroutine from sync code, even if another event loop is active."""
     try:
         asyncio.get_running_loop()

@@ -139,13 +139,9 @@ class SourceAdapterService:
             return capabilities
 
         declared_capabilities = getattr(runtime_adapter, "declared_capabilities", frozenset())
-        can_introspect = bool(
-            declared_capabilities
-            & frozenset({AdapterCapability.DISCOVER, AdapterCapability.SCHEMA})
-        )
         return SourceAdapterCapabilities(
             can_test_connection=True,
-            can_introspect_schema=can_introspect,
+            can_introspect_schema=AdapterCapability.SCHEMA in declared_capabilities,
             can_observe_traffic=AdapterCapability.TRAFFIC in declared_capabilities,
             can_execute_query=False,
         )
@@ -224,9 +220,13 @@ class SourceAdapterService:
                 "max_column_rows": config.max_column_rows,
                 "probe_target": config.probe_target,
             }
-            secrets = {
-                "service_account_secret": self._serialize_secret(config.service_account_secret),
-            }
+            secrets = (
+                {
+                    "service_account_secret": self._serialize_secret(config.service_account_secret),
+                }
+                if config.service_account_secret is not None
+                else {}
+            )
             return payload, secrets
 
         if definition.kind == SourceAdapterKind.SNOWFLAKE:
@@ -395,14 +395,16 @@ class SourceAdapterService:
                 read_replica=read_replica,
             )
         elif kind == SourceAdapterKind.BIGQUERY:
+            service_account_secret = secrets.get("service_account_secret")
             adapter_config = BigQueryAdapterConfig(
-                service_account_secret=self._secret_from_storage_payload(
-                    _require_dict(
-                        secrets.get("service_account_secret") or {},
-                        field_name="service_account_secret",
-                    )
-                ),
                 project_id=str(config.get("project_id", "")),
+                service_account_secret=(
+                    self._secret_from_storage_payload(
+                        _require_dict(service_account_secret or {}, field_name="service_account_secret")
+                    )
+                    if service_account_secret is not None
+                    else None
+                ),
                 location=str(config.get("location") or "us"),
                 lookback_hours=int(config.get("lookback_hours") or 24),
                 max_job_rows=int(config.get("max_job_rows") or 10_000),

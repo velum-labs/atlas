@@ -13,7 +13,7 @@ git clone https://github.com/your-org/atlas.git
 cd atlas
 
 # Install all workspace packages in editable mode
-uv sync
+uv sync --all-packages
 
 # Verify the CLI works
 uv run alma-atlas --help
@@ -45,7 +45,7 @@ uv run ruff check .
 uv run ruff format .
 
 # Type check
-uv run ty check packages/
+uv run ty check $(python3 scripts/typecheck_targets.py --shell)
 
 # Run tests
 uv run pytest
@@ -64,8 +64,8 @@ uv run pytest packages/alma-atlas/
 ## Adding a new connector
 
 1. Add your adapter class in `packages/alma-connectors/src/alma_connectors/<name>.py`
-2. Implement the `SourceAdapter` protocol from `alma_ports`
-3. Add optional dependencies to `alma-connectors/pyproject.toml` under `[project.optional-dependencies]`
+2. Implement the `SourceAdapterV2` protocol in `alma_connectors.source_adapter_v2`
+3. Add any required dependencies directly to `packages/alma-connectors/pyproject.toml`
 4. Export from `alma_connectors/__init__.py`
 
 ## Submitting changes
@@ -76,4 +76,5 @@ uv run pytest packages/alma-atlas/
 
 ## Release
 
-Packages are published independently to PyPI. Version bumps follow semantic versioning.
+Workspace releases are lockstep and derive from the root `VERSION` file.
+Run `python scripts/sync-versions.py --check` to verify version drift before releasing.

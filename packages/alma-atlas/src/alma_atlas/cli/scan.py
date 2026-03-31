@@ -78,16 +78,17 @@ def scan(
         # Suppress noisy sqlglot parse warnings (e.g. TRUNCATE unsupported syntax)
         _logging.getLogger("sqlglot").setLevel(_logging.ERROR)
 
-    persist_sources = config_file is None and connections is None
+    runtime_source_inputs = config_file is not None or connections is not None
 
-    if persist_sources:
+    if not runtime_source_inputs:
         cfg = get_config()
-        sources = cfg.load_sources()
+        sources = cfg.resolved_sources()
     else:
         cfg, sources = resolve_runtime_sources(
             config_file=config_file,
             connections=connections,
         )
+    persist_sources = not runtime_source_inputs and not cfg.sources
 
     if not sources:
         if normalized_output_format == "json":

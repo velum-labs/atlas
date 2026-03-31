@@ -16,6 +16,8 @@ from alma_connectors.source_adapter import (
     PersistedSourceAdapter,
     QueryResult,
     SetupInstructions,
+)
+from alma_connectors.source_adapter import (
     SourceAdapterKind as SourceAdapterKindV2,
 )
 

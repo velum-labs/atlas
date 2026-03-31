@@ -154,14 +154,13 @@ def test_empty_events_returns_empty() -> None:
 def test_single_event_max_freq_boost() -> None:
     """Single event → max freq_boost (0.1), recent → multiplier 1.0.
 
-    algebrakit parses INSERT...SELECT successfully → column-level, base=0.9.
+    `SELECT *` falls back to table-level extraction, base=0.7.
     """
     sql = "INSERT INTO public.target SELECT * FROM public.source"
     engine = InferredLineageEngine([_event(sql)], dialect="postgres", now=_NOW)
     edges = engine.build_edges()
     assert len(edges) == 1
-    # column-level: base=0.9, freq_boost=0.1, recency=1.0 → min((0.9+0.1)*1.0, 1.0)=1.0
-    assert abs(edges[0].confidence - 1.0) < 1e-9
+    assert abs(edges[0].confidence - 0.8) < 1e-9
 
 
 def test_confidence_varies_with_frequency() -> None:
@@ -186,8 +185,8 @@ def test_confidence_max_count_edge_gets_full_boost() -> None:
     edges = engine.build_edges()
     assert len(edges) == 1
     # max_count=5, count=5 → log(5)/log(5)=1 → freq_boost=0.1
-    # column-level: base=0.9, recency=1.0 → min((0.9+0.1)*1.0, 1.0)=1.0
-    assert abs(edges[0].confidence - 1.0) < 1e-9
+    # table-level: base=0.7, recency=1.0 → (0.7+0.1)=0.8
+    assert abs(edges[0].confidence - 0.8) < 1e-9
 
 
 def test_confidence_multi_edge_frequency_boost() -> None:
@@ -202,11 +201,9 @@ def test_confidence_multi_edge_frequency_boost() -> None:
     edges = engine.build_edges()
     by_source = {e.source_object: e.confidence for e in edges}
 
-    # Both are column-level (algebrakit parses INSERT...SELECT successfully), base=0.9
-    # common: freq_boost = log(4)/log(4)*0.1 = 0.1 → min((0.9+0.1)*1.0, 1.0) = 1.0
-    expected_common = min((0.9 + 0.1) * 1.0, 1.0)
-    # rare: freq_boost = log(2)/log(4)*0.1 = 0.05 → (0.9+0.05)*1.0 = 0.95
-    expected_rare = (0.9 + math.log(2) / math.log(4) * 0.1) * 1.0
+    # Both are table-level because they use SELECT *.
+    expected_common = (0.7 + 0.1) * 1.0
+    expected_rare = (0.7 + math.log(2) / math.log(4) * 0.1) * 1.0
 
     assert abs(by_source["public.common"] - expected_common) < 1e-9
     assert abs(by_source["public.rare"] - expected_rare) < 1e-9
@@ -225,8 +222,8 @@ def test_recency_decay_30_days() -> None:
         [_event(sql, captured_at=old_time)], dialect="postgres", now=_NOW
     )
     edges = engine.build_edges()
-    # column-level: base=0.9, freq_boost=0.1, recency=0.9
-    assert abs(edges[0].confidence - (0.9 + 0.1) * 0.9) < 1e-9
+    # table-level: base=0.7, freq_boost=0.1, recency=0.9
+    assert abs(edges[0].confidence - (0.7 + 0.1) * 0.9) < 1e-9
 
 
 def test_recency_decay_90_days() -> None:
@@ -237,8 +234,8 @@ def test_recency_decay_90_days() -> None:
         [_event(sql, captured_at=old_time)], dialect="postgres", now=_NOW
     )
     edges = engine.build_edges()
-    # column-level: base=0.9, freq_boost=0.1, recency=0.7
-    assert abs(edges[0].confidence - (0.9 + 0.1) * 0.7) < 1e-9
+    # table-level: base=0.7, freq_boost=0.1, recency=0.7
+    assert abs(edges[0].confidence - (0.7 + 0.1) * 0.7) < 1e-9
 
 
 def test_recency_uses_most_recent_event() -> None:
@@ -253,8 +250,8 @@ def test_recency_uses_most_recent_event() -> None:
     engine = InferredLineageEngine(events, dialect="postgres", now=_NOW)
     edges = engine.build_edges()
     # Most recent is 5 days ago → recency=1.0; count=2, max_count=2 → freq_boost=0.1
-    # column-level: base=0.9 → min((0.9+0.1)*1.0, 1.0) = 1.0
-    assert abs(edges[0].confidence - min((0.9 + 0.1) * 1.0, 1.0)) < 1e-9
+    # table-level: base=0.7 → 0.8
+    assert abs(edges[0].confidence - 0.8) < 1e-9
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +404,13 @@ def test_infer_lineage_meta_capability_is_lineage() -> None:
 
     snapshot = infer_lineage([], [], "postgres", now=_NOW)
     assert snapshot.meta.capability == AdapterCapability.LINEAGE
+
+
+def test_infer_lineage_meta_uses_dialect_specific_adapter_kind() -> None:
+    from alma_connectors.source_adapter_v2 import SourceAdapterKindV2
+
+    snapshot = infer_lineage([], [], "bigquery", now=_NOW)
+    assert snapshot.meta.adapter_kind == SourceAdapterKindV2.BIGQUERY
 
 
 def test_infer_lineage_empty_inputs() -> None:

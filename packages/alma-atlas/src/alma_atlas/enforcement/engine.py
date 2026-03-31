@@ -33,8 +33,9 @@ def _deterministic_violation_id(asset_id: str, violation_type: str, details: dic
     The same drift event produces the same ID across runs, enabling
     idempotent inserts and cross-run deduplication.
     """
-    column = details.get("column", "")
-    key = f"{asset_id}:{violation_type}:{column}"
+    column = details.get("column") or details.get("column_name") or ""
+    contract_id = details.get("contract_id", "")
+    key = f"{asset_id}:{violation_type}:{contract_id}:{column}"
     digest = hashlib.sha256(key.encode()).hexdigest()
     return str(uuid.UUID(digest[:32]))
 

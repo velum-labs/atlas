@@ -66,6 +66,17 @@ def _ensure_utc(dt: datetime) -> datetime:
     return dt
 
 
+def _adapter_kind_for_dialect(dialect: str) -> SourceAdapterKindV2:
+    normalized = dialect.strip().lower()
+    mapping = {
+        "postgres": SourceAdapterKindV2.POSTGRES,
+        "postgresql": SourceAdapterKindV2.POSTGRES,
+        "bigquery": SourceAdapterKindV2.BIGQUERY,
+        "snowflake": SourceAdapterKindV2.SNOWFLAKE,
+    }
+    return mapping.get(normalized, SourceAdapterKindV2.POSTGRES)
+
+
 class _EdgeKey(NamedTuple):
     source_object: str
     target_object: str
@@ -283,7 +294,7 @@ def infer_lineage(
     captured_at = _ensure_utc(now or datetime.now(UTC))
     meta = ExtractionMeta(
         adapter_key="lineage_inference",
-        adapter_kind=SourceAdapterKindV2.POSTGRES,
+        adapter_kind=_adapter_kind_for_dialect(dialect),
         capability=AdapterCapability.LINEAGE,
         scope_context=ScopeContext(scope=ExtractionScope.GLOBAL),
         captured_at=captured_at,

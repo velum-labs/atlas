@@ -35,6 +35,7 @@ def test_upsert_updates_existing_consumer(consumer_repo, sample_consumer):
     result = consumer_repo.get(sample_consumer.id)
     assert result.kind == "notebook"
     assert result.name == "Updated Consumer"
+    assert result.asset_ids == []
 
 
 def test_get_returns_none_for_missing(consumer_repo):

@@ -242,8 +242,8 @@ class PostgresAdapterConfig:
 class BigQueryAdapterConfig:
     """Canonical persisted config for BigQuery adapters."""
 
-    service_account_secret: SourceAdapterSecret
     project_id: str
+    service_account_secret: SourceAdapterSecret | None = None
     location: str = "us"
     lookback_hours: int = 24
     max_job_rows: int = 10_000
@@ -280,6 +280,28 @@ class DbtAdapterConfig:
     catalog_path: str | None = None
     run_results_path: str | None = None
     project_name: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "manifest_path",
+            _normalize_required_string(self.manifest_path, field_name="manifest_path"),
+        )
+        object.__setattr__(
+            self,
+            "catalog_path",
+            _normalize_optional_string(self.catalog_path, field_name="catalog_path"),
+        )
+        object.__setattr__(
+            self,
+            "run_results_path",
+            _normalize_optional_string(self.run_results_path, field_name="run_results_path"),
+        )
+        object.__setattr__(
+            self,
+            "project_name",
+            _normalize_optional_string(self.project_name, field_name="project_name"),
+        )
 
 
 @dataclass(frozen=True)
@@ -839,6 +861,7 @@ class SourceAdapter(Protocol):
             DeprecationWarning,
             stacklevel=2,
         )
+        raise NotImplementedError
 
     async def introspect_schema(
         self,
@@ -855,6 +878,7 @@ class SourceAdapter(Protocol):
             DeprecationWarning,
             stacklevel=2,
         )
+        raise NotImplementedError
 
     async def observe_traffic(
         self,
@@ -873,6 +897,7 @@ class SourceAdapter(Protocol):
             DeprecationWarning,
             stacklevel=2,
         )
+        raise NotImplementedError
 
     async def execute_query(
         self,

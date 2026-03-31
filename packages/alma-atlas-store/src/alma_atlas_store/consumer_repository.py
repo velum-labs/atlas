@@ -36,6 +36,10 @@ class ConsumerRepository:
                 "metadata": json.dumps(consumer.metadata),
             },
         )
+        self._db.conn.execute(
+            "DELETE FROM consumer_assets WHERE consumer_id = ?",
+            (consumer.id,),
+        )
         for asset_id in consumer.asset_ids:
             self._db.conn.execute(
                 "INSERT OR IGNORE INTO consumer_assets (consumer_id, asset_id) VALUES (?, ?)",

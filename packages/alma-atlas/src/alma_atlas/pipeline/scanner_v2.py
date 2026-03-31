@@ -7,7 +7,6 @@ compatibility facade (`ScannerV2` / `run_scan_v2`) for legacy call sites.
 
 from __future__ import annotations
 
-import asyncio
 import dataclasses
 import json
 import logging
@@ -228,6 +227,8 @@ def scan_result_to_v2(result: ScanResult) -> ScanResultV2:
 
     return ScanResultV2(
         source_id=result.source_id,
+        capabilities_run=[AdapterCapability(cap) for cap in result.capabilities_run],
+        capabilities_skipped=[AdapterCapability(cap) for cap in result.capabilities_skipped],
         asset_count=result.asset_count,
         edge_count=result.edge_count,
         error=result.error,
@@ -268,7 +269,6 @@ def _upsert_extraction_result(
             payload,
         ),
     )
-    db.conn.commit()
 
 
 def _serialise(obj: Any) -> Any:

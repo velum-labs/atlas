@@ -7,7 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from alma_atlas.config import AtlasConfig, SourceConfig, default_config_dir, get_config
+from alma_atlas.config import (
+    DEFAULT_AGENT_PROVIDER,
+    AtlasConfig,
+    SourceConfig,
+    default_config_dir,
+    get_config,
+    load_atlas_yml,
+)
 
 # ---------------------------------------------------------------------------
 # default_config_dir
@@ -178,6 +185,54 @@ def test_team_config_encrypts_api_key(tmp_path: Path) -> None:
     assert cfg.team_id == "default"
 
 
+def test_load_team_config_preserves_runtime_values(tmp_path: Path) -> None:
+    persisted = AtlasConfig(config_dir=tmp_path)
+    persisted.team_server_url = "https://persisted.example.com"
+    persisted.team_api_key = "persisted-key"
+    persisted.team_id = "persisted-team"
+    persisted.save_team_config()
+
+    cfg = AtlasConfig(
+        config_dir=tmp_path,
+        team_server_url="https://runtime.example.com",
+        team_api_key="runtime-key",
+    )
+    cfg.load_team_config()
+
+    assert cfg.team_server_url == "https://runtime.example.com"
+    assert cfg.team_api_key == "runtime-key"
+    assert cfg.team_id == "persisted-team"
+
+
+def test_resolved_sources_prefers_runtime_sources(tmp_path: Path) -> None:
+    cfg = AtlasConfig(
+        config_dir=tmp_path,
+        sources=[SourceConfig(id="runtime", kind="postgres", params={"dsn_env": "PG_URL"})],
+    )
+    cfg.save_sources([SourceConfig(id="persisted", kind="bigquery", params={"project_id": "proj"})])
+
+    sources = cfg.resolved_sources()
+
+    assert [source.id for source in sources] == ["runtime"]
+
+
+def test_load_atlas_yml_empty_learning_takes_precedence_over_enrichment(tmp_path: Path) -> None:
+    atlas_yml = tmp_path / "atlas.yml"
+    atlas_yml.write_text(
+        """
+version: 1
+learning: {}
+enrichment:
+  provider: acp
+""".strip(),
+        encoding="utf-8",
+    )
+
+    cfg = load_atlas_yml(atlas_yml)
+
+    assert cfg.learning.provider == DEFAULT_AGENT_PROVIDER
+
+
 # ---------------------------------------------------------------------------
 # get_config singleton
 # ---------------------------------------------------------------------------
@@ -191,4 +246,30 @@ def test_get_config_returns_singleton(monkeypatch: pytest.MonkeyPatch) -> None:
     c2 = get_config()
     assert c1 is c2
     # cleanup
+    monkeypatch.setattr(config_module, "_config", None)
+
+
+def test_get_config_auto_discovers_runtime_sources(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import alma_atlas.config as config_module
+
+    config_dir = tmp_path / "alma"
+    config_dir.mkdir()
+    (config_dir / "atlas.yml").write_text(
+        """
+version: 1
+sources:
+  - id: runtime
+    kind: postgres
+    params:
+      dsn_env: PG_URL
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ALMA_CONFIG_DIR", str(config_dir))
+    monkeypatch.setattr(config_module, "_config", None)
+
+    cfg = get_config()
+
+    assert [source.id for source in cfg.resolved_sources()] == ["runtime"]
+
     monkeypatch.setattr(config_module, "_config", None)

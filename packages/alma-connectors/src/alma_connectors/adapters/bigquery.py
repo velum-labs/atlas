@@ -85,6 +85,17 @@ def _validate_bq_location(location: str) -> None:
         )
 
 
+def _map_bq_table_type(table_type: str) -> V2SchemaObjectKind:
+    normalized = table_type.strip().upper()
+    if normalized == "VIEW":
+        return V2SchemaObjectKind.VIEW
+    if normalized == "MATERIALIZED VIEW":
+        return V2SchemaObjectKind.MATERIALIZED_VIEW
+    if normalized in {"EXTERNAL", "EXTERNAL TABLE"}:
+        return V2SchemaObjectKind.EXTERNAL_TABLE
+    return V2SchemaObjectKind.TABLE
+
+
 # ---------------------------------------------------------------------------
 # Retry with exponential backoff
 # ---------------------------------------------------------------------------
@@ -118,7 +129,9 @@ async def _retry_with_backoff(  # noqa: UP047
                     delay,
                 )
                 await asyncio.sleep(delay)
-    raise last_exc  # type: ignore[misc]
+    if last_exc is None:
+        raise RuntimeError("retry loop exited without a captured exception")
+    raise last_exc
 
 
 def _is_bq_retryable(exc: Exception) -> bool:
@@ -472,13 +485,13 @@ class BigQueryAdapter(SourceAdapter):
         return bigquery.Client(project=project_id)
 
     def _credentials(self, adapter: PersistedSourceAdapter) -> tuple[str, str | None]:
-        """Return (project_id, service_account_json). May return None json for ADC fallback."""
+        """Return (project_id, service_account_json)."""
         config = self._get_config(adapter)
-        sa_json: str | None
-        try:
-            sa_json = self._resolve_secret(config.service_account_secret)
-        except Exception:
-            sa_json = None
+        sa_json = (
+            self._resolve_secret(config.service_account_secret)
+            if config.service_account_secret is not None
+            else None
+        )
         return config.project_id, sa_json
 
     def _validate_config(self, config: BigQueryAdapterConfig) -> None:
@@ -1300,7 +1313,32 @@ class BigQueryAdapter(SourceAdapter):
             )
 
         # ------------------------------------------------------------------
-        # 3. TABLE_OPTIONS (descriptions)
+        # 3. TABLES (object kinds)
+        # ------------------------------------------------------------------
+        table_kind_lookup: dict[tuple[str, str], V2SchemaObjectKind] = {}
+        try:
+            tables_sql = f"""
+                SELECT table_schema, table_name, table_type
+                FROM {region_prefix}.INFORMATION_SCHEMA.TABLES
+                WHERE table_schema <> 'INFORMATION_SCHEMA'
+            """
+            for row in client.query(tables_sql, job_config=bigquery.QueryJobConfig()).result():
+                rdict = _row_to_dict(row)
+                ds = str(rdict.get("table_schema", "")).strip()
+                tbl = str(rdict.get("table_name", "")).strip()
+                table_type = str(rdict.get("table_type", "")).strip()
+                if ds and tbl and table_type:
+                    table_kind_lookup[(ds, tbl)] = _map_bq_table_type(table_type)
+        except Exception as exc:
+            logger.warning(
+                "BigQueryAdapter.extract_schema: TABLES query failed, "
+                "table kinds will default to TABLE. adapter=%s error=%s",
+                adapter.key,
+                exc,
+            )
+
+        # ------------------------------------------------------------------
+        # 4. TABLE_OPTIONS (descriptions)
         # ------------------------------------------------------------------
         description_lookup: dict[tuple[str, str], str] = {}
         try:
@@ -1335,7 +1373,7 @@ class BigQueryAdapter(SourceAdapter):
                 SchemaObject(
                     schema_name=schema_name,
                     object_name=table_name,
-                    kind=V2SchemaObjectKind.TABLE,
+                    kind=table_kind_lookup.get(key, V2SchemaObjectKind.TABLE),
                     columns=tuple(cols),
                     row_count=st.get("row_count"),
                     size_bytes=st.get("size_bytes"),

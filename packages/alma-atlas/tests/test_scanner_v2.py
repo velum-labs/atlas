@@ -14,6 +14,7 @@ from alma_atlas.pipeline.scanner_v2 import (
     ExtractionPlan,
     ScannerV2,
     ScanResultV2,
+    _upsert_extraction_result,
     run_scan_v2,
 )
 from alma_connectors.source_adapter_v2 import (
@@ -442,7 +443,7 @@ class TestScannerV2:
         assert result.error is None
         assert len(result.warnings) >= 1
         assert result.capabilities_run == []
-        assert result.capabilities_skipped == []
+        assert result.capabilities_skipped == list(AdapterCapability)
 
     def test_schema_results_stored_as_assets(self, tmp_path: Path) -> None:
         cfg = _cfg(tmp_path)
@@ -510,9 +511,28 @@ class TestScannerV2:
         with patch("alma_atlas.pipeline.scan._build_adapter", return_value=(adapter, _make_persisted())):
             result = ScannerV2(cfg).scan(source)
 
-        assert result.capabilities_skipped == []
-        assert result.capabilities_run == []
+        assert result.capabilities_run == [AdapterCapability.DISCOVER]
+        assert result.capabilities_skipped == [AdapterCapability.TRAFFIC]
         assert any("capability_skipped:traffic" in warning for warning in result.warnings)
+
+
+def test_upsert_extraction_result_does_not_commit_mid_transaction() -> None:
+    db = MagicMock()
+    result = DiscoverySnapshot(
+        meta=_meta(AdapterCapability.DISCOVER, row_count=1),
+        containers=(
+            DiscoveredContainer(
+                container_id="db1",
+                container_type="database",
+                display_name="Database 1",
+            ),
+        ),
+    )
+
+    _upsert_extraction_result(db, "adapter-key", AdapterCapability.DISCOVER, result)
+
+    db.conn.execute.assert_called_once()
+    db.conn.commit.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

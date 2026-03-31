@@ -58,6 +58,28 @@ sources:
     assert sources[0].id == "pg:warehouse"
 
 
+def test_resolve_runtime_sources_prefers_auto_discovered_runtime_sources(tmp_path: Path, monkeypatch) -> None:
+    runtime_dir = tmp_path / "alma-runtime"
+    runtime_dir.mkdir()
+    monkeypatch.setenv("ALMA_CONFIG_DIR", str(runtime_dir))
+    (runtime_dir / "atlas.yml").write_text(
+        """
+version: 1
+sources:
+  - id: runtime
+    kind: postgres
+    params:
+      dsn_env: PG_DATABASE_URL
+""".strip(),
+        encoding="utf-8",
+    )
+
+    cfg, sources = resolve_runtime_sources()
+
+    assert cfg.config_dir == runtime_dir
+    assert [source.id for source in sources] == ["runtime"]
+
+
 def test_serialize_scan_result_is_machine_readable() -> None:
     payload = serialize_scan_result(
         ScanAllResult(

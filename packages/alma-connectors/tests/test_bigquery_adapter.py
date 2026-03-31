@@ -25,6 +25,7 @@ from alma_connectors.adapters.bigquery import (
     _effective_since,
     _extract_referenced_tables,
     _extract_tables_from_sql,
+    _map_bq_table_type,
     _normalize_labels,
 )
 
@@ -209,6 +210,24 @@ def test_extract_referenced_tables_none() -> None:
     assert _extract_referenced_tables(None) == []
 
 
+def test_map_bq_table_type_view() -> None:
+    from alma_connectors.source_adapter_v2 import SchemaObjectKind as V2SchemaObjectKind
+
+    assert _map_bq_table_type("VIEW") == V2SchemaObjectKind.VIEW
+
+
+def test_map_bq_table_type_materialized_view() -> None:
+    from alma_connectors.source_adapter_v2 import SchemaObjectKind as V2SchemaObjectKind
+
+    assert _map_bq_table_type("MATERIALIZED VIEW") == V2SchemaObjectKind.MATERIALIZED_VIEW
+
+
+def test_map_bq_table_type_external_table() -> None:
+    from alma_connectors.source_adapter_v2 import SchemaObjectKind as V2SchemaObjectKind
+
+    assert _map_bq_table_type("EXTERNAL TABLE") == V2SchemaObjectKind.EXTERNAL_TABLE
+
+
 def test_build_consumer_identity_airflow_dag_and_task() -> None:
     identity = _build_consumer_identity(
         user_email="alice@example.com",
@@ -218,6 +237,32 @@ def test_build_consumer_identity_airflow_dag_and_task() -> None:
     assert identity["consumer_key"] == "airflow:etl_pipeline:load_step"
     assert identity["source_type"] == "airflow"
     assert identity["confidence"] == 0.95
+
+
+def test_credentials_use_adc_only_when_secret_is_unset() -> None:
+    persisted = PersistedSourceAdapter(
+        id="00000000-0000-0000-0000-000000000010",
+        key="bq-warehouse",
+        display_name="BQ Warehouse",
+        kind=SourceAdapterKind.BIGQUERY,
+        target_id="prod-warehouse",
+        status=SourceAdapterStatus.READY,
+        config=BigQueryAdapterConfig(project_id="acme-project", service_account_secret=None),
+    )
+    adapter = BigQueryAdapter(resolve_secret=lambda secret: "unused")
+
+    project_id, sa_json = adapter._credentials(persisted)
+
+    assert project_id == "acme-project"
+    assert sa_json is None
+
+
+def test_credentials_raise_when_secret_resolution_fails() -> None:
+    persisted = _make_adapter()
+    adapter = BigQueryAdapter(resolve_secret=lambda secret: (_ for _ in ()).throw(ValueError("missing env")))
+
+    with pytest.raises(ValueError, match="missing env"):
+        adapter._credentials(persisted)
 
 
 def test_build_consumer_identity_airflow_dag_only() -> None:

@@ -39,9 +39,11 @@ DEFAULT_REPO_SCAN_CONFIG = RepoScanConfig()
 # Backward-compatible constants for callers that still import them directly.
 _MAX_FILE_CHARS = DEFAULT_REPO_SCAN_CONFIG.max_file_chars
 _MAX_FILES = DEFAULT_REPO_SCAN_CONFIG.max_files
+_SCAN_GLOBS = DEFAULT_REPO_SCAN_CONFIG.scan_globs
+_SKIP_DIRS = DEFAULT_REPO_SCAN_CONFIG.skip_dirs
 
 
-def _is_skipped(path: Path, config: RepoScanConfig) -> bool:
+def _is_skipped(path: Path, config: RepoScanConfig = DEFAULT_REPO_SCAN_CONFIG) -> bool:
     return any(part in config.skip_dirs for part in path.parts)
 
 

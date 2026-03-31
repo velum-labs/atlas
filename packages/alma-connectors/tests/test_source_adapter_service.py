@@ -1,20 +1,24 @@
 from __future__ import annotations
 
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 from cryptography.fernet import Fernet
 
 from alma_connectors.source_adapter import (
     AirflowAdapterConfig,
+    BigQueryAdapterConfig,
     ExternalSecretRef,
     FivetranAdapterConfig,
     LookerAdapterConfig,
     MetabaseAdapterConfig,
+    SourceAdapterCapabilities,
     SourceAdapterDefinition,
     SourceAdapterKind,
     SourceAdapterStatus,
 )
 from alma_connectors.source_adapter_service import SourceAdapterService
+from alma_connectors.source_adapter_v2 import AdapterCapability
 
 
 def _make_service() -> SourceAdapterService:
@@ -140,3 +144,39 @@ def test_get_setup_instructions_supports_community_kinds() -> None:
     ):
         instructions = service.get_setup_instructions(kind)
         assert instructions.summary
+
+
+def test_get_capabilities_discovery_only_adapter_is_not_schema() -> None:
+    service = _make_service()
+    runtime_adapter = MagicMock()
+    runtime_adapter.capabilities = None
+    runtime_adapter.declared_capabilities = frozenset({AdapterCapability.DISCOVER})
+
+    service._get_adapter = MagicMock(return_value=runtime_adapter)  # type: ignore[method-assign]
+
+    caps = service.get_capabilities(MagicMock())
+
+    assert caps == SourceAdapterCapabilities(
+        can_test_connection=True,
+        can_introspect_schema=False,
+        can_observe_traffic=False,
+        can_execute_query=False,
+    )
+
+
+def test_row_to_adapter_roundtrip_bigquery_without_service_account_secret() -> None:
+    service = _make_service()
+    definition = SourceAdapterDefinition(
+        key="bq-prod",
+        display_name="BQ Prod",
+        kind=SourceAdapterKind.BIGQUERY,
+        target_id="bq-prod",
+        config=BigQueryAdapterConfig(project_id="my-project", service_account_secret=None),
+    )
+
+    adapter = service.row_to_adapter(_row_from_definition(definition, service))
+
+    assert adapter.kind == SourceAdapterKind.BIGQUERY
+    assert isinstance(adapter.config, BigQueryAdapterConfig)
+    assert adapter.config.project_id == "my-project"
+    assert adapter.config.service_account_secret is None

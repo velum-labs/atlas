@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib
 import json
 import logging
 import re
@@ -116,7 +117,9 @@ async def _retry_with_backoff(  # noqa: UP047
                     delay,
                 )
                 await asyncio.sleep(delay)
-    raise last_exc  # type: ignore[misc]
+    if last_exc is None:
+        raise RuntimeError("retry loop exited without a captured exception")
+    raise last_exc
 
 
 def _is_sf_retryable(exc: Exception) -> bool:
@@ -132,13 +135,12 @@ def _is_sf_retryable(exc: Exception) -> bool:
 
 def _get_snowflake_module() -> Any:
     try:
-        import snowflake.connector  # type: ignore[import-untyped]
+        return importlib.import_module("snowflake.connector")
     except ImportError as exc:
         raise RuntimeError(
             "snowflake-connector-python is required for the Snowflake source adapter. "
             "Install it with: pip install snowflake-connector-python"
         ) from exc
-    return snowflake.connector
 
 
 def _parse_secret(raw: str) -> dict[str, str]:
@@ -499,13 +501,14 @@ LIMIT {max_rows}
             query_id = str(row.get("QUERY_ID", "")) or None
             database_name = str(row.get("DATABASE_NAME", "")) or None
             user_name = str(row.get("USER_NAME", "")) or None
+            query_type = str(row.get("QUERY_TYPE", "")).strip() or "SELECT"
 
             try:
                 event = ObservedQueryEvent(
                     captured_at=captured_at,
                     sql=sql_text,
                     source_name=adapter.target_id,
-                    query_type="SELECT",
+                    query_type=query_type,
                     event_id=query_id,
                     database_name=database_name,
                     database_user=user_name,

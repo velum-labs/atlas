@@ -161,24 +161,24 @@ class SQLBinder:
             )
         return TableSchema(name=table_name, table_id=table_id, columns=columns)
 
-    def _bind_select(self, select: exp.Select, scope: Scope | None = None) -> BoundQuery:
+    def _bind_select(self, select: Any, scope: Scope | None = None) -> BoundQuery:
         """Bind a SELECT statement."""
         # Create new scope using alma_algebrakit's Scope
         scope = scope or Scope()
         self._current_scope = scope
 
         # Process CTEs first
-        with_clause = select.find(exp.With)
+        with_clause = select.args.get("with_")
         if with_clause:
             self._bind_ctes(with_clause, scope)
 
         # Process FROM clause to populate scope
-        from_clause = select.find(exp.From)
+        from_clause = select.args.get("from_")
         if from_clause:
             self._bind_from(from_clause, scope)
 
         # Process JOINs
-        for join in select.find_all(exp.Join):
+        for join in select.args.get("joins") or []:
             self._bind_join(join, scope)
 
         # Now bind expressions in SELECT list
@@ -189,26 +189,26 @@ class SQLBinder:
 
         # Bind WHERE clause
         bound_where: BoundPredicate | None = None
-        where = select.find(exp.Where)
+        where = select.args.get("where")
         if where:
             bound_where = self._bind_predicate(where.this, scope)
 
         # Bind GROUP BY
-        bound_group_by: list[BoundExpression] = []
-        group = select.find(exp.Group)
+        bound_group_by: list[BoundExpression | AttributeRef] = []
+        group = select.args.get("group")
         if group:
             for expr in group.expressions:
                 bound_group_by.append(self._bind_expression(expr, scope))
 
         # Bind HAVING
         bound_having: BoundPredicate | None = None
-        having = select.find(exp.Having)
+        having = select.args.get("having")
         if having:
             bound_having = self._bind_predicate(having.this, scope)
 
         # Bind ORDER BY
         bound_order_by: list[BoundOrderItem] = []
-        order = select.find(exp.Order)
+        order = select.args.get("order")
         if order:
             for sort_key in order.expressions:
                 bound_order_by.append(self._bind_order_item(sort_key, scope))
@@ -245,7 +245,7 @@ class SQLBinder:
             scope=scope,
         )
 
-    def _bind_ctes(self, with_clause: exp.With, scope: Scope) -> None:
+    def _bind_ctes(self, with_clause: Any, scope: Scope) -> None:
         """Bind CTEs into scope using alma_algebrakit's Scope."""
         for cte in with_clause.expressions:
             if not isinstance(cte, exp.CTE):
@@ -277,16 +277,16 @@ class SQLBinder:
                 # Add CTE to scope using alma_algebrakit's scope API
                 scope.add_cte(cte_name, cte_instance)
 
-    def _bind_from(self, from_clause: exp.From, scope: Scope) -> None:
+    def _bind_from(self, from_clause: Any, scope: Scope) -> None:
         """Bind FROM clause relations into scope."""
         table_expr = from_clause.this
         self._bind_table_expr(table_expr, scope)
 
-    def _bind_join(self, join: exp.Join, scope: Scope) -> None:
+    def _bind_join(self, join: Any, scope: Scope) -> None:
         """Bind JOIN clause into scope."""
         self._bind_table_expr(join.this, scope)
 
-    def _bind_table_expr(self, table_expr: exp.Expression, scope: Scope) -> None:
+    def _bind_table_expr(self, table_expr: Any, scope: Scope) -> None:
         """Bind a table expression (table, subquery, etc.)."""
         if isinstance(table_expr, exp.Table):
             table_name = table_expr.name
@@ -342,7 +342,7 @@ class SQLBinder:
 
                 scope.add_relation(instance)
 
-    def _bind_select_item(self, expr: exp.Expression, scope: Scope) -> BoundSelectItem:
+    def _bind_select_item(self, expr: Any, scope: Scope) -> BoundSelectItem:
         """Bind a SELECT list item."""
         alias = expr.alias if hasattr(expr, "alias") and expr.alias else None
 
@@ -384,7 +384,7 @@ class SQLBinder:
             is_star=False,
         )
 
-    def _bind_expression(self, expr: exp.Expression, scope: Scope) -> BoundExpression:
+    def _bind_expression(self, expr: Any, scope: Scope) -> Any:
         """Bind an expression, resolving all column references."""
         if isinstance(expr, exp.Column):
             return self._bind_column(expr, scope)
@@ -462,7 +462,7 @@ class SQLBinder:
             sql_text=str(lit.this),
         )
 
-    def _bind_function(self, func: exp.Func, scope: Scope) -> BoundFunctionCall:
+    def _bind_function(self, func: Any, scope: Scope) -> BoundFunctionCall:
         """Bind a function call."""
         func_name = func.key.lower() if hasattr(func, "key") else str(type(func).__name__).lower()
 
@@ -500,7 +500,7 @@ class SQLBinder:
             deterministic=not is_volatile,
         )
 
-    def _bind_binary_op(self, expr: exp.Expression, scope: Scope) -> BoundBinaryOp:
+    def _bind_binary_op(self, expr: Any, scope: Scope) -> BoundBinaryOp:
         """Bind a binary operation."""
         op_map = {
             exp.Add: "+",
@@ -508,7 +508,7 @@ class SQLBinder:
             exp.Mul: "*",
             exp.Div: "/",
         }
-        operator = op_map.get(type(expr), "?")
+        operator = op_map[type(expr)] if type(expr) in op_map else "?"
 
         left = self._bind_expression(expr.left, scope)
         right = self._bind_expression(expr.right, scope)
@@ -530,7 +530,7 @@ class SQLBinder:
             and getattr(right, "deterministic", True),
         )
 
-    def _bind_predicate(self, expr: exp.Expression, scope: Scope) -> BoundPredicate:
+    def _bind_predicate(self, expr: Any, scope: Scope) -> BoundPredicate:
         """Bind a predicate expression."""
         if isinstance(expr, exp.And):
             left = self._bind_predicate(expr.left, scope)
@@ -579,6 +579,8 @@ class SQLBinder:
             )
 
         if isinstance(expr, exp.In):
+            if expr.args.get("query") is not None:
+                raise BindingError("IN (SELECT ...) predicates are not yet supported", node=expr)
             bound_expr = self._bind_expression(expr.this, scope)
             values = []
             for v in expr.expressions:
@@ -627,19 +629,12 @@ class SQLBinder:
                 upstream_columns=upstream,
             )
 
-        # Default: wrap as comparison with TRUE
-        bound_expr = self._bind_expression(expr, scope)
-        upstream = bound_expr.upstream_columns if hasattr(bound_expr, "upstream_columns") else []
-        return BoundComparison(
-            left=bound_expr,
-            operator="=",
-            right=BoundLiteral(
-                value=True, data_type=DataType(base_type=SQLDataType.BOOLEAN), sql_text="TRUE"
-            ),
-            upstream_columns=upstream,
-        )
+        if isinstance(expr, exp.Exists):
+            raise BindingError("EXISTS predicates are not yet supported", node=expr)
 
-    def _bind_comparison(self, expr: exp.Expression, scope: Scope) -> BoundComparison:
+        raise BindingError(f"Unsupported predicate expression: {type(expr).__name__}", node=expr)
+
+    def _bind_comparison(self, expr: Any, scope: Scope) -> BoundComparison:
         """Bind a comparison expression."""
         op_map = {
             exp.EQ: "=",
@@ -649,7 +644,7 @@ class SQLBinder:
             exp.GT: ">",
             exp.GTE: ">=",
         }
-        operator = op_map.get(type(expr), "=")
+        operator = op_map[type(expr)] if type(expr) in op_map else "="
 
         left = self._bind_expression(expr.left, scope)
         right = self._bind_expression(expr.right, scope)
@@ -668,7 +663,7 @@ class SQLBinder:
             upstream_columns=upstream,
         )
 
-    def _bind_order_item(self, sort_key: exp.Expression, scope: Scope) -> BoundOrderItem:
+    def _bind_order_item(self, sort_key: Any, scope: Scope) -> BoundOrderItem:
         """Bind an ORDER BY item."""
         if isinstance(sort_key, exp.Ordered):
             bound_expr = self._bind_expression(sort_key.this, scope)

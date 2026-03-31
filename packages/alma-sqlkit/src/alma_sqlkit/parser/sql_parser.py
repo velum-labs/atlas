@@ -6,6 +6,8 @@ This is a thin adapter that uses sqlglot for parsing and produces alma_algebraki
 
 from __future__ import annotations
 
+from typing import Any
+
 import sqlglot
 from alma_algebrakit import (
     AggregateFunction,
@@ -19,8 +21,10 @@ from alma_algebrakit import (
     CompoundPredicate,
     CTEDefinition,
     Difference,
+    ExistsExpression,
     Expression,
     FunctionCall,
+    InSubqueryExpression,
     Intersect,
     Join,
     JoinType,
@@ -36,6 +40,7 @@ from alma_algebrakit import (
     Sort,
     SortDirection,
     SortSpec,
+    SubqueryExpression,
     Union,
     WindowExpression,
     WindowFrameBound,
@@ -47,6 +52,7 @@ from alma_algebrakit import (
 from pydantic import BaseModel, Field
 from sqlglot import exp
 from sqlglot.errors import ParseError
+from sqlglot.optimizer.normalize import normalize as sqlglot_normalize
 
 
 class ParsingConfig(BaseModel):
@@ -90,7 +96,7 @@ class SQLParser:
             raise ValueError(f"Failed to parse SQL: {e}") from e
 
         # Handle WITH clause (CTEs) first
-        if hasattr(parsed, "find") and parsed.find(exp.With):
+        if parsed.args.get("with_") is not None:
             return self._convert_with(parsed)
 
         if isinstance(parsed, exp.Select):
@@ -106,9 +112,9 @@ class SQLParser:
             f"Expected SELECT, UNION, INTERSECT, or EXCEPT statement, got {type(parsed).__name__}"
         )
 
-    def _convert_select(self, select: exp.Select) -> RAExpression:
+    def _convert_select(self, select: Any) -> RAExpression:
         """Convert a SELECT expression to RA."""
-        from_clause = select.find(exp.From)
+        from_clause = select.args.get("from_")
         if not from_clause:
             # SELECT without FROM (e.g. SELECT 1, SELECT CURRENT_DATE())
             # Create a virtual dual relation as the base
@@ -118,16 +124,16 @@ class SQLParser:
 
         base_expr = self._convert_from(from_clause)
 
-        for join in select.find_all(exp.Join):
+        for join in select.args.get("joins") or []:
             base_expr = self._convert_join(base_expr, join)
 
-        where = select.find(exp.Where)
+        where = select.args.get("where")
         if where:
             predicate = self._convert_predicate(where.this)
             base_expr = Selection(predicate=predicate, input=base_expr)
 
-        group_by = select.find(exp.Group)
-        having = select.find(exp.Having)
+        group_by = select.args.get("group")
+        having = select.args.get("having")
 
         if group_by:
             base_expr = self._convert_aggregation(select, group_by, having, base_expr)
@@ -136,25 +142,25 @@ class SQLParser:
 
         return base_expr
 
-    def _convert_select_with_ordering(self, select: exp.Select) -> RAExpression:
+    def _convert_select_with_ordering(self, select: Any) -> RAExpression:
         """Convert a SELECT expression with ORDER BY and LIMIT to RA."""
         # First, convert the core SELECT
         base_expr = self._convert_select(select)
 
         # Then wrap with Sort if ORDER BY exists
-        order = select.find(exp.Order)
+        order = select.args.get("order")
         if order:
             base_expr = self._convert_order_by(order, base_expr)
 
         # Then wrap with Limit if LIMIT/OFFSET exists
-        limit_clause = select.find(exp.Limit)
-        offset_clause = select.find(exp.Offset)
+        limit_clause = select.args.get("limit")
+        offset_clause = select.args.get("offset")
         if limit_clause or offset_clause:
             base_expr = self._convert_limit(limit_clause, offset_clause, base_expr)
 
         return base_expr
 
-    def _convert_order_by(self, order: exp.Order, input_expr: RAExpression) -> Sort:
+    def _convert_order_by(self, order: Any, input_expr: RAExpression) -> Sort:
         """Convert ORDER BY clause to Sort RA expression."""
         sort_specs: list[SortSpec] = []
 
@@ -191,8 +197,8 @@ class SQLParser:
 
     def _convert_limit(
         self,
-        limit_clause: exp.Limit | None,
-        offset_clause: exp.Offset | None,
+        limit_clause: Any,
+        offset_clause: Any,
         input_expr: RAExpression,
     ) -> Limit:
         """Convert LIMIT/OFFSET to Limit RA expression."""
@@ -212,7 +218,7 @@ class SQLParser:
 
         return Limit(input=input_expr, limit=limit_val, offset=offset_val)
 
-    def _convert_union(self, union_expr: exp.Union) -> RAExpression:
+    def _convert_union(self, union_expr: Any) -> RAExpression:
         """Convert a UNION expression to RA Union."""
         left_ra = self._convert_set_operation_branch(union_expr.left)
         right_ra = self._convert_set_operation_branch(union_expr.right)
@@ -221,7 +227,7 @@ class SQLParser:
 
         return Union(left=left_ra, right=right_ra, all=is_union_all)
 
-    def _convert_intersect(self, intersect_expr: exp.Intersect) -> RAExpression:
+    def _convert_intersect(self, intersect_expr: Any) -> RAExpression:
         """Convert an INTERSECT expression to RA Intersect."""
         left_ra = self._convert_set_operation_branch(intersect_expr.left)
         right_ra = self._convert_set_operation_branch(intersect_expr.right)
@@ -230,7 +236,7 @@ class SQLParser:
 
         return Intersect(left=left_ra, right=right_ra, all=is_all)
 
-    def _convert_except(self, except_expr: exp.Except) -> RAExpression:
+    def _convert_except(self, except_expr: Any) -> RAExpression:
         """Convert an EXCEPT expression to RA Difference."""
         left_ra = self._convert_set_operation_branch(except_expr.left)
         right_ra = self._convert_set_operation_branch(except_expr.right)
@@ -238,7 +244,7 @@ class SQLParser:
         # Note: Difference doesn't support ALL in our model
         return Difference(left=left_ra, right=right_ra)
 
-    def _convert_set_operation_branch(self, expr: exp.Expression) -> RAExpression:
+    def _convert_set_operation_branch(self, expr: Any) -> RAExpression:
         """Convert a branch of a set operation (UNION/INTERSECT/EXCEPT)."""
         if isinstance(expr, exp.Select):
             return self._convert_select_with_ordering(expr)
@@ -252,9 +258,9 @@ class SQLParser:
             return self._convert_set_operation_branch(expr.this)
         raise ValueError(f"Unexpected set operation branch: {type(expr)}")
 
-    def _convert_with(self, parsed: exp.Expression) -> RAExpression:
+    def _convert_with(self, parsed: Any) -> RAExpression:
         """Convert a query with WITH clause (CTEs) to WithExpression."""
-        with_clause = parsed.find(exp.With)
+        with_clause = parsed.args.get("with_")
         if not with_clause:
             raise ValueError("Expected WITH clause")
 
@@ -299,12 +305,12 @@ class SQLParser:
 
         return WithExpression(ctes=cte_defs, main_query=main_ra)
 
-    def _convert_from(self, from_clause: exp.From) -> RAExpression:
+    def _convert_from(self, from_clause: Any) -> RAExpression:
         """Convert FROM clause to RA expression."""
         table_expr = from_clause.this
         return self._convert_table_expr(table_expr)
 
-    def _convert_table_expr(self, table_expr: exp.Expression) -> RAExpression:
+    def _convert_table_expr(self, table_expr: Any) -> RAExpression:
         """Convert a table expression to RA."""
         if isinstance(table_expr, exp.Table):
             return Relation(
@@ -315,7 +321,7 @@ class SQLParser:
         if isinstance(table_expr, exp.Subquery):
             inner = table_expr.this
             if isinstance(inner, exp.Select):
-                return self._convert_select(inner)
+                return self._convert_select_with_ordering(inner)
             if isinstance(inner, exp.Union):
                 return self._convert_union(inner)
             if isinstance(inner, exp.Intersect):
@@ -330,7 +336,7 @@ class SQLParser:
             return Relation(name=name, alias=name)
         raise ValueError(f"Unexpected table expression: {type(table_expr)}")
 
-    def _convert_join(self, left: RAExpression, join: exp.Join) -> Join:
+    def _convert_join(self, left: RAExpression, join: Any) -> Join:
         """Convert a JOIN to RA Join expression."""
         right = self._convert_table_expr(join.this)
 
@@ -358,7 +364,7 @@ class SQLParser:
             condition=condition,
         )
 
-    def _convert_predicate(self, expr: exp.Expression) -> Predicate:
+    def _convert_predicate(self, expr: Any) -> Predicate:
         """Convert an expression to a Predicate."""
         if isinstance(expr, exp.And):
             operands = [self._convert_predicate(e) for e in [expr.left, expr.right]]
@@ -395,8 +401,11 @@ class SQLParser:
 
             # Handle IN (subquery) vs IN (value_list)
             if subquery_expr is not None:
-                # IN (SELECT ...) - subquery case is not yet supported
-                raise ValueError("IN (SELECT ...) subqueries are not yet supported")
+                return InSubqueryExpression(
+                    left=left,
+                    query=self._convert_subquery_expr(subquery_expr),
+                    negated=bool(is_negated),
+                )
 
             # IN (value1, value2, ...) - preserve as list of values
             values = []
@@ -432,10 +441,15 @@ class SQLParser:
             )
             return CompoundPredicate(op=LogicalOp.AND, operands=[low_pred, high_pred])
 
-        left = self._convert_expression(expr)
-        return AtomicPredicate(left=left, op=ComparisonOp.EQ, right=Literal(value=True))
+        if isinstance(expr, exp.Exists):
+            return ExistsExpression(
+                query=self._convert_subquery_expr(expr.this),
+                negated=bool(expr.args.get("not")),
+            )
 
-    def _convert_comparison(self, expr: exp.Expression) -> AtomicPredicate:
+        raise ValueError(f"Unsupported predicate expression: {type(expr).__name__}")
+
+    def _convert_comparison(self, expr: Any) -> AtomicPredicate:
         """Convert a comparison expression to AtomicPredicate."""
         left = self._convert_expression(expr.left)
         right = self._convert_expression(expr.right)
@@ -452,7 +466,7 @@ class SQLParser:
 
         return AtomicPredicate(left=left, op=op, right=right)
 
-    def _convert_expression(self, expr: exp.Expression) -> Expression:
+    def _convert_expression(self, expr: Any) -> Expression:
         """Convert a sqlglot expression to alma_algebrakit Expression type."""
         if isinstance(expr, exp.Column):
             return ColumnRef(
@@ -520,6 +534,9 @@ class SQLParser:
         if isinstance(expr, exp.Paren):
             return self._convert_expression(expr.this)
 
+        if isinstance(expr, exp.Subquery):
+            return SubqueryExpression(query=self._convert_subquery_expr(expr))
+
         if isinstance(expr, exp.Star):
             return ColumnRef(column="*")
 
@@ -527,6 +544,19 @@ class SQLParser:
             return self._convert_expression(expr.this)
 
         return Literal(value=str(expr), data_type="unknown")
+
+    def _convert_subquery_expr(self, expr: Any) -> RAExpression:
+        """Convert a subquery expression into its RA form."""
+        node = expr.this if isinstance(expr, exp.Subquery) else expr
+        if isinstance(node, exp.Select):
+            return self._convert_select_with_ordering(node)
+        if isinstance(node, exp.Union):
+            return self._convert_union(node)
+        if isinstance(node, exp.Intersect):
+            return self._convert_intersect(node)
+        if isinstance(node, exp.Except):
+            return self._convert_except(node)
+        raise ValueError(f"Unsupported subquery expression: {type(node).__name__}")
 
     def _convert_projection(self, select: exp.Select, input_expr: RAExpression) -> Projection:
         """Convert SELECT expressions to Projection."""
@@ -786,7 +816,7 @@ class SQLParser:
         """Normalize SQL for comparison."""
         try:
             parsed = sqlglot.parse_one(sql, dialect=self._dialect)
-            normalized = parsed.transform(sqlglot.optimizer.normalize.normalize)
+            normalized = parsed.transform(sqlglot_normalize)
             return normalized.sql(dialect=self._dialect, pretty=False)
         except (ParseError, Exception):
             return sql

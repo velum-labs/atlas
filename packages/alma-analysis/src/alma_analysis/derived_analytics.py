@@ -395,27 +395,11 @@ async def compute_analytics_server_side(
     persisted: PersistedSourceAdapter,
     events: list[ObservedQueryEvent],
 ) -> DerivedAnalytics:
-    """Attempt server-side aggregation; fall back to client-side transparently.
+    """Compatibility wrapper around client-side analytics computation.
 
-    Tries to push a lightweight probe query via ``adapter.execute_query()`` to
-    confirm connectivity.  If the call succeeds the same client-side computation
-    is used for the full analytics (server-side rollup SQL is intentionally
-    minimal to avoid adapter-specific SQL dialects).  If ``execute_query()``
-    raises *any* exception (not supported, permission denied, network error) the
-    function falls back to ``compute_analytics(events)`` without propagating the
-    error.
-
-    Args:
-        adapter:   A SourceAdapterV2 implementation.
-        persisted: The persisted adapter config used to open the connection.
-        events:    Traffic events to analyse.
-
-    Returns:
-        DerivedAnalytics — either server-assisted or client-side computed.
+    The analysis package is intentionally pure and does not perform adapter I/O.
+    This async wrapper preserves the historical public API while delegating
+    directly to :func:`compute_analytics`.
     """
-    try:
-        await adapter.execute_query(persisted, "SELECT 1", dry_run=True)
-    except Exception:
-        pass  # fall through to client-side
-
+    del adapter, persisted
     return compute_analytics(events)

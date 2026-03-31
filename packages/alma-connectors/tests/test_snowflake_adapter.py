@@ -415,6 +415,7 @@ def test_introspect_schema_view_kind() -> None:
 _TRAFFIC_NAMES = [
     "QUERY_ID",
     "QUERY_TEXT",
+    "QUERY_TYPE",
     "USER_NAME",
     "DATABASE_NAME",
     "SCHEMA_NAME",
@@ -429,6 +430,7 @@ _TRAFFIC_NAMES = [
 def _traffic_row(
     query_id: str = "q1",
     sql: str = "SELECT 1",
+    query_type: str = "SELECT",
     user: str = "ATLAS",
     database: str = "MY_DB",
     schema: str = "PUBLIC",
@@ -440,7 +442,7 @@ def _traffic_row(
 ) -> tuple[Any, ...]:
     start = start_time or datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
     end = end_time or datetime(2024, 1, 1, 12, 0, 1, tzinfo=UTC)
-    return (query_id, sql, user, database, schema, warehouse, status, start, end, elapsed_ms)
+    return (query_id, sql, query_type, user, database, schema, warehouse, status, start, end, elapsed_ms)
 
 
 def test_observe_traffic_basic() -> None:
@@ -465,8 +467,29 @@ def test_observe_traffic_basic() -> None:
     assert result.events[0].event_id == "q1"
     assert result.events[0].database_user == "ATLAS"
     assert result.events[0].database_name == "MY_DB"
+    assert result.events[0].query_type == "SELECT"
     assert result.events[0].duration_ms == pytest.approx(123.4)
     assert result.errors == ()
+
+
+def test_observe_traffic_preserves_query_type() -> None:
+    persisted = _make_adapter()
+    sf_adapter = _make_snowflake_adapter(
+        secret_value='{"account": "xy12345", "user": "atlas", "password": "pass"}'
+    )
+
+    traffic_rows = [_traffic_row("q1", "MERGE INTO orders USING staging_orders", query_type="MERGE")]
+    cur = MagicMock()
+    cur.description = [(name,) for name in _TRAFFIC_NAMES]
+    cur.fetchall.return_value = traffic_rows
+    mock_conn = _make_mock_conn(cur)
+    mock_module = MagicMock()
+    mock_module.connect.return_value = mock_conn
+
+    with patch(_SNOWFLAKE_MODULE, return_value=mock_module):
+        result = asyncio.run(sf_adapter.observe_traffic(persisted))
+
+    assert result.events[0].query_type == "MERGE"
 
 
 def test_observe_traffic_sql_in_query() -> None:

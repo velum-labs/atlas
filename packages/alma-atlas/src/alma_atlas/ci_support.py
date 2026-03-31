@@ -9,9 +9,15 @@ from pathlib import Path
 from typing import Any, Literal
 
 from alma_atlas.config import AtlasConfig, SourceConfig, get_config, load_atlas_yml
+from alma_atlas.contract_validation import (
+    resolve_contract_columns as _resolve_contract_columns,
+)
+from alma_atlas.contract_validation import (
+    validate_contract_columns,
+)
 from alma_atlas.pipeline.scan import ScanAllResult
 from alma_atlas_store.db import Database
-from alma_atlas_store.schema_repository import SchemaRepository, SchemaSnapshot
+from alma_atlas_store.schema_repository import SchemaRepository
 
 ContractMode = Literal["shadow", "warn", "enforce"]
 
@@ -109,7 +115,7 @@ def resolve_runtime_sources(
         sources = list(cfg.sources)
     else:
         cfg = get_config()
-        sources = cfg.load_sources()
+        sources = cfg.resolved_sources()
 
     if connections is not None and connections.strip():
         sources = _coerce_source_configs(_read_structured_input(connections))
@@ -220,21 +226,6 @@ def render_contract_summary_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _resolve_contract_columns(payload: dict[str, Any]) -> list[dict[str, Any]] | None:
-    for candidate in (
-        payload.get("columns"),
-        payload.get("schema"),
-        payload.get("spec"),
-    ):
-        if isinstance(candidate, list):
-            return [item for item in candidate if isinstance(item, dict)]
-        if isinstance(candidate, dict):
-            nested_columns = candidate.get("columns")
-            if isinstance(nested_columns, list):
-                return [item for item in nested_columns if isinstance(item, dict)]
-    return None
-
-
 def _load_contract_document(path: Path) -> ContractDocument:
     yaml = _require_yaml_module()
     raw_payload = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -268,86 +259,6 @@ def _load_contract_document(path: Path) -> ContractDocument:
         columns=columns,
         path=path,
     )
-
-
-def validate_contract_columns(
-    *,
-    contract_id: str,
-    columns: list[dict[str, Any]],
-    snapshot: SchemaSnapshot | None,
-) -> list[dict[str, Any]]:
-    if snapshot is None:
-        return [
-            {
-                "code": "missing_snapshot",
-                "severity": "error",
-                "message": (
-                    f"[{contract_id}] No schema snapshot is available for this asset. "
-                    "Run `alma-atlas scan` before validation."
-                ),
-            }
-        ]
-
-    actual_columns = {column.name.lower(): column for column in snapshot.columns}
-    issues: list[dict[str, Any]] = []
-    for column in columns:
-        raw_name = column.get("name")
-        if not isinstance(raw_name, str) or not raw_name.strip():
-            issues.append(
-                {
-                    "code": "invalid_column",
-                    "severity": "error",
-                    "message": f"[{contract_id}] Contract columns must include a non-empty name.",
-                }
-            )
-            continue
-
-        column_name = raw_name.strip()
-        actual = actual_columns.get(column_name.lower())
-        if actual is None:
-            issues.append(
-                {
-                    "code": "missing_column",
-                    "severity": "error",
-                    "column_name": column_name,
-                    "message": f"[{contract_id}] Missing column: {column_name!r}",
-                }
-            )
-            continue
-
-        expected_type = column.get("type")
-        if isinstance(expected_type, str) and expected_type.strip():
-            normalized_expected = expected_type.strip().lower()
-            if actual.type.lower() != normalized_expected:
-                issues.append(
-                    {
-                        "code": "type_mismatch",
-                        "severity": "error",
-                        "column_name": column_name,
-                        "expected_type": expected_type,
-                        "actual_type": actual.type,
-                        "message": (
-                            f"[{contract_id}] Type mismatch for {column_name!r}: "
-                            f"expected {expected_type!r}, got {actual.type!r}"
-                        ),
-                    }
-                )
-
-        expected_nullable = column.get("nullable")
-        if expected_nullable is False and actual.nullable:
-            issues.append(
-                {
-                    "code": "nullability_mismatch",
-                    "severity": "error",
-                    "column_name": column_name,
-                    "message": (
-                        f"[{contract_id}] Nullability violation for {column_name!r}: "
-                        "contract requires NOT NULL but column is nullable"
-                    ),
-                }
-            )
-
-    return issues
 
 
 def split_contract_patterns(raw_patterns: str) -> list[str]:

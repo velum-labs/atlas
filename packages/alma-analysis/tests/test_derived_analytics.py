@@ -358,7 +358,7 @@ class TestComputeAnalytics:
 
 class TestComputeAnalyticsServerSide:
     @pytest.mark.asyncio
-    async def test_returns_same_as_client_side_on_success(self) -> None:
+    async def test_returns_same_as_client_side_without_adapter_io(self) -> None:
         adapter = AsyncMock()
         adapter.execute_query = AsyncMock(return_value=None)
         persisted = object()
@@ -369,9 +369,10 @@ class TestComputeAnalyticsServerSide:
         expected = compute_analytics(events)
         assert result.event_count == expected.event_count
         assert result.source_breakdown.total == expected.source_breakdown.total
+        adapter.execute_query.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_falls_back_transparently_on_execute_query_failure(self) -> None:
+    async def test_ignores_adapter_execute_query_even_when_present(self) -> None:
         adapter = AsyncMock()
         adapter.execute_query = AsyncMock(side_effect=RuntimeError("not supported"))
         persisted = object()
@@ -379,16 +380,6 @@ class TestComputeAnalyticsServerSide:
 
         result = await compute_analytics_server_side(adapter, persisted, events)
 
-        # Fallback should still produce correct analytics
         assert result.event_count == 2
         assert isinstance(result, DerivedAnalytics)
-
-    @pytest.mark.asyncio
-    async def test_falls_back_on_not_implemented(self) -> None:
-        adapter = AsyncMock()
-        adapter.execute_query = AsyncMock(side_effect=NotImplementedError)
-        persisted = object()
-        events = [_event()]
-
-        result = await compute_analytics_server_side(adapter, persisted, events)
-        assert result.event_count == 1
+        adapter.execute_query.assert_not_called()

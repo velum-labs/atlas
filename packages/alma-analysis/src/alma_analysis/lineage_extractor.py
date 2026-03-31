@@ -400,12 +400,13 @@ def extract_lineage(sql: str, *, dialect: str = "postgres") -> LineageResult:
         ra = parser.parse(select_sql)
         column_edges = _extract_column_edges(ra)
         cte_names = _collect_cte_names(ra)
+        extraction_method: Literal["column", "table"] = "column" if column_edges else "table"
         return LineageResult(
             source_tables=source_tables,
             target_table=target_table,
             column_edges=column_edges,
             cte_names=cte_names,
-            extraction_method="column",
+            extraction_method=extraction_method,
         )
     except Exception:
         logger.debug("algebrakit column extraction failed, using table-level fallback: %.80s", sql)

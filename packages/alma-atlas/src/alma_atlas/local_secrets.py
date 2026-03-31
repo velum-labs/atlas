@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -56,10 +57,8 @@ class LocalSecretStore:
         self._config_dir.mkdir(parents=True, exist_ok=True)
         key = Fernet.generate_key().decode("utf-8")
         self._key_file.write_text(key, encoding="utf-8")
-        try:
+        with contextlib.suppress(OSError):
             os.chmod(self._key_file, 0o600)
-        except OSError:
-            pass
         return key
 
     def _load_key(self) -> str:
@@ -78,7 +77,5 @@ class LocalSecretStore:
     def _save_payload(self, payload: dict[str, str]) -> None:
         self._config_dir.mkdir(parents=True, exist_ok=True)
         self._secrets_file.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        try:
+        with contextlib.suppress(OSError):
             os.chmod(self._secrets_file, 0o600)
-        except OSError:
-            pass

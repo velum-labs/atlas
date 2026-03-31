@@ -489,29 +489,24 @@ async def _handle_team_sync(cfg: AtlasConfig) -> list[TextContent]:
 
 
 def _handle_check_contract(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
-    from alma_atlas.ci_support import validate_contract_columns
+    from alma_atlas.contract_validation import (
+        select_contracts_for_validation,
+        validate_contract_spec,
+    )
     from alma_atlas_store.contract_repository import ContractRepository
     from alma_atlas_store.db import Database
     from alma_atlas_store.schema_repository import SchemaRepository
 
     asset_id = arguments["asset_id"]
     with Database(_db_path(cfg)) as db:
-        contracts = ContractRepository(db).list_for_asset(asset_id)
+        contracts = select_contracts_for_validation(ContractRepository(db).list_for_asset(asset_id))
         if not contracts:
             return [TextContent(type="text", text=f"No contracts found for asset: {asset_id}")]
         snapshot = SchemaRepository(db).get_latest(asset_id)
 
     violations: list[str] = []
     for contract in contracts:
-        spec_columns = contract.spec.get("columns", [])
-        if not spec_columns:
-            continue
-
-        issues = validate_contract_columns(
-            contract_id=contract.id,
-            columns=spec_columns,
-            snapshot=snapshot,
-        )
+        issues = validate_contract_spec(contract, snapshot)
         violations.extend(
             str(issue.get("message", "Unknown contract validation issue"))
             for issue in issues

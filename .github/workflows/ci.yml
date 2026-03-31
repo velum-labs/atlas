@@ -19,17 +19,7 @@ jobs:
 
       - id: packages
         name: Read workspace package order
-        run: |
-          python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          import json
-          import tomllib
-          from pathlib import Path
-
-          payload = tomllib.loads(Path("pyproject.toml").read_text())
-          members = payload["tool"]["uv"]["workspace"]["members"]
-          packages = [Path(member).name for member in members]
-          print(f"packages={json.dumps(packages)}")
-          PY
+        run: echo "packages=$(python3 scripts/workspace_packages.py --json)" >> "$GITHUB_OUTPUT"
 
   test:
     runs-on: ubuntu-latest
@@ -43,19 +33,21 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
-          version: "latest"
+          version: "0.8.14"
 
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --all-packages
+        run: uv sync --frozen --all-packages
 
       - name: Lint
         run: uv run ruff check packages/ scripts/
 
       - name: Type check
-        run: uv run ty check packages/alma-atlas/src/alma_atlas/config.py packages/alma-atlas/src/alma_atlas/config_store.py packages/alma-atlas/src/alma_atlas/source_registry.py packages/alma-atlas/src/alma_atlas/local_secrets.py packages/alma-atlas/src/alma_atlas/async_utils.py packages/alma-atlas/src/alma_atlas/http_utils.py packages/alma-atlas/src/alma_atlas/graph_service.py packages/alma-atlas/src/alma_atlas/cli/common.py packages/alma-atlas/src/alma_atlas/cli/connect.py packages/alma-atlas/src/alma_atlas/cli/learn.py packages/alma-atlas/src/alma_atlas/cli/scan.py packages/alma-atlas/src/alma_atlas/cli/team.py packages/alma-atlas/src/alma_atlas/cli/serve.py packages/alma-atlas/src/alma_atlas/pipeline/learn.py packages/alma-atlas/src/alma_atlas/pipeline/scan.py packages/alma-atlas/src/alma_atlas/pipeline/scanner_v2.py packages/alma-atlas/src/alma_atlas/pipeline/stitch.py packages/alma-atlas/src/alma_atlas/sync/client.py packages/alma-atlas-store/src/alma_atlas_store/schema_repository.py packages/alma-sqlkit/src/alma_sqlkit/table_refs.py
+        run: |
+          readarray -t targets < <(python3 scripts/typecheck_targets.py)
+          uv run ty check "${targets[@]}"
 
       - name: Test
         run: uv run pytest packages/ -q --tb=short -m "not real_e2e"
@@ -80,13 +72,13 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
-          version: "latest"
+          version: "0.8.14"
 
       - name: Set up Python
         run: uv python install 3.12
 
       - name: Install
-        run: uv sync --all-packages
+        run: uv sync --frozen --all-packages
 
       - name: CLI smoke test
         run: |
@@ -149,7 +141,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
-          version: "latest"
+          version: "0.8.14"
 
       - name: Set up Python
         run: uv python install 3.12

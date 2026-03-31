@@ -22,8 +22,10 @@ class ViolationRepository:
             INSERT INTO violations (id, asset_id, violation_type, severity, details)
             VALUES (:id, :asset_id, :violation_type, :severity, :details)
             ON CONFLICT(id) DO UPDATE SET
-                severity = excluded.severity,
-                details  = excluded.details
+                severity    = excluded.severity,
+                details     = excluded.details,
+                detected_at = CURRENT_TIMESTAMP,
+                resolved_at = NULL
             """,
             {
                 "id": violation.id,

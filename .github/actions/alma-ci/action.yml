@@ -69,7 +69,11 @@ runs:
         python -m pip install --upgrade pip
         if [[ "${{ inputs.install-from-source }}" == "true" ]]; then
           python -m pip install pyyaml
-          python -m pip install -e packages/alma-ports -e packages/alma-sqlkit -e packages/alma-algebrakit -e packages/alma-atlas-store -e packages/alma-connectors -e packages/alma-analysis -e packages/alma-atlas
+          install_args=()
+          while IFS= read -r package; do
+            install_args+=("-e" "packages/${package}")
+          done < <(python scripts/workspace_packages.py)
+          python -m pip install "${install_args[@]}"
         else
           python -m pip install alma-atlas
         fi

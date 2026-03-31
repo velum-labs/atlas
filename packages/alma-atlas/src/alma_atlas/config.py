@@ -211,14 +211,23 @@ class AtlasConfig:
     def _store(self) -> AtlasConfigStore:
         return AtlasConfigStore(self.config_dir)
 
-    def load_team_config(self) -> None:
-        """Load team settings from config.json into this instance."""
+    def load_team_config(self, *, override_existing: bool = False) -> None:
+        """Load team settings from config.json into this instance.
+
+        By default, persisted values only fill fields that are currently unset.
+        This lets runtime config loaded from ``atlas.yml`` override the local
+        persisted team config for a single run without being clobbered later.
+        Pass ``override_existing=True`` when the persisted config should win.
+        """
         team = self._store().load_team_config()
         if not team:
             return
-        self.team_server_url = team.get("server_url")
-        self.team_api_key = team.get("api_key")
-        self.team_id = team.get("team_id")
+        if override_existing or self.team_server_url is None:
+            self.team_server_url = team.get("server_url")
+        if override_existing or self.team_api_key is None:
+            self.team_api_key = team.get("api_key")
+        if override_existing or self.team_id is None:
+            self.team_id = team.get("team_id")
 
     def save_team_config(self) -> None:
         """Persist team settings to config.json."""
@@ -241,6 +250,16 @@ class AtlasConfig:
     def load_sources(self) -> list[SourceConfig]:
         """Load registered sources from disk."""
         return [SourceConfig(**raw) for raw in self._store().load_sources()]
+
+    def resolved_sources(self) -> list[SourceConfig]:
+        """Return the effective sources for the current run.
+
+        Runtime-only sources from ``atlas.yml`` take precedence when present.
+        Otherwise Atlas falls back to the persisted source registry.
+        """
+        if self.sources:
+            return list(self.sources)
+        return self.load_sources()
 
     def save_sources(self, sources: list[SourceConfig]) -> None:
         """Persist registered sources to disk."""
@@ -275,10 +294,14 @@ def get_config() -> AtlasConfig:
     so hooks and other YAML-only settings are loaded automatically.
     """
     global _config
-    if _config is None:
-        default_dir = default_config_dir()
+    default_dir = default_config_dir()
+    should_reload = _config is None or (
+        os.environ.get("ALMA_CONFIG_DIR") is not None and _config.config_dir != default_dir
+    )
+    if should_reload:
         yml_path = default_dir / "atlas.yml"
-        _config = load_atlas_yml(yml_path) if yml_path.exists() else AtlasConfig()
+        _config = load_atlas_yml(yml_path) if yml_path.exists() else AtlasConfig(config_dir=default_dir)
+    assert _config is not None
     return _config
 
 
@@ -356,9 +379,9 @@ def load_atlas_yml(path: Path | str) -> AtlasConfig:
             cfg.team_api_key = team.get("api_key")
 
     # Parse learning/enrichment settings.
-    # `learning:` takes precedence; `enrichment:` is a deprecated alias.
-    learning_raw = data.get("learning") or data.get("enrichment", {})
-    if data.get("enrichment") and not data.get("learning"):
+    # `learning:` takes precedence even when it is explicitly empty.
+    learning_raw = data.get("learning") or {} if "learning" in data else data.get("enrichment", {})
+    if "enrichment" in data and "learning" not in data:
         logger.warning(
             "atlas.yml: 'enrichment:' key is deprecated. Rename it to 'learning:' to silence this warning."
         )

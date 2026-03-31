@@ -7,6 +7,7 @@ rewriting systems.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from alma_algebrakit.models.algebra import (
@@ -34,6 +35,14 @@ class PredicateClassification:
     keep: list[Predicate] = field(default_factory=list)
     drop: list[Predicate] = field(default_factory=list)
     required_covered_cols: set[str] = field(default_factory=set)  # Qualified column refs
+
+
+_IDENTIFIER_BOUNDARY = r"[A-Za-z0-9_]"
+
+
+def _replace_qualified_identifier(text: str, original: str, replacement: str) -> str:
+    pattern = rf"(?<!{_IDENTIFIER_BOUNDARY}){re.escape(original)}(?!{_IDENTIFIER_BOUNDARY})"
+    return re.sub(pattern, replacement, text)
 
 
 def extract_selection_predicates(expr: RAExpression) -> list[Predicate]:
@@ -165,7 +174,7 @@ def rewrite_predicate_columns(
     fp = predicate.fingerprint()
 
     for original, rewritten in column_mapping.items():
-        fp = fp.replace(original, rewritten)
+        fp = _replace_qualified_identifier(fp, original, rewritten)
 
     return fp
 
@@ -198,6 +207,6 @@ def rewrite_on_predicate(
     for (table, col), view_col in lineage.items():
         # Replace table.col with view_alias.view_col
         if table in covered_aliases:
-            fp = fp.replace(f"{table}.{col}", f"{view_alias}.{view_col}")
+            fp = _replace_qualified_identifier(fp, f"{table}.{col}", f"{view_alias}.{view_col}")
 
     return fp

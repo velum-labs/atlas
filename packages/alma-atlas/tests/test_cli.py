@@ -257,3 +257,23 @@ def test_scan_source_not_found(tmp_path: Path) -> None:
     with patch("alma_atlas.cli.scan.get_config", return_value=cfg):
         result = runner.invoke(app, ["scan", "--source", "nonexistent"])
     assert result.exit_code == 1
+
+
+def test_scan_uses_runtime_sources_without_persisting_them(tmp_path: Path) -> None:
+    from alma_atlas.pipeline.scan import ScanAllResult, ScanResult
+
+    cfg = AtlasConfig(
+        config_dir=tmp_path / "alma",
+        sources=[SourceConfig(id="runtime", kind="postgres", params={"dsn_env": "PG_URL"})],
+    )
+    mock_result = ScanAllResult(results=[ScanResult(source_id="runtime")], cross_system_edge_count=0)
+
+    with (
+        patch("alma_atlas.cli.scan.get_config", return_value=cfg),
+        patch("alma_atlas.pipeline.scan.run_scan_all", return_value=mock_result),
+        patch.object(cfg, "save_sources") as mock_save_sources,
+    ):
+        result = runner.invoke(app, ["scan", "--no-sync"])
+
+    assert result.exit_code == 0
+    mock_save_sources.assert_not_called()

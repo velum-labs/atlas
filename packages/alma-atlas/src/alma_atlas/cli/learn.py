@@ -15,12 +15,20 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from alma_atlas.cli.common import require_db_path_or_exit
 from alma_atlas.config import get_config
+from alma_atlas.graph_service import require_db_path
 
 app = typer.Typer(help="Learn edges and assets with agent-inferred metadata.")
 console = Console()
 logger = logging.getLogger(__name__)
+
+
+def _require_db_path_or_exit(cfg) -> Path:
+    try:
+        return require_db_path(cfg)
+    except ValueError as exc:
+        console.print(f"[yellow]{exc}[/yellow]")
+        raise typer.Exit(1) from exc
 
 
 @app.callback(invoke_without_command=True)
@@ -61,7 +69,7 @@ def learn(
     from alma_atlas_store.db import Database
 
     cfg = get_config()
-    db_path = require_db_path_or_exit()
+    db_path = _require_db_path_or_exit(cfg)
 
     if assets:
         from alma_atlas.pipeline.learn import get_unannotated_assets
@@ -135,7 +143,7 @@ def _run_edge_learning(cfg, repo_path: Path) -> None:
         )
         raise typer.Exit(code=1)
 
-    db_path = require_db_path_or_exit()
+    db_path = _require_db_path_or_exit(cfg)
     with Database(db_path) as db:
         count = run_sync(run_edge_learning(db, repo_path, config=cfg.learning))
 
@@ -156,7 +164,7 @@ def _run_asset_annotation(cfg, repo_path: Path) -> None:
         )
         raise typer.Exit(code=1)
 
-    db_path = require_db_path_or_exit()
+    db_path = _require_db_path_or_exit(cfg)
     with Database(db_path) as db:
         count = run_sync(run_asset_annotation(db, repo_path, config=cfg.learning))
 
