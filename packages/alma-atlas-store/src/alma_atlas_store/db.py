@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -33,6 +34,7 @@ class Database:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
+        self._auto_commit = True
         self._migrate()
 
     @property
@@ -75,6 +77,26 @@ class Database:
     def close(self) -> None:
         """Close the database connection."""
         self._conn.close()
+
+    def maybe_commit(self) -> None:
+        """Commit immediately unless the caller opened an explicit transaction."""
+        if self._auto_commit:
+            self._conn.commit()
+
+    @contextmanager
+    def transaction(self):
+        """Group repository writes into one commit/rollback boundary."""
+        previous_auto_commit = self._auto_commit
+        self._auto_commit = False
+        try:
+            yield self
+        except Exception:
+            self._conn.rollback()
+            raise
+        else:
+            self._conn.commit()
+        finally:
+            self._auto_commit = previous_auto_commit
 
     def __enter__(self) -> Database:
         return self

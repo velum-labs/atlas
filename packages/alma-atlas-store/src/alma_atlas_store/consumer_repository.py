@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from alma_ports.consumer import Consumer
+
 from alma_atlas_store.db import Database
+from alma_ports.consumer import Consumer
 
 
 class ConsumerRepository:
@@ -40,7 +41,7 @@ class ConsumerRepository:
                 "INSERT OR IGNORE INTO consumer_assets (consumer_id, asset_id) VALUES (?, ?)",
                 (consumer.id, asset_id),
             )
-        self._db.conn.commit()
+        self._db.maybe_commit()
 
     def get(self, consumer_id: str) -> Consumer | None:
         """Retrieve a consumer by ID."""

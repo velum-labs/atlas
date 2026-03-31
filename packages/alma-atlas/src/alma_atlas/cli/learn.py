@@ -7,7 +7,6 @@ Usage:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from pathlib import Path
 from typing import Annotated
@@ -16,6 +15,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from alma_atlas.cli.common import require_db_path_or_exit
 from alma_atlas.config import get_config
 
 app = typer.Typer(help="Learn edges and assets with agent-inferred metadata.")
@@ -61,12 +61,12 @@ def learn(
     from alma_atlas_store.db import Database
 
     cfg = get_config()
-    assert cfg.db_path is not None, "db_path must be configured"
+    db_path = require_db_path_or_exit()
 
     if assets:
         from alma_atlas.pipeline.learn import get_unannotated_assets
 
-        with Database(cfg.db_path) as db:
+        with Database(db_path) as db:
             unannotated = get_unannotated_assets(db)
 
         if not unannotated:
@@ -94,7 +94,7 @@ def learn(
     # Default: edge learning
     from alma_atlas.pipeline.learn import get_unlearned_edges
 
-    with Database(cfg.db_path) as db:
+    with Database(db_path) as db:
         unlearned = get_unlearned_edges(db)
 
     if not unlearned:
@@ -123,6 +123,7 @@ def learn(
 
 def _run_edge_learning(cfg, repo_path: Path) -> None:
     """Synchronous wrapper — runs edge learning using the per-agent config."""
+    from alma_atlas.async_utils import run_sync
     from alma_atlas.pipeline.learn import edge_learning_is_enabled, run_edge_learning
     from alma_atlas_store.db import Database
 
@@ -134,14 +135,16 @@ def _run_edge_learning(cfg, repo_path: Path) -> None:
         )
         raise typer.Exit(code=1)
 
-    with Database(cfg.db_path) as db:
-        count = asyncio.run(run_edge_learning(db, repo_path, config=cfg.learning))
+    db_path = require_db_path_or_exit()
+    with Database(db_path) as db:
+        count = run_sync(run_edge_learning(db, repo_path, config=cfg.learning))
 
     console.print(f"[green]Learned {count} edge(s).[/green]")
 
 
 def _run_asset_annotation(cfg, repo_path: Path) -> None:
     """Synchronous wrapper -- runs asset annotation using the per-agent config."""
+    from alma_atlas.async_utils import run_sync
     from alma_atlas.pipeline.learn import asset_annotation_is_enabled, run_asset_annotation
     from alma_atlas_store.db import Database
 
@@ -153,7 +156,8 @@ def _run_asset_annotation(cfg, repo_path: Path) -> None:
         )
         raise typer.Exit(code=1)
 
-    with Database(cfg.db_path) as db:
-        count = asyncio.run(run_asset_annotation(db, repo_path, config=cfg.learning))
+    db_path = require_db_path_or_exit()
+    with Database(db_path) as db:
+        count = run_sync(run_asset_annotation(db, repo_path, config=cfg.learning))
 
     console.print(f"[green]Annotated {count} asset(s).[/green]")

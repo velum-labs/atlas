@@ -32,15 +32,10 @@ def search(
         rprint("[yellow]Provide a search query. Example: [bold]alma-atlas search orders[/bold][/yellow]")
         raise typer.Exit(1)
 
-    from alma_atlas.config import get_config
+    from alma_atlas.cli.common import require_db_path_or_exit
     from alma_atlas.graph_service import search_assets
 
-    cfg = get_config()
-    if not cfg.db_path or not cfg.db_path.exists():
-        rprint("[yellow]No Atlas database found. Run [bold]alma-atlas scan[/bold] first.[/yellow]")
-        return
-
-    results = search_assets(cfg.db_path, query, limit=limit)
+    results = search_assets(require_db_path_or_exit(), query, limit=limit)
 
     if not results:
         rprint(f"[dim]No assets found matching [bold]{query!r}[/bold][/dim]")

@@ -9,26 +9,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+
+from alma_ports.annotation import AnnotationRecord
 
 if TYPE_CHECKING:
     from alma_atlas_store.db import Database
-
-
-@dataclass
-class AnnotationRecord:
-    """An agent-generated annotation record for a single data asset."""
-
-    asset_id: str
-    ownership: str | None = None
-    granularity: str | None = None
-    join_keys: list[str] = field(default_factory=list)
-    freshness_guarantee: str | None = None
-    business_logic_summary: str | None = None
-    sensitivity: str | None = None
-    annotated_at: str | None = None
-    annotated_by: str | None = None
 
 
 class AnnotationRepository:
@@ -70,7 +56,7 @@ class AnnotationRepository:
                 "annotated_by": annotation.annotated_by,
             },
         )
-        self._db.conn.commit()
+        self._db.maybe_commit()
 
     def get(self, asset_id: str) -> AnnotationRecord | None:
         """Retrieve an annotation record by asset ID."""

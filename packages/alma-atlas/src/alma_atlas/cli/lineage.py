@@ -8,7 +8,7 @@ Usage:
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 import typer
 from rich import print as rprint
@@ -37,16 +37,11 @@ def downstream(
     _show_lineage(asset_id, direction="downstream", depth=depth)
 
 
-def _show_lineage(asset_id: str, direction: str, depth: int | None) -> None:
-    from alma_atlas.config import get_config
+def _show_lineage(asset_id: str, direction: Literal["upstream", "downstream"], depth: int | None) -> None:
+    from alma_atlas.cli.common import require_db_path_or_exit
     from alma_atlas.graph_service import get_lineage_summary
 
-    cfg = get_config()
-    if not cfg.db_path or not cfg.db_path.exists():
-        rprint("[yellow]No Atlas database found. Run [bold]alma-atlas scan[/bold] first.[/yellow]")
-        return
-
-    summary = get_lineage_summary(cfg.db_path, asset_id, direction=direction, depth=depth)
+    summary = get_lineage_summary(require_db_path_or_exit(), asset_id, direction=direction, depth=depth)
 
     if not summary.asset_exists:
         rprint(f"[yellow]Asset not found in lineage graph:[/yellow] [bold]{asset_id}[/bold]")

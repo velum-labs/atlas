@@ -15,10 +15,13 @@ import hashlib
 import logging
 import re
 
-from alma_atlas_store.asset_repository import Asset, AssetRepository
+from alma_atlas_store.asset_repository import AssetRepository
 from alma_atlas_store.db import Database
-from alma_atlas_store.edge_repository import Edge, EdgeRepository
-from alma_atlas_store.query_repository import QueryObservation, QueryRepository
+from alma_atlas_store.edge_repository import EdgeRepository
+from alma_atlas_store.query_repository import QueryRepository
+from alma_ports.asset import Asset
+from alma_ports.edge import Edge
+from alma_ports.query import QueryObservation
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +40,9 @@ def _is_system_table(ref: str) -> bool:
 
 def _fingerprint(sql: str) -> str:
     """Return a 16-char hex fingerprint of normalised SQL."""
-    normalised = _WS_RE.sub(" ", sql.strip().lower())
+    from alma_sqlkit.normalize import normalize_sql
+
+    normalised = _WS_RE.sub(" ", normalize_sql(sql).strip())
     return hashlib.sha256(normalised.encode()).hexdigest()[:16]
 
 

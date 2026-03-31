@@ -10,6 +10,27 @@ permissions:
   contents: read
 
 jobs:
+  workspace-packages:
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.packages.outputs.packages }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: packages
+        name: Read workspace package order
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import tomllib
+          from pathlib import Path
+
+          payload = tomllib.loads(Path("pyproject.toml").read_text())
+          members = payload["tool"]["uv"]["workspace"]["members"]
+          packages = [Path(member).name for member in members]
+          print(f"packages={json.dumps(packages)}")
+          PY
+
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -34,7 +55,7 @@ jobs:
         run: uv run ruff check packages/ scripts/
 
       - name: Type check
-        run: uv run ty check packages/alma-atlas/src/alma_atlas/config.py packages/alma-atlas/src/alma_atlas/cli/connect.py packages/alma-atlas/src/alma_atlas/cli/learn.py packages/alma-atlas/src/alma_atlas/cli/scan.py packages/alma-atlas/src/alma_atlas/cli/team.py packages/alma-atlas/src/alma_atlas/cli/serve.py packages/alma-atlas/src/alma_atlas/pipeline/learn.py packages/alma-atlas/src/alma_atlas/pipeline/scan.py packages/alma-atlas/src/alma_atlas/pipeline/scanner_v2.py packages/alma-atlas/src/alma_atlas/pipeline/stitch.py packages/alma-atlas/src/alma_atlas/sync/client.py packages/alma-atlas-store/src/alma_atlas_store/schema_repository.py
+        run: uv run ty check packages/alma-atlas/src/alma_atlas/config.py packages/alma-atlas/src/alma_atlas/config_store.py packages/alma-atlas/src/alma_atlas/source_registry.py packages/alma-atlas/src/alma_atlas/local_secrets.py packages/alma-atlas/src/alma_atlas/async_utils.py packages/alma-atlas/src/alma_atlas/http_utils.py packages/alma-atlas/src/alma_atlas/graph_service.py packages/alma-atlas/src/alma_atlas/cli/common.py packages/alma-atlas/src/alma_atlas/cli/connect.py packages/alma-atlas/src/alma_atlas/cli/learn.py packages/alma-atlas/src/alma_atlas/cli/scan.py packages/alma-atlas/src/alma_atlas/cli/team.py packages/alma-atlas/src/alma_atlas/cli/serve.py packages/alma-atlas/src/alma_atlas/pipeline/learn.py packages/alma-atlas/src/alma_atlas/pipeline/scan.py packages/alma-atlas/src/alma_atlas/pipeline/scanner_v2.py packages/alma-atlas/src/alma_atlas/pipeline/stitch.py packages/alma-atlas/src/alma_atlas/sync/client.py packages/alma-atlas-store/src/alma_atlas_store/schema_repository.py packages/alma-sqlkit/src/alma_sqlkit/table_refs.py
 
       - name: Test
         run: uv run pytest packages/ -q --tb=short -m "not real_e2e"
@@ -115,21 +136,13 @@ jobs:
 
   publish-dry-run:
     runs-on: ubuntu-latest
-    needs: test
+    needs: [test, workspace-packages]
     if: github.event_name == 'pull_request'
     strategy:
       fail-fast: true
       max-parallel: 1
       matrix:
-        # Ordered by dependency: leaf packages first
-        package:
-          - alma-ports
-          - alma-sqlkit
-          - alma-algebrakit
-          - alma-atlas-store
-          - alma-connectors
-          - alma-analysis
-          - alma-atlas
+        package: ${{ fromJson(needs.workspace-packages.outputs.packages) }}
     steps:
       - uses: actions/checkout@v4
 

@@ -10,33 +10,46 @@ any file in the scanned path.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Maximum characters of file content included per file (avoids token overruns).
-_MAX_FILE_CHARS = 4_000
-# Maximum number of files to include in a single prompt.
-_MAX_FILES = 40
-# Glob patterns used to discover relevant pipeline code.
-_SCAN_GLOBS: tuple[str, ...] = (
-    "dags/**/*.py",
-    "pipelines/**/*.py",
-    "models/**/*.sql",
-    "**/*.py",
-    "**/*.sql",
-)
-# Directory names that are always skipped during scanning.
-_SKIP_DIRS: frozenset[str] = frozenset(
-    {".git", "__pycache__", ".venv", "node_modules", ".tox", "dist", "build", ".mypy_cache"}
-)
+
+@dataclass(frozen=True)
+class RepoScanConfig:
+    """Tunable limits for repository file discovery."""
+
+    max_file_chars: int = 4_000
+    max_files: int = 40
+    scan_globs: tuple[str, ...] = (
+        "dags/**/*.py",
+        "pipelines/**/*.py",
+        "models/**/*.sql",
+        "**/*.py",
+        "**/*.sql",
+    )
+    skip_dirs: frozenset[str] = frozenset(
+        {".git", "__pycache__", ".venv", "node_modules", ".tox", "dist", "build", ".mypy_cache"}
+    )
 
 
-def _is_skipped(p: Path) -> bool:
-    return any(part in _SKIP_DIRS for part in p.parts)
+DEFAULT_REPO_SCAN_CONFIG = RepoScanConfig()
+
+# Backward-compatible constants for callers that still import them directly.
+_MAX_FILE_CHARS = DEFAULT_REPO_SCAN_CONFIG.max_file_chars
+_MAX_FILES = DEFAULT_REPO_SCAN_CONFIG.max_files
 
 
-def collect_repo_files(repo_path: Path) -> list[tuple[Path, str]]:
+def _is_skipped(path: Path, config: RepoScanConfig) -> bool:
+    return any(part in config.skip_dirs for part in path.parts)
+
+
+def collect_repo_files(
+    repo_path: Path,
+    *,
+    config: RepoScanConfig = DEFAULT_REPO_SCAN_CONFIG,
+) -> list[tuple[Path, str]]:
     """Return (path, content) pairs for relevant files found in *repo_path*.
 
     Files are collected in priority order defined by :data:`_SCAN_GLOBS` and
@@ -52,24 +65,28 @@ def collect_repo_files(repo_path: Path) -> list[tuple[Path, str]]:
     results: list[tuple[Path, str]] = []
     seen: set[Path] = set()
 
-    for pattern in _SCAN_GLOBS:
+    for pattern in config.scan_globs:
         for file_path in sorted(repo_path.glob(pattern)):
-            if file_path in seen or not file_path.is_file() or _is_skipped(file_path):
+            if file_path in seen or not file_path.is_file() or _is_skipped(file_path, config):
                 continue
             seen.add(file_path)
             try:
-                content = file_path.read_text(errors="replace")[:_MAX_FILE_CHARS]
+                content = file_path.read_text(errors="replace")[: config.max_file_chars]
             except OSError as exc:
                 logger.debug("repo_scanner: skipping %s: %s", file_path, exc)
                 continue
             results.append((file_path, content))
-            if len(results) >= _MAX_FILES:
+            if len(results) >= config.max_files:
                 return results
 
     return results
 
 
-def build_file_index(repo_path: Path) -> list[tuple[str, int]]:
+def build_file_index(
+    repo_path: Path,
+    *,
+    config: RepoScanConfig = DEFAULT_REPO_SCAN_CONFIG,
+) -> list[tuple[str, int]]:
     """Return ``(rel_path, size_bytes)`` pairs for all scannable files in *repo_path*.
 
     Used by the codebase explorer for the LLM-free index pass.
@@ -83,9 +100,9 @@ def build_file_index(repo_path: Path) -> list[tuple[str, int]]:
     results: list[tuple[str, int]] = []
     seen: set[Path] = set()
 
-    for pattern in _SCAN_GLOBS:
+    for pattern in config.scan_globs:
         for file_path in sorted(repo_path.glob(pattern)):
-            if file_path in seen or not file_path.is_file() or _is_skipped(file_path):
+            if file_path in seen or not file_path.is_file() or _is_skipped(file_path, config):
                 continue
             seen.add(file_path)
             try:

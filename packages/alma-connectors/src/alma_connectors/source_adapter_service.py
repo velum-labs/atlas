@@ -46,13 +46,21 @@ from alma_connectors.source_adapter import (
     TrafficObservationResult,
 )
 from alma_connectors.source_adapter_runtime import RuntimeSourceAdapter, instantiate_runtime_adapter
-from alma_connectors.source_adapter_v2 import AdapterCapability
+from alma_connectors.source_adapter_v2 import (
+    AdapterCapability,
+    DefinitionSnapshot,
+    DiscoverySnapshot,
+    LineageSnapshot,
+    OrchestrationSnapshot,
+    SourceAdapterV2,
+    TrafficExtractionResult,
+)
 
 
 def _require_dict(value: object, *, field_name: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{field_name} must be an object")
-    return dict(value)
+    return {str(key): item for key, item in value.items()}
 
 
 def _normalize_datetime(value: object) -> datetime | None:
@@ -67,8 +75,14 @@ def _normalize_datetime(value: object) -> datetime | None:
 
 def _normalize_cursor(value: object) -> dict[str, object] | None:
     if isinstance(value, dict):
-        return dict(value)
+        return {str(key): item for key, item in value.items()}
     return None
+
+
+def _iterable_or_empty(value: object) -> tuple[object, ...]:
+    if isinstance(value, list | tuple):
+        return tuple(value)
+    return ()
 
 
 class SourceAdapterService:
@@ -80,6 +94,18 @@ class SourceAdapterService:
     def _get_adapter(self, adapter: PersistedSourceAdapter) -> RuntimeSourceAdapter:
         """Return the runtime adapter for a persisted adapter."""
         return instantiate_runtime_adapter(adapter, resolve_secret=self.resolve_secret)
+
+    def _get_v2_adapter(self, adapter: PersistedSourceAdapter) -> SourceAdapterV2:
+        runtime = self._get_adapter(adapter)
+        if not isinstance(runtime, SourceAdapterV2):
+            raise ValueError(f"{type(runtime).__name__} does not implement SourceAdapterV2")
+        return runtime
+
+    def _get_v1_adapter(self, adapter: PersistedSourceAdapter) -> SourceAdapter:
+        runtime = self._get_adapter(adapter)
+        if not isinstance(runtime, SourceAdapter):
+            raise ValueError(f"{type(runtime).__name__} does not implement the legacy SourceAdapter protocol")
+        return runtime
 
     def encrypt_secret(self, secret: str) -> bytes:
         return encrypt_credential(secret, key=self._encryption_key)
@@ -353,7 +379,7 @@ class SourceAdapterService:
                     for item in (
                         _DEFAULT_POSTGRES_INCLUDE_SCHEMAS
                         if config.get("include_schemas") is None
-                        else config.get("include_schemas")
+                        else _iterable_or_empty(config.get("include_schemas"))
                     )
                 ),
                 exclude_schemas=tuple(
@@ -361,7 +387,7 @@ class SourceAdapterService:
                     for item in (
                         _DEFAULT_POSTGRES_EXCLUDE_SCHEMAS
                         if config.get("exclude_schemas") is None
-                        else config.get("exclude_schemas")
+                        else _iterable_or_empty(config.get("exclude_schemas"))
                     )
                 ),
                 log_capture=log_capture,
@@ -517,7 +543,7 @@ class SourceAdapterService:
         self,
         adapter: PersistedSourceAdapter,
     ) -> SchemaSnapshot:
-        return await self._get_adapter(adapter).introspect_schema(adapter)
+        return await self._get_v1_adapter(adapter).introspect_schema(adapter)
 
     async def observe_traffic(
         self,
@@ -525,7 +551,7 @@ class SourceAdapterService:
         *,
         since: datetime | None = None,
     ) -> TrafficObservationResult:
-        return await self._get_adapter(adapter).observe_traffic(adapter, since=since)
+        return await self._get_v1_adapter(adapter).observe_traffic(adapter, since=since)
 
     async def execute_query(
         self,
@@ -541,6 +567,29 @@ class SourceAdapterService:
             max_rows=max_rows,
             probe_target=probe_target,
         )
+
+    async def discover(self, adapter: PersistedSourceAdapter) -> DiscoverySnapshot:
+        return await self._get_v2_adapter(adapter).discover(adapter)
+
+    async def extract_schema(self, adapter: PersistedSourceAdapter):
+        return await self._get_v2_adapter(adapter).extract_schema(adapter)
+
+    async def extract_definitions(self, adapter: PersistedSourceAdapter) -> DefinitionSnapshot:
+        return await self._get_v2_adapter(adapter).extract_definitions(adapter)
+
+    async def extract_lineage(self, adapter: PersistedSourceAdapter) -> LineageSnapshot:
+        return await self._get_v2_adapter(adapter).extract_lineage(adapter)
+
+    async def extract_traffic(
+        self,
+        adapter: PersistedSourceAdapter,
+        *,
+        since: datetime | None = None,
+    ) -> TrafficExtractionResult:
+        return await self._get_v2_adapter(adapter).extract_traffic(adapter, since=since)
+
+    async def extract_orchestration(self, adapter: PersistedSourceAdapter) -> OrchestrationSnapshot:
+        return await self._get_v2_adapter(adapter).extract_orchestration(adapter)
 
     def _serialize_secret(self, secret: ManagedSecret | ExternalSecretRef) -> dict[str, Any]:
         if isinstance(secret, ManagedSecret):

@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from alma_connectors.source_adapter import ObservedQueryEvent
+from alma_sqlkit.normalize import normalize_sql as canonicalize_sql
 
 if TYPE_CHECKING:
     from alma_connectors.source_adapter import PersistedSourceAdapter
@@ -105,22 +106,16 @@ def _classify_source_type(event: ObservedQueryEvent) -> str:
 # Query normalisation / hashing
 # ---------------------------------------------------------------------------
 
-# Collapse integer / float / string literals to placeholders
-_LITERAL_INT = re.compile(r"\b\d+\b")
-_LITERAL_STR = re.compile(r"'[^']*'")
 _WHITESPACE = re.compile(r"\s+")
 
 
 def _normalize_sql(sql: str) -> str:
     """Return a normalised version of *sql* suitable for grouping.
 
-    Replaces string literals, integer literals, and extra whitespace so that
-    semantically identical queries with different parameter values map to the
-    same normalised form.
+    Delegates literal anonymization and AST-level cleanup to `alma_sqlkit`,
+    then applies a small amount of formatting normalization for stable hashes.
     """
-    text = sql.strip().lower()
-    text = _LITERAL_STR.sub("'?'", text)
-    text = _LITERAL_INT.sub("?", text)
+    text = canonicalize_sql(sql).strip().lower()
     text = _WHITESPACE.sub(" ", text)
     return text
 
@@ -252,8 +247,10 @@ def _get_bytes(event: ObservedQueryEvent) -> float | None:
     raw = meta.get("bytes_processed")
     if raw is None:
         raw = meta.get("total_bytes_processed")
+    if raw is None or not isinstance(raw, str | int | float):
+        return None
     try:
-        return float(raw) if raw is not None else None
+        return float(raw)
     except (TypeError, ValueError):
         return None
 
@@ -319,7 +316,12 @@ def _build_table_access(events: list[ObservedQueryEvent]) -> list[TableAccessSum
 
     for ev in events:
         meta = ev.metadata or {}
-        referenced: list[str] = list(meta.get("referenced_tables") or [])
+        referenced_raw = meta.get("referenced_tables")
+        referenced = (
+            [item for item in referenced_raw if isinstance(item, str)]
+            if isinstance(referenced_raw, list)
+            else []
+        )
 
         for table_name in referenced:
             if not table_name:

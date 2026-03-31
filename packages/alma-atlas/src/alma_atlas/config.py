@@ -11,19 +11,18 @@ Configuration can be overridden via environment variables or CLI flags.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from alma_atlas.config_store import AtlasConfigStore
+from alma_atlas.source_registry import redact_source_params
+
 # Known top-level keys for atlas.yml.  Unknown keys are rejected (fail-closed).
 # `enrichment` is kept as a deprecated alias for `learning`.
 _KNOWN_ATLAS_YML_KEYS = frozenset({"version", "sources", "team", "hooks", "learning", "enrichment"})
-
-# Keys whose values must be redacted in __repr__ output.
-_SECRET_PARAM_KEYS = frozenset({"dsn", "password", "api_key", "api_secret", "client_secret", "auth_token"})
 
 SUPPORTED_LEARNING_PROVIDERS = frozenset({"acp", "mock"})
 DEFAULT_AGENT_PROVIDER = "mock"
@@ -156,10 +155,7 @@ class SourceConfig:
     params: dict[str, Any] = field(default_factory=dict)
 
     def __repr__(self) -> str:
-        redacted = {
-            k: "***" if k in _SECRET_PARAM_KEYS else v
-            for k, v in self.params.items()
-        }
+        redacted = redact_source_params(self.kind, self.params)
         return f"SourceConfig(id={self.id!r}, kind={self.kind!r}, params={redacted})"
 
 
@@ -198,67 +194,58 @@ class AtlasConfig:
 
     @property
     def sources_file(self) -> Path:
-        return self.config_dir / "sources.json"
+        return self._store().paths.sources_file
 
     @property
     def config_file(self) -> Path:
-        return self.config_dir / "config.json"
+        return self._store().paths.config_file
 
     @property
     def sync_cursor_file(self) -> Path:
-        return self.config_dir / "sync_cursor.json"
+        return self._store().paths.sync_cursor_file
 
     def ensure_dir(self) -> None:
         """Create config directory if it does not exist."""
-        self.config_dir.mkdir(parents=True, exist_ok=True)
+        self._store().ensure_dir()
+
+    def _store(self) -> AtlasConfigStore:
+        return AtlasConfigStore(self.config_dir)
 
     def load_team_config(self) -> None:
         """Load team settings from config.json into this instance."""
-        if not self.config_file.exists():
+        team = self._store().load_team_config()
+        if not team:
             return
-        data: dict = json.loads(self.config_file.read_text())
-        team = data.get("team", {})
         self.team_server_url = team.get("server_url")
         self.team_api_key = team.get("api_key")
         self.team_id = team.get("team_id")
 
     def save_team_config(self) -> None:
         """Persist team settings to config.json."""
-        self.ensure_dir()
-        data: dict = {}
-        if self.config_file.exists():
-            data = json.loads(self.config_file.read_text())
-        data["team"] = {
-            "server_url": self.team_server_url,
-            "api_key": self.team_api_key,
-            "team_id": self.team_id,
-        }
-        self.config_file.write_text(json.dumps(data, indent=2))
+        self._store().save_team_config(
+            {
+                "server_url": self.team_server_url,
+                "api_key": self.team_api_key,
+                "team_id": self.team_id,
+            }
+        )
 
     def load_sync_cursor(self) -> str | None:
         """Return the stored sync cursor timestamp, or None if none exists."""
-        if not self.sync_cursor_file.exists():
-            return None
-        data: dict = json.loads(self.sync_cursor_file.read_text())
-        return data.get("cursor")
+        return self._store().load_sync_cursor()
 
     def save_sync_cursor(self, cursor: str) -> None:
         """Store the sync cursor timestamp."""
-        self.ensure_dir()
-        self.sync_cursor_file.write_text(json.dumps({"cursor": cursor}))
+        self._store().save_sync_cursor(cursor)
 
     def load_sources(self) -> list[SourceConfig]:
         """Load registered sources from disk."""
-        if not self.sources_file.exists():
-            return []
-        raw: list[dict] = json.loads(self.sources_file.read_text())
-        return [SourceConfig(**s) for s in raw]
+        return [SourceConfig(**raw) for raw in self._store().load_sources()]
 
     def save_sources(self, sources: list[SourceConfig]) -> None:
         """Persist registered sources to disk."""
-        self.ensure_dir()
-        self.sources_file.write_text(
-            json.dumps([{"id": s.id, "kind": s.kind, "params": s.params} for s in sources], indent=2)
+        self._store().save_sources(
+            [{"id": source.id, "kind": source.kind, "params": source.params} for source in sources]
         )
 
     def add_source(self, source: SourceConfig) -> None:

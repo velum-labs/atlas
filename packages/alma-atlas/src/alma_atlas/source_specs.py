@@ -6,6 +6,12 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from alma_atlas.config import SourceConfig
+from alma_atlas.source_registry import (
+    allowed_source_params as _allowed_source_params,
+)
+from alma_atlas.source_registry import (
+    ensure_source_params_allowed as _ensure_source_params_allowed,
+)
 
 DEFAULT_BIGQUERY_LOCATION = "us"
 DEFAULT_BIGQUERY_SERVICE_ACCOUNT_ENV = "BQ_SERVICE_ACCOUNT_JSON"
@@ -29,103 +35,6 @@ DEFAULT_LOOKER_PORT = 19999
 DEFAULT_FIVETRAN_API_KEY_ENV = "FIVETRAN_API_KEY"
 DEFAULT_FIVETRAN_API_SECRET_ENV = "FIVETRAN_API_SECRET"
 
-SOURCE_ALLOWED_PARAMS: dict[str, frozenset[str]] = {
-    "bigquery": frozenset(
-        {
-            "credentials",
-            "lookback_hours",
-            "location",
-            "max_column_rows",
-            "max_job_rows",
-            "observation_cursor",
-            "probe_target",
-            "project",
-            "project_id",
-            "service_account_env",
-        }
-    ),
-    "postgres": frozenset(
-        {
-            "dsn",
-            "dsn_env",
-            "exclude_schemas",
-            "include_schemas",
-            "log_capture",
-            "observation_cursor",
-            "probe_target",
-            "read_replica",
-            "schema",
-        }
-    ),
-    "dbt": frozenset(
-        {
-            "catalog_path",
-            "manifest_path",
-            "observation_cursor",
-            "project_name",
-            "run_results_path",
-        }
-    ),
-    "snowflake": frozenset(
-        {
-            "account",
-            "account_secret_env",
-            "database",
-            "exclude_schemas",
-            "include_schemas",
-            "lookback_hours",
-            "max_query_rows",
-            "observation_cursor",
-            "probe_target",
-            "role",
-            "warehouse",
-        }
-    ),
-    "airflow": frozenset(
-        {
-            "auth_token",
-            "auth_token_env",
-            "base_url",
-            "observation_cursor",
-            "password",
-            "username",
-        }
-    ),
-    "looker": frozenset(
-        {
-            "client_id",
-            "client_id_env",
-            "client_secret",
-            "client_secret_env",
-            "instance_url",
-            "observation_cursor",
-            "port",
-        }
-    ),
-    "fivetran": frozenset(
-        {
-            "api_key",
-            "api_key_env",
-            "api_secret",
-            "api_secret_env",
-            "observation_cursor",
-        }
-    ),
-    "metabase": frozenset(
-        {
-            "api_key",
-            "api_key_env",
-            "instance_url",
-            "observation_cursor",
-            "password",
-            "username",
-        }
-    ),
-}
-
-SUPPORTED_SOURCE_KINDS = frozenset(SOURCE_ALLOWED_PARAMS)
-
-
 def source_slug_from_url(url: str) -> str:
     parsed = urlparse(url)
     host = parsed.hostname or url
@@ -133,22 +42,11 @@ def source_slug_from_url(url: str) -> str:
 
 
 def allowed_source_params(kind: str) -> frozenset[str]:
-    try:
-        return SOURCE_ALLOWED_PARAMS[kind]
-    except KeyError as exc:
-        raise ValueError(
-            f"Unknown source kind: {kind!r}. Supported: {', '.join(sorted(SUPPORTED_SOURCE_KINDS))}"
-        ) from exc
+    return _allowed_source_params(kind)
 
 
 def ensure_source_params_allowed(source: SourceConfig) -> None:
-    allowed = allowed_source_params(source.kind)
-    unknown = set(source.params) - set(allowed)
-    if unknown:
-        raise ValueError(
-            f"{source.kind} source {source.id!r} has unsupported param(s): {sorted(unknown)}. "
-            f"Allowed params: {sorted(allowed)}"
-        )
+    _ensure_source_params_allowed(source.kind, source.params)
 
 
 def make_bigquery_source(
@@ -168,13 +66,28 @@ def make_bigquery_source(
     return SourceConfig(id=f"bigquery:{project}", kind="bigquery", params=params)
 
 
-def make_postgres_source(*, dsn: str, schema: str = DEFAULT_POSTGRES_SCHEMA) -> SourceConfig:
-    db_name = dsn.rsplit("/", 1)[-1].split("?", 1)[0]
+def make_postgres_source(
+    *,
+    dsn: str | None = None,
+    dsn_env: str | None = None,
+    schema: str = DEFAULT_POSTGRES_SCHEMA,
+) -> SourceConfig:
+    if dsn and dsn_env:
+        raise ValueError("Use either dsn or dsn_env, not both")
+    if not dsn and not dsn_env:
+        raise ValueError("Provide either dsn or dsn_env")
+    db_locator = dsn or dsn_env or "postgres"
+    db_name = db_locator.rsplit("/", 1)[-1].split("?", 1)[0]
     source_id = f"postgres:{db_name}" if schema == DEFAULT_POSTGRES_SCHEMA else f"postgres:{db_name}:{schema}"
+    params: dict[str, object] = {"include_schemas": [schema]}
+    if dsn is not None:
+        params["dsn"] = dsn
+    if dsn_env is not None:
+        params["dsn_env"] = dsn_env
     return SourceConfig(
         id=source_id,
         kind="postgres",
-        params={"dsn": dsn, "include_schemas": [schema]},
+        params=params,
     )
 
 
@@ -226,6 +139,7 @@ def make_airflow_source(
     auth_token_env: str | None = DEFAULT_AIRFLOW_AUTH_TOKEN_ENV,
     username: str | None = None,
     password: str | None = None,
+    password_env: str | None = None,
 ) -> SourceConfig:
     params: dict[str, object] = {"base_url": base_url}
     if auth_token_env:
@@ -234,6 +148,8 @@ def make_airflow_source(
         params["username"] = username
     if password is not None:
         params["password"] = password
+    if password_env is not None:
+        params["password_env"] = password_env
     return SourceConfig(
         id=f"airflow:{source_slug_from_url(base_url)}",
         kind="airflow",
@@ -281,9 +197,11 @@ def make_metabase_source(
     api_key_env: str | None = None,
     username: str | None = None,
     password: str | None = None,
+    password_env: str | None = None,
 ) -> SourceConfig:
-    if api_key_env is None and (username is None or password is None):
-        raise ValueError("Provide either api_key_env or both username and password")
+    has_password = password is not None or password_env is not None
+    if api_key_env is None and (username is None or not has_password):
+        raise ValueError("Provide either api_key_env or both username and a password/password_env")
     params: dict[str, object] = {"instance_url": instance_url}
     if api_key_env is not None:
         params["api_key_env"] = api_key_env
@@ -291,6 +209,8 @@ def make_metabase_source(
         params["username"] = username
     if password is not None:
         params["password"] = password
+    if password_env is not None:
+        params["password_env"] = password_env
     return SourceConfig(
         id=f"metabase:{source_slug_from_url(instance_url)}",
         kind="metabase",

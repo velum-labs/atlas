@@ -12,9 +12,10 @@ import sqlglot
 import sqlglot.expressions as exp
 
 from alma_sqlkit.dialect import Dialect
+from alma_sqlkit.table_refs import extract_table_names
 
 
-def parse_sql(sql: str, dialect: Dialect | str | None = None) -> list[exp.Expression]:
+def parse_sql(sql: str, dialect: Dialect | str | None = None) -> list[exp.Expr]:
     """Parse a SQL string into a list of sqlglot expression trees.
 
     Args:
@@ -27,7 +28,8 @@ def parse_sql(sql: str, dialect: Dialect | str | None = None) -> list[exp.Expres
     dialect_str = dialect.name if isinstance(dialect, Dialect) else dialect
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=".*contains unsupported syntax.*")
-        return sqlglot.parse(sql, dialect=dialect_str, error_level=sqlglot.ErrorLevel.WARN)
+        parsed = sqlglot.parse(sql, dialect=dialect_str, error_level=sqlglot.ErrorLevel.WARN)
+    return [statement for statement in parsed if statement is not None]
 
 
 def extract_tables(sql: str, dialect: Dialect | str | None = None) -> list[str]:
@@ -42,20 +44,5 @@ def extract_tables(sql: str, dialect: Dialect | str | None = None) -> list[str]:
     Returns:
         Deduplicated list of table name strings in the order they appear.
     """
-    seen: set[str] = set()
-    result: list[str] = []
-
-    for statement in parse_sql(sql, dialect=dialect):
-        if statement is None:
-            continue
-        for table in statement.find_all(exp.Table):
-            name = table.name
-            if table.db:
-                name = f"{table.db}.{name}"
-            if table.catalog:
-                name = f"{table.catalog}.{name}"
-            if name and name not in seen:
-                seen.add(name)
-                result.append(name)
-
-    return result
+    dialect_name = dialect.name if isinstance(dialect, Dialect) else (dialect or "postgres")
+    return extract_table_names(sql, dialect=dialect_name)

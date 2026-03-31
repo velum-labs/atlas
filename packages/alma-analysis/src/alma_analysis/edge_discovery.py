@@ -6,25 +6,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from uuid import NAMESPACE_URL, uuid5
 
-from alma_connectors.edge_model import (
-    DataEdge,
-    EdgeDiscoveryMethod,
-    EdgeStatus,
-    EdgeTransport,
-)
+from alma_connectors.edge_model import DataEdge, EdgeDiscoveryMethod, EdgeStatus, EdgeTransport
 from alma_connectors.source_adapter import (
     SchemaSnapshot,
     SourceColumnSchema,
     SourceTableSchema,
     normalize_source_adapter_key,
-)
-
-_TABLE_NAME_WEIGHT = 0.50
-_COLUMN_NAME_WEIGHT = 0.30
-_TYPE_COMPATIBILITY_WEIGHT = 0.10
-_ROW_COUNT_WEIGHT = 0.10
-_TOTAL_WEIGHT_WITHOUT_ROW_COUNT = (
-    _TABLE_NAME_WEIGHT + _COLUMN_NAME_WEIGHT + _TYPE_COMPATIBILITY_WEIGHT
 )
 
 
@@ -129,10 +116,22 @@ class EdgeDiscoveryConfig:
 
     match_threshold: float = 0.60
     dest_dataset_scope: tuple[str, ...] = ()
+    table_name_weight: float = 0.50
+    column_name_weight: float = 0.30
+    type_compatibility_weight: float = 0.10
+    row_count_weight: float = 0.10
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.match_threshold <= 1.0:
             raise ValueError("match_threshold must be in [0.0, 1.0]")
+        total = (
+            self.table_name_weight
+            + self.column_name_weight
+            + self.type_compatibility_weight
+            + self.row_count_weight
+        )
+        if total <= 0:
+            raise ValueError("edge discovery weights must sum to a positive number")
         object.__setattr__(
             self,
             "dest_dataset_scope",
@@ -272,12 +271,19 @@ class EdgeDiscoveryEngine:
         row_count_similarity = self._row_count_similarity(
             source_table.row_count, dest_table.row_count
         )
-        row_count_weight = _ROW_COUNT_WEIGHT if row_count_similarity is not None else 0.0
-        total_weight = 1.0 if row_count_similarity is not None else _TOTAL_WEIGHT_WITHOUT_ROW_COUNT
+        row_count_weight = (
+            self._config.row_count_weight if row_count_similarity is not None else 0.0
+        )
+        total_weight = (
+            self._config.table_name_weight
+            + self._config.column_name_weight
+            + self._config.type_compatibility_weight
+            + row_count_weight
+        )
         weighted_total = (
-            (table_name_match * _TABLE_NAME_WEIGHT)
-            + (column_name_jaccard * _COLUMN_NAME_WEIGHT)
-            + (type_compatibility_ratio * _TYPE_COMPATIBILITY_WEIGHT)
+            (table_name_match * self._config.table_name_weight)
+            + (column_name_jaccard * self._config.column_name_weight)
+            + (type_compatibility_ratio * self._config.type_compatibility_weight)
             + ((row_count_similarity or 0.0) * row_count_weight)
         ) / total_weight
 

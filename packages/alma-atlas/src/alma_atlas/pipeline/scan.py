@@ -28,11 +28,19 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Default per-source scan timeout in seconds.
-_DEFAULT_SCAN_TIMEOUT = 300
+@dataclass(frozen=True)
+class ScanRuntimeConfig:
+    """Operational defaults for Atlas scan execution."""
 
-# Default maximum number of sources scanned concurrently.
-_DEFAULT_MAX_CONCURRENT = 4
+    timeout_seconds: float = 300
+    max_concurrent: int = 4
+
+
+DEFAULT_SCAN_RUNTIME_CONFIG = ScanRuntimeConfig()
+
+# Backward-compatible defaults for callers that still import the module constants.
+_DEFAULT_SCAN_TIMEOUT = DEFAULT_SCAN_RUNTIME_CONFIG.timeout_seconds
+_DEFAULT_MAX_CONCURRENT = DEFAULT_SCAN_RUNTIME_CONFIG.max_concurrent
 
 
 @dataclass
@@ -621,7 +629,7 @@ async def _run_scan_impl(
     enforcement_blocked = False
     enforcement_violations = False
 
-    with Database(cfg.db_path) as db:
+    with Database(cfg.db_path) as db, db.transaction():
         t_store = time.monotonic()
         logger.info("[scan/%s] Phase: projection + persistence", source.id)
         asset_count, edge_count, snapshot = _store_scan_results(
@@ -642,7 +650,13 @@ async def _run_scan_impl(
             t_enforce = time.monotonic()
             logger.info("[scan/%s] Phase: enforcement", source.id)
             try:
-                enforcement_blocked, enforcement_violations = _run_enforcement(snapshot, source.id, db)
+                    from alma_atlas.enforcement.runtime import run_enforcement_for_snapshot
+
+                    enforcement_blocked, enforcement_violations = run_enforcement_for_snapshot(
+                        snapshot,
+                        source.id,
+                        db,
+                    )
             except Exception as exc:
                 logger.exception("Enforcement check failed for source %s: %s", source.id, exc)
                 warnings.append(f"EnforcementError: {exc}")
@@ -700,85 +714,15 @@ def run_scan(
     Returns:
         A ScanResult summarising assets written and edges derived.
     """
-    return asyncio.run(run_scan_async(source, cfg, timeout=timeout))
+    from alma_atlas.async_utils import run_sync
+
+    return run_sync(run_scan_async(source, cfg, timeout=timeout))
 
 
 def _run_enforcement(snapshot: SchemaSnapshot, source_id: str, db: Any) -> tuple[bool, bool]:
-    """Run drift detection + enforcement for any assets that have contracts.
+    from alma_atlas.enforcement.runtime import run_enforcement_for_snapshot
 
-    Silently skips assets without contracts.  Enforcement violations are
-    always persisted to the store; the mode on each contract controls whether
-    the result is merely logged (shadow), surfaced (warn), or blocking
-    (enforce).
-
-    Args:
-        snapshot:  Schema snapshot from the adapter.
-        source_id: Source identifier for asset ID construction.
-        db:        Open Database connection (shared from the caller).
-
-    Returns:
-        Tuple of (any_blocked, has_violations) where any_blocked is True if a
-        contract in enforce mode was violated, and has_violations is True if any
-        drift violations were detected across all modes.
-    """
-    import logging
-
-    from alma_atlas.enforcement.drift import DriftDetector
-    from alma_atlas.enforcement.engine import EnforcementEngine
-    from alma_atlas_store.contract_repository import ContractRepository
-    from alma_atlas_store.schema_repository import ColumnInfo, SchemaRepository
-    from alma_atlas_store.schema_repository import SchemaSnapshot as StoreSnapshot
-
-    log = logging.getLogger(__name__)
-    detector = DriftDetector()
-
-    contract_repo = ContractRepository(db)
-    schema_repo = SchemaRepository(db)
-    engine = EnforcementEngine(db)
-
-    any_blocked = False
-    has_violations = False
-
-    for obj in snapshot.objects:
-        asset_id = f"{source_id}::{obj.schema_name}.{obj.object_name}"
-        contracts = contract_repo.list_for_asset(asset_id)
-        # Build current StoreSnapshot from the connector SchemaSnapshot object.
-        current_cols = [
-            ColumnInfo(
-                name=c.name,
-                type=getattr(c, "data_type", None) or getattr(c, "type", "unknown"),
-                nullable=getattr(c, "nullable", True),
-            )
-            for c in (obj.columns or [])
-        ]
-        current = StoreSnapshot(asset_id=asset_id, columns=current_cols)
-
-        history = schema_repo.list_history(asset_id)
-        previous = history[1] if len(history) >= 2 else None
-
-        # Persist the current snapshot so future scans can detect drift.
-        schema_repo.upsert(current)
-
-        if not contracts:
-            continue
-
-        report = detector.detect(asset_id, previous, current)
-        if not report.has_violations:
-            continue
-
-        has_violations = True
-        for contract in contracts:
-            result = engine.enforce(report, contract.mode)
-            if result.blocked:
-                any_blocked = True
-                log.warning(
-                    "[enforcement/enforce] Pipeline BLOCKED for asset %s — "
-                    "%d error violation(s) detected.",
-                    asset_id,
-                    report.error_count,
-                )
-
-    return any_blocked, has_violations
+    return run_enforcement_for_snapshot(snapshot, source_id, db)
 
 
 async def _run_scan_all_async(
@@ -828,7 +772,7 @@ async def _run_scan_all_async(
 
     cross_system_edge_count = 0
     if len(snapshots) >= 2:
-        with Database(cfg.db_path) as db:
+        with Database(cfg.db_path) as db, db.transaction():
             cross_system_edge_count = discover_cross_system_edges(snapshots, db)
             cross_system_edge_count += resolve_dbt_source_edges(dbt_snapshots, warehouse_snapshots, db)
 
@@ -841,7 +785,7 @@ async def _run_scan_all_async(
             run_edge_learning,
         )
 
-        with Database(cfg.db_path) as db:
+        with Database(cfg.db_path) as db, db.transaction():
             if edge_learning_is_enabled(cfg.learning):
                 logger.info("[scan] Running edge learning from %s", repo_path)
                 await run_edge_learning(db, repo_path, config=cfg.learning)
@@ -884,7 +828,9 @@ def run_scan_all(
         A :class:`ScanAllResult` aggregating per-source results and the total
         number of cross-system edges discovered.
     """
-    return asyncio.run(
+    from alma_atlas.async_utils import run_sync
+
+    return run_sync(
         _run_scan_all_async(
             sources,
             cfg,

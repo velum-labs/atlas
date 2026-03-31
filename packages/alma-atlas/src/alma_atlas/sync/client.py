@@ -11,12 +11,13 @@ Responsibilities:
 
 from __future__ import annotations
 
-import asyncio
+import dataclasses
 import logging
 import uuid as _uuid_mod
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from alma_atlas.http_utils import async_request_with_retry
 from alma_atlas.sync.auth import TeamAuth
 from alma_atlas.sync.conflict import ConflictResolver
 from alma_atlas.sync.protocol import SyncPayload, SyncResponse
@@ -31,10 +32,20 @@ log = logging.getLogger(__name__)
 
 _NULL_CURSOR = "1970-01-01T00:00:00Z"
 
-# Retry configuration
-_RETRY_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
-_MAX_RETRIES = 3
-_BACKOFF_BASE = 1.0  # seconds
+
+@dataclasses.dataclass(frozen=True)
+class SyncRuntimeConfig:
+    """Operational settings for team-sync HTTP behavior."""
+
+    timeout_seconds: float = 30.0
+    connect_timeout_seconds: float = 30.0
+    read_timeout_seconds: float = 120.0
+    max_retries: int = 3
+    backoff_base_seconds: float = 1.0
+    retry_status_codes: frozenset[int] = frozenset({429, 500, 502, 503, 504})
+
+
+DEFAULT_SYNC_RUNTIME_CONFIG = SyncRuntimeConfig()
 
 
 def _parse_ts(ts: str | None) -> datetime:
@@ -47,30 +58,22 @@ def _parse_ts(ts: str | None) -> datetime:
 
 
 def _asset_to_dict(a: Any) -> dict:
-    import dataclasses
-
-    return dataclasses.asdict(a) if dataclasses.is_dataclass(a) else dict(a)
+    return _to_dict(a)
 
 
 def _edge_to_dict(e: Any) -> dict:
-    import dataclasses
-
-    d = dataclasses.asdict(e) if dataclasses.is_dataclass(e) else dict(e)
+    d = _to_dict(e)
     # include computed id for convenience
     d.setdefault("id", e.id if hasattr(e, "id") else "")
     return d
 
 
 def _contract_to_dict(c: Any) -> dict:
-    import dataclasses
-
-    return dataclasses.asdict(c) if dataclasses.is_dataclass(c) else dict(c)
+    return _to_dict(c)
 
 
 def _violation_to_dict(v: Any) -> dict:
-    import dataclasses
-
-    return dataclasses.asdict(v) if dataclasses.is_dataclass(v) else dict(v)
+    return _to_dict(v)
 
 
 def _validate_response(data: Any) -> dict:
@@ -78,6 +81,10 @@ def _validate_response(data: Any) -> dict:
     if not isinstance(data, dict):
         raise ValueError(f"Server returned unexpected response type: {type(data).__name__}")
     return data
+
+
+def _to_dict(value: Any) -> dict[str, Any]:
+    return dataclasses.asdict(value) if dataclasses.is_dataclass(value) else dict(value)
 
 
 def _latest_cursor(*cursors: str) -> str:
@@ -102,19 +109,25 @@ class SyncClient:
         auth: TeamAuth,
         team_id: str,
         http_client: httpx.AsyncClient | None = None,
+        runtime: SyncRuntimeConfig = DEFAULT_SYNC_RUNTIME_CONFIG,
     ) -> None:
         self._server_url = server_url.rstrip("/")
         self._auth = auth
         self._team_id = team_id
         self._http_client = http_client  # injected for testing; created lazily otherwise
         self._owns_client = False
+        self._runtime = runtime
 
     async def __aenter__(self) -> SyncClient:
         import httpx
 
         if self._http_client is None:
             self._http_client = httpx.AsyncClient(
-                timeout=httpx.Timeout(30.0, connect=30.0, read=120.0)
+                timeout=httpx.Timeout(
+                    self._runtime.timeout_seconds,
+                    connect=self._runtime.connect_timeout_seconds,
+                    read=self._runtime.read_timeout_seconds,
+                )
             )
             self._owns_client = True
         return self
@@ -130,14 +143,16 @@ class SyncClient:
 
         if self._http_client is None:
             self._http_client = httpx.AsyncClient(
-                timeout=httpx.Timeout(30.0, connect=30.0, read=120.0)
+                timeout=httpx.Timeout(
+                    self._runtime.timeout_seconds,
+                    connect=self._runtime.connect_timeout_seconds,
+                    read=self._runtime.read_timeout_seconds,
+                )
             )
             self._owns_client = True
         return self._http_client
 
     async def _post(self, path: str, body: dict) -> dict:
-        import httpx
-
         client = self._get_client()
         request_id = str(_uuid_mod.uuid4())
         headers = {
@@ -146,116 +161,46 @@ class SyncClient:
             "X-Request-ID": request_id,
         }
         url = f"{self._server_url}{path}"
-
-        last_exc: Exception | None = None
-        for attempt in range(_MAX_RETRIES + 1):
-            try:
-                response = await client.post(url, json=body, headers=headers)
-            except Exception as exc:
-                last_exc = exc
-                if attempt < _MAX_RETRIES:
-                    wait = _BACKOFF_BASE * (2 ** attempt)
-                    log.debug(
-                        "[sync] POST %s network error (attempt %d/%d), retrying in %.1fs: %s",
-                        path, attempt + 1, _MAX_RETRIES, wait, exc,
-                    )
-                    await asyncio.sleep(wait)
-                    continue
-                raise
-
-            if response.status_code == 429:
-                retry_after = float(response.headers.get("Retry-After", _BACKOFF_BASE * (2 ** attempt)))
-                log.warning(
-                    "[sync] POST %s rate limited (attempt %d/%d), retrying in %.1fs",
-                    path, attempt + 1, _MAX_RETRIES, retry_after,
-                )
-                await asyncio.sleep(retry_after)
-                continue
-
-            if response.status_code in _RETRY_STATUS_CODES and attempt < _MAX_RETRIES:
-                wait = _BACKOFF_BASE * (2 ** attempt)
-                log.warning(
-                    "[sync] POST %s HTTP %d (attempt %d/%d), retrying in %.1fs",
-                    path, response.status_code, attempt + 1, _MAX_RETRIES, wait,
-                )
-                await asyncio.sleep(wait)
-                continue
-
-            response.raise_for_status()
-            try:
-                data = response.json()
-            except Exception as exc:
-                raise ValueError(f"Server returned non-JSON response for POST {path}") from exc
-            return _validate_response(data)
-
-        if last_exc is not None:
-            raise last_exc
-        request = httpx.Request("POST", url)
-        response = httpx.Response(599, request=request)
-        raise httpx.HTTPStatusError(
-            message=f"Max retries exceeded for POST {path}",
-            request=request,
-            response=response,
+        response = await async_request_with_retry(
+            client,
+            method="POST",
+            url=url,
+            headers=headers,
+            json_body=body,
+            logger=log,
+            request_name=path,
+            max_retries=self._runtime.max_retries,
+            backoff_base=self._runtime.backoff_base_seconds,
+            retry_status_codes=self._runtime.retry_status_codes,
         )
+        try:
+            data = response.json()
+        except Exception as exc:
+            raise ValueError(f"Server returned non-JSON response for POST {path}") from exc
+        return _validate_response(data)
 
     async def _get(self, path: str, params: dict | None = None) -> dict:
-        import httpx
-
         client = self._get_client()
         request_id = str(_uuid_mod.uuid4())
         headers = {**self._auth.headers(), "X-Request-ID": request_id}
         url = f"{self._server_url}{path}"
-
-        last_exc: Exception | None = None
-        for attempt in range(_MAX_RETRIES + 1):
-            try:
-                response = await client.get(url, params=params or {}, headers=headers)
-            except Exception as exc:
-                last_exc = exc
-                if attempt < _MAX_RETRIES:
-                    wait = _BACKOFF_BASE * (2 ** attempt)
-                    log.debug(
-                        "[sync] GET %s network error (attempt %d/%d), retrying in %.1fs: %s",
-                        path, attempt + 1, _MAX_RETRIES, wait, exc,
-                    )
-                    await asyncio.sleep(wait)
-                    continue
-                raise
-
-            if response.status_code == 429:
-                retry_after = float(response.headers.get("Retry-After", _BACKOFF_BASE * (2 ** attempt)))
-                log.warning(
-                    "[sync] GET %s rate limited (attempt %d/%d), retrying in %.1fs",
-                    path, attempt + 1, _MAX_RETRIES, retry_after,
-                )
-                await asyncio.sleep(retry_after)
-                continue
-
-            if response.status_code in _RETRY_STATUS_CODES and attempt < _MAX_RETRIES:
-                wait = _BACKOFF_BASE * (2 ** attempt)
-                log.warning(
-                    "[sync] GET %s HTTP %d (attempt %d/%d), retrying in %.1fs",
-                    path, response.status_code, attempt + 1, _MAX_RETRIES, wait,
-                )
-                await asyncio.sleep(wait)
-                continue
-
-            response.raise_for_status()
-            try:
-                data = response.json()
-            except Exception as exc:
-                raise ValueError(f"Server returned non-JSON response for GET {path}") from exc
-            return _validate_response(data)
-
-        if last_exc is not None:
-            raise last_exc
-        request = httpx.Request("GET", url)
-        response = httpx.Response(599, request=request)
-        raise httpx.HTTPStatusError(
-            message=f"Max retries exceeded for GET {path}",
-            request=request,
-            response=response,
+        response = await async_request_with_retry(
+            client,
+            method="GET",
+            url=url,
+            headers=headers,
+            params=params,
+            logger=log,
+            request_name=path,
+            max_retries=self._runtime.max_retries,
+            backoff_base=self._runtime.backoff_base_seconds,
+            retry_status_codes=self._runtime.retry_status_codes,
         )
+        try:
+            data = response.json()
+        except Exception as exc:
+            raise ValueError(f"Server returned non-JSON response for GET {path}") from exc
+        return _validate_response(data)
 
     # ------------------------------------------------------------------ push
 

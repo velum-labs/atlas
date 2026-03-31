@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from typing import Any
 
-from alma_ports.contract import Contract
 from alma_atlas_store.db import Database
+from alma_ports.contract import Contract
 
 
 class ContractRepository:
@@ -38,7 +37,7 @@ class ContractRepository:
                 "mode": contract.mode,
             },
         )
-        self._db.conn.commit()
+        self._db.maybe_commit()
 
     def get(self, contract_id: str) -> Contract | None:
         """Retrieve a contract by ID."""

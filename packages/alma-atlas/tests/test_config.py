@@ -97,6 +97,19 @@ def test_save_sources_creates_valid_json(tmp_path: Path) -> None:
     assert raw[0]["id"] == "x"
 
 
+def test_save_sources_encrypts_literal_secrets(tmp_path: Path) -> None:
+    cfg = AtlasConfig(config_dir=tmp_path)
+    secret_dsn = "postgresql://user:secret@localhost/db"
+    cfg.save_sources([SourceConfig(id="x", kind="postgres", params={"dsn": secret_dsn})])
+
+    raw = json.loads(cfg.sources_file.read_text())
+    assert secret_dsn not in cfg.sources_file.read_text()
+    assert raw[0]["params"]["dsn"]["__alma_secret_id__"] == "source.x.dsn"
+
+    loaded = cfg.load_sources()
+    assert loaded[0].params["dsn"] == secret_dsn
+
+
 # ---------------------------------------------------------------------------
 # AtlasConfig — add_source
 # ---------------------------------------------------------------------------
@@ -144,6 +157,25 @@ def test_remove_source_only_removes_target(tmp_path: Path) -> None:
     sources = cfg.load_sources()
     assert len(sources) == 1
     assert sources[0].id == "keep"
+
+
+def test_team_config_encrypts_api_key(tmp_path: Path) -> None:
+    cfg = AtlasConfig(config_dir=tmp_path)
+    cfg.team_server_url = "https://atlas.example.com"
+    cfg.team_api_key = "super-secret-team-key"
+    cfg.team_id = "default"
+
+    cfg.save_team_config()
+    raw = cfg.config_file.read_text()
+    assert "super-secret-team-key" not in raw
+
+    cfg.team_server_url = None
+    cfg.team_api_key = None
+    cfg.team_id = None
+    cfg.load_team_config()
+    assert cfg.team_server_url == "https://atlas.example.com"
+    assert cfg.team_api_key == "super-secret-team-key"
+    assert cfg.team_id == "default"
 
 
 # ---------------------------------------------------------------------------

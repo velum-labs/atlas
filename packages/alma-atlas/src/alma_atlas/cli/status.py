@@ -7,7 +7,6 @@ Usage:
 from __future__ import annotations
 
 import typer
-from rich import print as rprint
 from rich.console import Console
 from rich.table import Table
 
@@ -21,16 +20,10 @@ def status(ctx: typer.Context) -> None:
     if ctx.invoked_subcommand is not None:
         return
 
-    from alma_atlas.config import get_config
+    from alma_atlas.cli.common import require_db_path_or_exit
     from alma_atlas.graph_service import get_graph_status
 
-    cfg = get_config()
-
-    if not cfg.db_path or not cfg.db_path.exists():
-        rprint("[yellow]No Atlas database found. Run [bold]alma-atlas scan[/bold] first.[/yellow]")
-        return
-
-    summary = get_graph_status(cfg.db_path)
+    summary = get_graph_status(require_db_path_or_exit())
 
     table = Table(title="Alma Atlas Status")
     table.add_column("Metric", style="cyan")

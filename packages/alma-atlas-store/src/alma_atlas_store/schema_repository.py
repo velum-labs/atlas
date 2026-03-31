@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import sqlite3
 
-from alma_ports.schema import ColumnInfo, SchemaSnapshot
 from alma_atlas_store.db import Database
+from alma_ports.schema import ColumnInfo, SchemaSnapshot
 
 
 class SchemaRepository:
@@ -30,7 +29,7 @@ class SchemaRepository:
                 "fingerprint": snapshot.fingerprint,
             },
         )
-        self._db.conn.commit()
+        self._db.maybe_commit()
 
     def get_latest(self, asset_id: str) -> SchemaSnapshot | None:
         """Return the most recent schema snapshot for an asset."""

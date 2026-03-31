@@ -413,7 +413,10 @@ class TestMetabaseAdapterStub:
 
 
 def test_adapters_init_exports() -> None:
-    from alma_connectors.adapters import AirflowAdapter, LookerAdapter, MetabaseAdapter  # noqa: F401
+    from alma_connectors.adapters.airflow import AirflowAdapter
+    from alma_connectors.adapters.looker import LookerAdapter
+    from alma_connectors.adapters.metabase import MetabaseAdapter
+
     assert AirflowAdapter is not None
     assert LookerAdapter is not None
     assert MetabaseAdapter is not None

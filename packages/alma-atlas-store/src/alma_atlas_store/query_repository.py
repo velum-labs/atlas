@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from alma_ports.query import QueryObservation
 from alma_atlas_store.db import Database
+from alma_ports.query import QueryObservation
 
 
 class QueryRepository:
@@ -32,7 +32,7 @@ class QueryRepository:
                 "source": query.source,
             },
         )
-        self._db.conn.commit()
+        self._db.maybe_commit()
 
     def get_by_fingerprint(self, fingerprint: str) -> QueryObservation | None:
         """Return the query matching a given fingerprint."""

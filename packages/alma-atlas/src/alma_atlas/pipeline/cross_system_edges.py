@@ -9,10 +9,11 @@ into the Atlas store as ``Edge`` objects with ``kind="schema_match"``.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from alma_analysis.edge_discovery import EdgeDiscoveryConfig, EdgeDiscoveryEngine
-from alma_atlas_store.edge_repository import Edge, EdgeRepository
+from alma_atlas_store.edge_repository import EdgeRepository
+from alma_ports.edge import Edge
 
 if TYPE_CHECKING:
     from alma_atlas_store.db import Database
@@ -85,8 +86,11 @@ def discover_cross_system_edges(
                 continue
 
             for data_edge in data_edges:
-                edge_discovery_meta = data_edge.transport.metadata.get("edge_discovery", {})
-                if not edge_discovery_meta.get("meets_threshold", False):
+                edge_discovery_meta = cast(
+                    dict[str, object],
+                    data_edge.transport.metadata.get("edge_discovery", {}),
+                )
+                if not bool(edge_discovery_meta.get("meets_threshold", False)):
                     continue
 
                 upstream_id = f"{source_id_a}::{data_edge.source_object}"

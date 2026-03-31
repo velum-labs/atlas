@@ -29,7 +29,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from alma_atlas_store.asset_repository import AssetRepository
-from alma_atlas_store.edge_repository import Edge, EdgeRepository
+from alma_atlas_store.edge_repository import EdgeRepository
+from alma_ports.edge import Edge
 
 if TYPE_CHECKING:
     from alma_atlas.agents.provider import LLMProvider

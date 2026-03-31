@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from alma_ports.asset import Asset
 from alma_atlas_store.db import Database
+from alma_ports.asset import Asset
 
 
 class AssetRepository:
@@ -40,7 +40,7 @@ class AssetRepository:
                 "metadata": json.dumps(asset.metadata),
             },
         )
-        self._db.conn.commit()
+        self._db.maybe_commit()
 
     def get(self, asset_id: str) -> Asset | None:
         """Retrieve an asset by its fully-qualified ID."""
@@ -64,7 +64,7 @@ class AssetRepository:
     def delete(self, asset_id: str) -> None:
         """Remove an asset and all associated cascade records."""
         self._db.conn.execute("DELETE FROM assets WHERE id = ?", (asset_id,))
-        self._db.conn.commit()
+        self._db.maybe_commit()
 
     def _row_to_asset(self, row: sqlite3.Row) -> Asset:
         return Asset(

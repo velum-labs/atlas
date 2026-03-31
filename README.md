@@ -160,6 +160,7 @@ flowchart TD
 - [MCP Tools Reference](docs/mcp-tools.md)
 - [Config Reference](docs/config-reference.md)
 - [Adapters](docs/adapters.md)
+- [Architecture](docs/architecture.md)
 
 ## Contributing
 

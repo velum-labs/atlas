@@ -8,14 +8,15 @@ Usage:
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, cast
 
 import typer
 from rich import print as rprint
 from rich.console import Console
 from rich.table import Table
 
-from alma_atlas.ci_support import split_contract_patterns, validate_contracts, write_payload
+from alma_atlas.ci_support import ContractMode, split_contract_patterns, validate_contracts, write_payload
+from alma_atlas.cli.common import require_db_path_or_exit
 from alma_atlas.config import get_config
 
 app = typer.Typer(help="Manage enforcement modes and inspect drift violations.")
@@ -27,10 +28,7 @@ def check(
     asset: Annotated[str | None, typer.Option("--asset", "-a", help="Check a specific asset ID.")] = None,
 ) -> None:
     """Run drift detection against the current store and print any violations."""
-    cfg = get_config()
-    if not cfg.db_path or not cfg.db_path.exists():
-        rprint("[red]No Atlas database found. Run [bold]alma-atlas scan[/bold] first.[/red]")
-        raise typer.Exit(1)
+    db_path = require_db_path_or_exit()
 
     from alma_atlas.enforcement.drift import DriftDetector
     from alma_atlas.enforcement.engine import EnforcementEngine
@@ -40,7 +38,7 @@ def check(
 
     detector = DriftDetector()
 
-    with Database(cfg.db_path) as db:  # type: ignore[arg-type]
+    with Database(db_path) as db:
         contract_repo = ContractRepository(db)
         schema_repo = SchemaRepository(db)
         engine = EnforcementEngine(db)
@@ -93,19 +91,17 @@ def set_mode(
     mode: Annotated[str, typer.Option("--mode", "-m", help="Enforcement mode: shadow, warn, or enforce.")],
 ) -> None:
     """Set the enforcement mode for all contracts on an asset."""
-    if mode not in ("shadow", "warn", "enforce"):
+    normalized_mode = cast(ContractMode, mode.strip().lower())
+    if normalized_mode not in ("shadow", "warn", "enforce"):
         rprint(f"[red]Invalid mode {mode!r}. Must be one of: shadow, warn, enforce.[/red]")
         raise typer.Exit(1)
 
-    cfg = get_config()
-    if not cfg.db_path or not cfg.db_path.exists():
-        rprint("[red]No Atlas database found. Run [bold]alma-atlas scan[/bold] first.[/red]")
-        raise typer.Exit(1)
+    db_path = require_db_path_or_exit()
 
     from alma_atlas_store.contract_repository import ContractRepository
     from alma_atlas_store.db import Database
 
-    with Database(cfg.db_path) as db:  # type: ignore[arg-type]
+    with Database(db_path) as db:
         repo = ContractRepository(db)
         contracts = repo.list_for_asset(asset_id)
         if not contracts:
@@ -113,7 +109,7 @@ def set_mode(
             raise typer.Exit(1)
 
         for contract in contracts:
-            contract.mode = mode  # type: ignore[assignment]
+            contract.mode = normalized_mode
             repo.upsert(contract)
 
     rprint(
@@ -125,16 +121,13 @@ def set_mode(
 @app.command("status")
 def status() -> None:
     """Show all registered contracts with their enforcement modes."""
-    cfg = get_config()
-    if not cfg.db_path or not cfg.db_path.exists():
-        rprint("[red]No Atlas database found. Run [bold]alma-atlas scan[/bold] first.[/red]")
-        raise typer.Exit(1)
+    db_path = require_db_path_or_exit()
 
     from alma_atlas_store.contract_repository import ContractRepository
     from alma_atlas_store.db import Database
     from alma_atlas_store.violation_repository import ViolationRepository
 
-    with Database(cfg.db_path) as db:  # type: ignore[arg-type]
+    with Database(db_path) as db:
         contracts = ContractRepository(db).list_all()
         if not contracts:
             rprint("[yellow]No contracts registered.[/yellow]")
@@ -197,7 +190,7 @@ def validate(
 ) -> None:
     """Validate contract YAML files against the latest scanned schema snapshots."""
 
-    normalized_mode = mode.strip().lower()
+    normalized_mode = cast(ContractMode, mode.strip().lower())
     if normalized_mode not in {"shadow", "warn", "enforce"}:
         rprint("[red]Invalid mode.[/red] Must be one of: shadow, warn, enforce")
         raise typer.Exit(1)
@@ -212,7 +205,7 @@ def validate(
         payload = validate_contracts(
             cfg=cfg,
             contract_patterns=split_contract_patterns(contracts),
-            mode=normalized_mode,  # type: ignore[arg-type]
+            mode=normalized_mode,
         )
     except ValueError as exc:
         if normalized_output_format == "json":

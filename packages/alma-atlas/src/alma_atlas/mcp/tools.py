@@ -21,7 +21,10 @@ Tool catalogue:
 
 from __future__ import annotations
 
+import inspect
 import json
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from mcp.server import Server
@@ -30,184 +33,178 @@ from mcp.types import TextContent, Tool
 from alma_atlas.config import AtlasConfig
 
 
+@dataclass(frozen=True)
+class AtlasToolSpec:
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+
+    def to_tool(self) -> Tool:
+        return Tool(name=self.name, description=self.description, inputSchema=self.input_schema)
+
+
+def _tool_specs() -> tuple[AtlasToolSpec, ...]:
+    return (
+        AtlasToolSpec(
+            name="atlas_search",
+            description="Search for data assets in the Atlas graph by name, ID, or keyword.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search term"},
+                    "limit": {"type": "integer", "description": "Maximum number of results", "default": 20},
+                },
+                "required": ["query"],
+            },
+        ),
+        AtlasToolSpec(
+            name="atlas_get_asset",
+            description="Retrieve full details for a specific data asset by its ID.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "asset_id": {"type": "string", "description": "Fully-qualified asset ID"},
+                },
+                "required": ["asset_id"],
+            },
+        ),
+        AtlasToolSpec(
+            name="atlas_get_annotations",
+            description="Retrieve agent-generated business metadata annotations for an asset (ownership, granularity, join keys, freshness).",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "asset_id": {"type": "string", "description": "Optional asset ID to fetch annotations for"},
+                    "limit": {"type": "integer", "description": "Max records when listing all", "default": 100},
+                },
+            },
+        ),
+        AtlasToolSpec(
+            name="atlas_lineage",
+            description="Trace upstream or downstream lineage for a data asset.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "asset_id": {"type": "string", "description": "Asset ID to trace from"},
+                    "direction": {
+                        "type": "string",
+                        "enum": ["upstream", "downstream"],
+                        "description": "Direction of traversal",
+                    },
+                    "depth": {"type": "integer", "description": "Maximum traversal depth (omit for unlimited)"},
+                },
+                "required": ["asset_id", "direction"],
+            },
+        ),
+        AtlasToolSpec(
+            name="atlas_status",
+            description="Return a summary of the Atlas graph: total assets, edges, and asset counts by kind.",
+            input_schema={"type": "object", "properties": {}},
+        ),
+        AtlasToolSpec(
+            name="atlas_get_schema",
+            description="Get the latest schema snapshot for a data asset (columns, types, nullability).",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "asset_id": {"type": "string", "description": "Asset ID to get schema for"},
+                },
+                "required": ["asset_id"],
+            },
+        ),
+        AtlasToolSpec(
+            name="atlas_impact",
+            description="Analyse the downstream impact of changes to an asset — shows all assets that depend on it, with query exposure and blast radius.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "asset_id": {"type": "string", "description": "Asset ID to analyse impact for"},
+                    "depth": {"type": "integer", "description": "Maximum depth of impact analysis"},
+                },
+                "required": ["asset_id"],
+            },
+        ),
+        AtlasToolSpec(
+            name="atlas_get_query_patterns",
+            description="Show the top SQL query patterns observed in Atlas, grouped by fingerprint with execution counts and referenced tables.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "top_n": {"type": "integer", "description": "Number of top patterns to return", "default": 20},
+                },
+            },
+        ),
+        AtlasToolSpec(
+            name="atlas_suggest_tables",
+            description="Suggest relevant data tables for a search query, ranked by name relevance and column overlap.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query describing the data you need"},
+                    "limit": {"type": "integer", "description": "Maximum number of suggestions to return", "default": 10},
+                },
+                "required": ["query"],
+            },
+        ),
+        AtlasToolSpec(
+            name="atlas_check_contract",
+            description="Validate the current schema snapshot for an asset against its data contract spec, reporting any violations.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "asset_id": {"type": "string", "description": "Asset ID to check contracts for"},
+                },
+                "required": ["asset_id"],
+            },
+        ),
+        AtlasToolSpec(
+            name="atlas_list_violations",
+            description="List recent enforcement violations stored in Atlas. Optionally filter by asset ID.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "asset_id": {"type": "string", "description": "Filter violations to a specific asset ID (omit for all assets)"},
+                    "limit": {"type": "integer", "description": "Maximum number of violations to return", "default": 50},
+                },
+            },
+        ),
+        AtlasToolSpec(
+            name="atlas_team_sync",
+            description="Trigger a team graph sync — push local Atlas changes to the team server and pull team contracts. Requires team sync to be configured via `alma-atlas team init`.",
+            input_schema={"type": "object", "properties": {}},
+        ),
+    )
+
+
+def _db_path(cfg: AtlasConfig) -> Path:
+    from alma_atlas.graph_service import require_db_path
+
+    return require_db_path(cfg)
+
+
 def register(server: Server, cfg: AtlasConfig) -> None:
     """Register all Atlas tools on the given MCP server instance."""
 
     @server.list_tools()
     async def list_tools() -> list[Tool]:
-        return [
-            Tool(
-                name="atlas_search",
-                description="Search for data assets in the Atlas graph by name, ID, or keyword.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "Search term"},
-                        "limit": {"type": "integer", "description": "Maximum number of results", "default": 20},
-                    },
-                    "required": ["query"],
-                },
-            ),
-            Tool(
-                name="atlas_get_asset",
-                description="Retrieve full details for a specific data asset by its ID.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "asset_id": {"type": "string", "description": "Fully-qualified asset ID"},
-                    },
-                    "required": ["asset_id"],
-                },
-            ),
-            Tool(
-                name="atlas_get_annotations",
-                description="Retrieve agent-generated business metadata annotations for an asset (ownership, granularity, join keys, freshness).",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "asset_id": {"type": "string", "description": "Optional asset ID to fetch annotations for"},
-                        "limit": {"type": "integer", "description": "Max records when listing all", "default": 100},
-                    },
-                },
-            ),
-            Tool(
-                name="atlas_lineage",
-                description="Trace upstream or downstream lineage for a data asset.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "asset_id": {"type": "string", "description": "Asset ID to trace from"},
-                        "direction": {
-                            "type": "string",
-                            "enum": ["upstream", "downstream"],
-                            "description": "Direction of traversal",
-                        },
-                        "depth": {"type": "integer", "description": "Maximum traversal depth (omit for unlimited)"},
-                    },
-                    "required": ["asset_id", "direction"],
-                },
-            ),
-            Tool(
-                name="atlas_status",
-                description="Return a summary of the Atlas graph: total assets, edges, and asset counts by kind.",
-                inputSchema={"type": "object", "properties": {}},
-            ),
-            Tool(
-                name="atlas_get_schema",
-                description="Get the latest schema snapshot for a data asset (columns, types, nullability).",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "asset_id": {"type": "string", "description": "Asset ID to get schema for"},
-                    },
-                    "required": ["asset_id"],
-                },
-            ),
-            Tool(
-                name="atlas_impact",
-                description="Analyse the downstream impact of changes to an asset — shows all assets that depend on it, with query exposure and blast radius.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "asset_id": {"type": "string", "description": "Asset ID to analyse impact for"},
-                        "depth": {"type": "integer", "description": "Maximum depth of impact analysis"},
-                    },
-                    "required": ["asset_id"],
-                },
-            ),
-            Tool(
-                name="atlas_get_query_patterns",
-                description="Show the top SQL query patterns observed in Atlas, grouped by fingerprint with execution counts and referenced tables.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "top_n": {"type": "integer", "description": "Number of top patterns to return", "default": 20},
-                    },
-                },
-            ),
-            Tool(
-                name="atlas_suggest_tables",
-                description="Suggest relevant data tables for a search query, ranked by name relevance and column overlap.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "Search query describing the data you need"},
-                        "limit": {"type": "integer", "description": "Maximum number of suggestions to return", "default": 10},
-                    },
-                    "required": ["query"],
-                },
-            ),
-            Tool(
-                name="atlas_check_contract",
-                description="Validate the current schema snapshot for an asset against its data contract spec, reporting any violations.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "asset_id": {"type": "string", "description": "Asset ID to check contracts for"},
-                    },
-                    "required": ["asset_id"],
-                },
-            ),
-            Tool(
-                name="atlas_list_violations",
-                description="List recent enforcement violations stored in Atlas. Optionally filter by asset ID.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "asset_id": {"type": "string", "description": "Filter violations to a specific asset ID (omit for all assets)"},
-                        "limit": {"type": "integer", "description": "Maximum number of violations to return", "default": 50},
-                    },
-                },
-            ),
-            Tool(
-                name="atlas_team_sync",
-                description="Trigger a team graph sync — push local Atlas changes to the team server and pull team contracts. Requires team sync to be configured via `alma-atlas team init`.",
-                inputSchema={"type": "object", "properties": {}},
-            ),
-        ]
+        return [spec.to_tool() for spec in _tool_specs()]
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
-        if not cfg.db_path or not cfg.db_path.exists():
-            return [TextContent(type="text", text="No Atlas database found. Run `alma-atlas scan` first.")]
+        from alma_atlas.graph_service import require_db_path
 
-        if name == "atlas_search":
-            return _handle_search(cfg, arguments)
+        try:
+            require_db_path(cfg)
+        except ValueError as exc:
+            return [TextContent(type="text", text=str(exc))]
 
-        if name == "atlas_get_asset":
-            return _handle_get_asset(cfg, arguments)
-
-        if name == "atlas_get_annotations":
-            return _handle_get_annotations(cfg, arguments)
-
-        if name == "atlas_lineage":
-            return _handle_lineage(cfg, arguments)
-
-        if name == "atlas_status":
-            return _handle_status(cfg)
-
-        if name == "atlas_get_schema":
-            return _handle_get_schema(cfg, arguments)
-
-        if name == "atlas_impact":
-            return _handle_impact(cfg, arguments)
-
-        if name == "atlas_get_query_patterns":
-            return _handle_get_query_patterns(cfg, arguments)
-
-        if name == "atlas_suggest_tables":
-            return _handle_suggest_tables(cfg, arguments)
-
-        if name == "atlas_check_contract":
-            return _handle_check_contract(cfg, arguments)
-
-        if name == "atlas_list_violations":
-            return _handle_list_violations(cfg, arguments)
-
-        if name == "atlas_team_sync":
-            return await _handle_team_sync(cfg)
-
-        return [TextContent(type="text", text=f"Unknown tool: {name}")]
+        handler = _tool_handlers().get(name)
+        if handler is None:
+            return [TextContent(type="text", text=f"Unknown tool: {name}")]
+        result = handler(cfg, arguments)
+        if inspect.isawaitable(result):
+            return await result
+        return result
 
 
 def _handle_search(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
@@ -215,7 +212,7 @@ def _handle_search(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextCont
 
     query = arguments["query"]
     limit = arguments.get("limit", 20)
-    results = search_assets(cfg.db_path, query, limit=limit)
+    results = search_assets(_db_path(cfg), query, limit=limit)
     if not results:
         return [TextContent(type="text", text=f"No assets found matching {query!r}.")]
     lines = [f"Found {len(results)} asset(s) matching {query!r}:\n"]
@@ -226,12 +223,10 @@ def _handle_search(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextCont
 
 
 def _handle_get_asset(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
-    from alma_atlas_store.asset_repository import AssetRepository
-    from alma_atlas_store.db import Database
+    from alma_atlas.graph_service import get_asset
 
     asset_id = arguments["asset_id"]
-    with Database(cfg.db_path) as db:
-        asset = AssetRepository(db).get(asset_id)
+    asset = get_asset(_db_path(cfg), asset_id)
     if asset is None:
         return [TextContent(type="text", text=f"Asset not found: {asset_id}")]
     return [
@@ -261,47 +256,30 @@ def _handle_get_annotations(cfg: AtlasConfig, arguments: dict[str, Any]) -> list
     If asset_id is provided, returns that annotation (or a not-found message).
     Otherwise returns up to `limit` most recent annotations.
     """
-    from alma_atlas_store.annotation_repository import AnnotationRepository
-    from alma_atlas_store.db import Database
+    from alma_atlas.graph_service import get_annotations
 
     asset_id = arguments.get("asset_id")
     limit = int(arguments.get("limit", 100))
-
-    with Database(cfg.db_path) as db:
-        repo = AnnotationRepository(db)
-        if asset_id:
-            ann = repo.get(asset_id)
-            if ann is None:
-                return [TextContent(type="text", text=f"No annotation found for asset: {asset_id}")]
-            payload = {
-                "asset_id": ann.asset_id,
-                "ownership": ann.ownership,
-                "granularity": ann.granularity,
-                "join_keys": ann.join_keys,
-                "freshness_guarantee": ann.freshness_guarantee,
-                "business_logic_summary": ann.business_logic_summary,
-                "sensitivity": ann.sensitivity,
-                "annotated_at": ann.annotated_at,
-                "annotated_by": ann.annotated_by,
-            }
-            return [TextContent(type="text", text=json.dumps(payload, indent=2))]
-
-        records = repo.list_all(limit=limit)
-        payload = [
-            {
-                "asset_id": ann.asset_id,
-                "ownership": ann.ownership,
-                "granularity": ann.granularity,
-                "join_keys": ann.join_keys,
-                "freshness_guarantee": ann.freshness_guarantee,
-                "business_logic_summary": ann.business_logic_summary,
-                "sensitivity": ann.sensitivity,
-                "annotated_at": ann.annotated_at,
-                "annotated_by": ann.annotated_by,
-            }
-            for ann in records
-        ]
-        return [TextContent(type="text", text=json.dumps({"annotations": payload}, indent=2))]
+    records = get_annotations(_db_path(cfg), asset_id=asset_id, limit=limit)
+    if asset_id and not records:
+        return [TextContent(type="text", text=f"No annotation found for asset: {asset_id}")]
+    payload = [
+        {
+            "asset_id": ann.asset_id,
+            "ownership": ann.ownership,
+            "granularity": ann.granularity,
+            "join_keys": ann.join_keys,
+            "freshness_guarantee": ann.freshness_guarantee,
+            "business_logic_summary": ann.business_logic_summary,
+            "sensitivity": ann.sensitivity,
+            "annotated_at": ann.annotated_at,
+            "annotated_by": ann.annotated_by,
+        }
+        for ann in records
+    ]
+    if asset_id:
+        return [TextContent(type="text", text=json.dumps(payload[0], indent=2))]
+    return [TextContent(type="text", text=json.dumps({"annotations": payload}, indent=2))]
 
 
 def _handle_lineage(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
@@ -311,7 +289,7 @@ def _handle_lineage(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextCon
     direction = arguments["direction"]
     depth = arguments.get("depth")
 
-    summary = get_lineage_summary(cfg.db_path, asset_id, direction=direction, depth=depth)
+    summary = get_lineage_summary(_db_path(cfg), asset_id, direction=direction, depth=depth)
 
     if not summary.asset_exists:
         return [TextContent(type="text", text=f"Asset not found in lineage graph: {asset_id}")]
@@ -328,7 +306,7 @@ def _handle_lineage(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextCon
 def _handle_status(cfg: AtlasConfig) -> list[TextContent]:
     from alma_atlas.graph_service import get_graph_status
 
-    summary = get_graph_status(cfg.db_path)
+    summary = get_graph_status(_db_path(cfg))
 
     lines = [
         f"Atlas graph: {summary.asset_count} assets, {summary.edge_count} edges, {summary.query_count} query fingerprints",
@@ -348,18 +326,12 @@ def _handle_status(cfg: AtlasConfig) -> list[TextContent]:
 
 
 def _handle_get_schema(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
-    from alma_atlas_store.asset_repository import AssetRepository
-    from alma_atlas_store.db import Database
-    from alma_atlas_store.schema_repository import SchemaRepository
+    from alma_atlas.graph_service import get_latest_schema
 
     asset_id = arguments["asset_id"]
-    with Database(cfg.db_path) as db:
-        asset = AssetRepository(db).get(asset_id)
-        if asset is None:
-            return [TextContent(type="text", text=f"Asset not found: {asset_id}")]
-
-        schema_repo = SchemaRepository(db)
-        snapshot = schema_repo.get_latest(asset_id)
+    asset, snapshot = get_latest_schema(_db_path(cfg), asset_id)
+    if asset is None:
+        return [TextContent(type="text", text=f"Asset not found: {asset_id}")]
 
     if snapshot is None:
         # Fall back to asset metadata if it contains column info
@@ -388,31 +360,14 @@ def _handle_get_schema(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[Text
 
 
 def _handle_impact(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
-    from alma_analysis.lineage import Edge, compute_lineage
-    from alma_atlas_store.asset_repository import AssetRepository
-    from alma_atlas_store.db import Database
-    from alma_atlas_store.edge_repository import EdgeRepository
-    from alma_atlas_store.query_repository import QueryRepository
+    from alma_atlas.graph_service import get_impact_summary
 
     asset_id = arguments["asset_id"]
     depth = arguments.get("depth")
-
-    with Database(cfg.db_path) as db:
-        raw_edges = EdgeRepository(db).list_all()
-        asset = AssetRepository(db).get(asset_id)
-        all_queries = QueryRepository(db).list_all()
-
-    if asset is None:
+    summary = get_impact_summary(_db_path(cfg), asset_id, depth=depth)
+    if not summary.asset_exists:
         return [TextContent(type="text", text=f"Asset not found: {asset_id}")]
-
-    edges = [Edge(upstream_id=e.upstream_id, downstream_id=e.downstream_id, kind=e.kind) for e in raw_edges]
-    graph = compute_lineage(edges)
-
-    if not graph.has_asset(asset_id):
-        return [TextContent(type="text", text=f"Asset not found in lineage graph: {asset_id}")]
-
-    downstream = graph.downstream(asset_id, depth=depth)
-
+    downstream = summary.downstream_assets
     if not downstream:
         return [
             TextContent(
@@ -420,16 +375,8 @@ def _handle_impact(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextCont
                 text=f"No downstream dependencies found for {asset_id}. Changes to this asset have no detected downstream impact.",
             )
         ]
-
-    # Count query executions touching each downstream asset
-    query_counts: dict[str, int] = {}
-    for q in all_queries:
-        for table in q.tables:
-            if table in downstream:
-                query_counts[table] = query_counts.get(table, 0) + q.execution_count
-
     blast_radius = len(downstream)
-    total_query_exposure = sum(query_counts.values())
+    total_query_exposure = sum(summary.query_counts.values())
 
     lines = [
         f"Impact analysis for {asset_id}:",
@@ -437,7 +384,7 @@ def _handle_impact(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextCont
         f"  Query exposure: {total_query_exposure} query execution(s) across affected assets\n",
     ]
     for node_id in downstream:
-        qcount = query_counts.get(node_id, 0)
+        qcount = summary.query_counts.get(node_id, 0)
         qinfo = f"  ({qcount} query exec(s))" if qcount else ""
         lines.append(f"  ⚠ {node_id}{qinfo}")
 
@@ -448,14 +395,10 @@ def _handle_impact(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextCont
 
 
 def _handle_get_query_patterns(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
-    from alma_atlas_store.db import Database
-    from alma_atlas_store.query_repository import QueryRepository
+    from alma_atlas.graph_service import get_query_patterns
 
     top_n = arguments.get("top_n", 20)
-    with Database(cfg.db_path) as db:
-        queries = QueryRepository(db).list_all()  # already sorted by execution_count DESC
-
-    queries = queries[:top_n]
+    queries = get_query_patterns(_db_path(cfg), top_n=top_n)
     if not queries:
         return [TextContent(type="text", text="No query patterns found.")]
 
@@ -473,39 +416,11 @@ def _handle_get_query_patterns(cfg: AtlasConfig, arguments: dict[str, Any]) -> l
 
 
 def _handle_suggest_tables(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
-    from alma_atlas_store.asset_repository import AssetRepository
-    from alma_atlas_store.db import Database
-    from alma_atlas_store.schema_repository import SchemaRepository
+    from alma_atlas.graph_service import suggest_tables
 
     query = arguments["query"]
     limit = arguments.get("limit", 10)
-    query_tokens = {t.lower() for t in query.split() if t}
-
-    with Database(cfg.db_path) as db:
-        assets = AssetRepository(db).search(query)
-        schema_repo = SchemaRepository(db)
-        results = []
-        for asset in assets:
-            snapshot = schema_repo.get_latest(asset.id)
-            col_names: set[str] = set()
-            if snapshot:
-                col_names = {c.name.lower() for c in snapshot.columns}
-            elif "columns" in asset.metadata:
-                col_names = {c.get("name", "").lower() for c in asset.metadata["columns"]}
-
-            # Jaccard overlap between query tokens and column names
-            if col_names and query_tokens:
-                union = query_tokens | col_names
-                jaccard = len(query_tokens & col_names) / len(union)
-            else:
-                jaccard = 0.0
-
-            name_match = 1.0 if query.lower() in asset.name.lower() else 0.0
-            score = 0.5 * name_match + 0.5 * jaccard
-            results.append((score, asset, col_names))
-
-    results.sort(key=lambda x: -x[0])
-    results = results[:limit]
+    results = suggest_tables(_db_path(cfg), query, limit=limit)
 
     if not results:
         return [TextContent(type="text", text=f"No table suggestions found for {query!r}.")]
@@ -520,15 +435,11 @@ def _handle_suggest_tables(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[
 
 
 def _handle_list_violations(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
-    from alma_atlas_store.db import Database
-    from alma_atlas_store.violation_repository import ViolationRepository
+    from alma_atlas.graph_service import list_violations
 
     asset_id = arguments.get("asset_id")
     limit = arguments.get("limit", 50)
-
-    with Database(cfg.db_path) as db:
-        repo = ViolationRepository(db)
-        violations = repo.list_for_asset(asset_id)[:limit] if asset_id else repo.list_recent(limit=limit)
+    violations = list_violations(_db_path(cfg), asset_id=asset_id, limit=limit)
 
     if not violations:
         msg = f"No open violations found for {asset_id!r}." if asset_id else "No open violations found."
@@ -543,6 +454,23 @@ def _handle_list_violations(cfg: AtlasConfig, arguments: dict[str, Any]) -> list
             f"\n    detected: {v.detected_at}"
         )
     return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _tool_handlers():
+    return {
+        "atlas_search": _handle_search,
+        "atlas_get_asset": _handle_get_asset,
+        "atlas_get_annotations": _handle_get_annotations,
+        "atlas_lineage": _handle_lineage,
+        "atlas_status": lambda cfg, arguments: _handle_status(cfg),
+        "atlas_get_schema": _handle_get_schema,
+        "atlas_impact": _handle_impact,
+        "atlas_get_query_patterns": _handle_get_query_patterns,
+        "atlas_suggest_tables": _handle_suggest_tables,
+        "atlas_check_contract": _handle_check_contract,
+        "atlas_list_violations": _handle_list_violations,
+        "atlas_team_sync": lambda cfg, arguments: _handle_team_sync(cfg),
+    }
 
 
 async def _handle_team_sync(cfg: AtlasConfig) -> list[TextContent]:
@@ -567,7 +495,7 @@ def _handle_check_contract(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[
     from alma_atlas_store.schema_repository import SchemaRepository
 
     asset_id = arguments["asset_id"]
-    with Database(cfg.db_path) as db:
+    with Database(_db_path(cfg)) as db:
         contracts = ContractRepository(db).list_for_asset(asset_id)
         if not contracts:
             return [TextContent(type="text", text=f"No contracts found for asset: {asset_id}")]

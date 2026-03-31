@@ -20,7 +20,7 @@ from rich import print as rprint
 from rich.console import Console
 from rich.table import Table
 
-from alma_atlas.config import SourceConfig, get_config
+from alma_atlas.config import get_config
 from alma_atlas.source_specs import (
     DEFAULT_AIRFLOW_AUTH_TOKEN_ENV,
     DEFAULT_BIGQUERY_LOCATION,
@@ -90,14 +90,23 @@ def connect_bigquery(
 
 @app.command("postgres")
 def connect_postgres(
-    dsn: Annotated[str, typer.Option("--dsn", help="PostgreSQL connection string.")],
+    dsn: Annotated[str | None, typer.Option("--dsn", help="PostgreSQL connection string.")] = None,
+    dsn_env: Annotated[
+        str | None,
+        typer.Option("--dsn-env", help="Env var containing the PostgreSQL connection string."),
+    ] = None,
     schema: Annotated[str, typer.Option("--schema", help="Schema to scan.")] = DEFAULT_POSTGRES_SCHEMA,
 ) -> None:
     """Register a PostgreSQL data source."""
     cfg = get_config()
-    source = make_postgres_source(dsn=dsn, schema=schema)
+    try:
+        source = make_postgres_source(dsn=dsn, dsn_env=dsn_env, schema=schema)
+    except ValueError as exc:
+        rprint(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1) from exc
     cfg.add_source(source)
-    db_name = dsn.rsplit("/", 1)[-1].split("?")[0]
+    db_locator = dsn or dsn_env or "postgres"
+    db_name = db_locator.rsplit("/", 1)[-1].split("?")[0]
     rprint(f"[green]Connected:[/green] Postgres database [bold]{db_name}[/bold] (schema: {schema})")
 
 
@@ -185,6 +194,10 @@ def connect_airflow(
     ] = DEFAULT_AIRFLOW_AUTH_TOKEN_ENV,
     username: Annotated[str | None, typer.Option("--username")] = None,
     password: Annotated[str | None, typer.Option("--password", hide_input=True)] = None,
+    password_env: Annotated[
+        str | None,
+        typer.Option("--password-env", help="Env var containing the Airflow password."),
+    ] = None,
 ) -> None:
     """Register an Apache Airflow source."""
     cfg = get_config()
@@ -193,6 +206,7 @@ def connect_airflow(
         auth_token_env=auth_token_env,
         username=username,
         password=password,
+        password_env=password_env,
     )
     cfg.add_source(source)
     rprint(f"[green]Connected:[/green] Airflow instance [bold]{base_url}[/bold]")
@@ -250,6 +264,10 @@ def connect_metabase(
     ] = None,
     username: Annotated[str | None, typer.Option("--username")] = None,
     password: Annotated[str | None, typer.Option("--password", hide_input=True)] = None,
+    password_env: Annotated[
+        str | None,
+        typer.Option("--password-env", help="Env var containing the Metabase password."),
+    ] = None,
 ) -> None:
     """Register a Metabase source."""
     cfg = get_config()
@@ -259,6 +277,7 @@ def connect_metabase(
             api_key_env=api_key_env,
             username=username,
             password=password,
+            password_env=password_env,
         )
     except ValueError as exc:
         rprint(f"[red]Error:[/red] {exc}")

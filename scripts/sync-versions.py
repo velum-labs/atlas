@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sync version from root VERSION file to all package pyproject.toml files.
+"""Sync version from root VERSION file to all workspace package pyproject.toml files.
 
 Usage:
     python scripts/sync-versions.py           # Update all packages
@@ -8,25 +8,23 @@ Usage:
 
 import re
 import sys
+import tomllib
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent
 VERSION_FILE = REPO_ROOT / "VERSION"
 PACKAGES_DIR = REPO_ROOT / "packages"
 
-PACKAGES = [
-    "alma-ports",
-    "alma-sqlkit",
-    "alma-algebrakit",
-    "alma-atlas-store",
-    "alma-connectors",
-    "alma-analysis",
-    "alma-atlas",
-]
-
 
 def read_version() -> str:
     return VERSION_FILE.read_text().strip()
+
+
+def workspace_packages() -> list[str]:
+    pyproject = REPO_ROOT / "pyproject.toml"
+    payload = tomllib.loads(pyproject.read_text())
+    members = payload["tool"]["uv"]["workspace"]["members"]
+    return [Path(member).name for member in members]
 
 
 def get_package_version(pyproject_path: Path) -> str:
@@ -56,7 +54,7 @@ def main() -> None:
     print(f"Canonical version (VERSION file): {canonical}")
 
     out_of_sync = []
-    for pkg in PACKAGES:
+    for pkg in workspace_packages():
         pyproject = PACKAGES_DIR / pkg / "pyproject.toml"
         if not pyproject.exists():
             print(f"  ERROR: {pyproject} not found", file=sys.stderr)
