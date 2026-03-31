@@ -126,10 +126,11 @@ def _run_edge_learning(cfg, repo_path: Path) -> None:
     from alma_atlas.pipeline.learn import run_edge_learning
     from alma_atlas_store.db import Database
 
-    if cfg.learning.provider == "mock":
+    _has_agent = cfg.learning.agent is not None
+    if cfg.learning.provider == "mock" and not _has_agent:
         console.print(
             "[red]Error:[/red] No real LLM provider configured for learning.\n"
-            "Set [bold]learning.provider[/bold] to 'anthropic' or 'openai' in atlas.yml,\n"
+            "Set [bold]learning.agent.command[/bold] in atlas.yml (e.g. claude-agent-acp),\n"
             "or export ANTHROPIC_API_KEY / OPENAI_API_KEY."
         )
         raise typer.Exit(code=1)
@@ -141,14 +142,15 @@ def _run_edge_learning(cfg, repo_path: Path) -> None:
 
 
 def _run_asset_annotation(cfg, repo_path: Path) -> None:
-    """Synchronous wrapper — runs asset annotation using the per-agent config."""
+    """Synchronous wrapper -- runs asset annotation using the per-agent config."""
     from alma_atlas.pipeline.learn import run_asset_annotation
     from alma_atlas_store.db import Database
 
-    if cfg.learning.provider == "mock":
+    _has_agent = cfg.learning.agent is not None
+    if cfg.learning.provider == "mock" and not _has_agent:
         console.print(
             "[red]Error:[/red] No real LLM provider configured for learning.\n"
-            "Set [bold]learning.provider[/bold] to 'anthropic' or 'openai' in atlas.yml,\n"
+            "Set [bold]learning.agent.command[/bold] in atlas.yml (e.g. claude-agent-acp),\n"
             "or export ANTHROPIC_API_KEY / OPENAI_API_KEY."
         )
         raise typer.Exit(code=1)

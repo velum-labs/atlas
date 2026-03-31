@@ -387,11 +387,38 @@ def load_atlas_yml(path: Path | str) -> AtlasConfig:
             annotator_raw = learning_raw.get("annotator") or learning_raw.get("asset_enricher", {})
 
             top_agent = _parse_agent_process_config(learning_raw)
+
+            # Parse per-agent configs, inheriting top-level agent if not overridden.
+            explorer = _parse_agent(learning_raw.get("explorer", {}))
+            pipeline_analyzer = _parse_agent(learning_raw.get("pipeline_analyzer", {}))
+            annotator = _parse_agent(annotator_raw)
+
+            # Propagate top-level agent config to sub-agents that lack their own.
+            if top_agent is not None:
+                if explorer.agent is None:
+                    explorer = AgentConfig(
+                        provider=explorer.provider, model=explorer.model,
+                        api_key_env=explorer.api_key_env, timeout=explorer.timeout,
+                        max_tokens=explorer.max_tokens, agent=top_agent,
+                    )
+                if pipeline_analyzer.agent is None:
+                    pipeline_analyzer = AgentConfig(
+                        provider=pipeline_analyzer.provider, model=pipeline_analyzer.model,
+                        api_key_env=pipeline_analyzer.api_key_env, timeout=pipeline_analyzer.timeout,
+                        max_tokens=pipeline_analyzer.max_tokens, agent=top_agent,
+                    )
+                if annotator.agent is None:
+                    annotator = AgentConfig(
+                        provider=annotator.provider, model=annotator.model,
+                        api_key_env=annotator.api_key_env, timeout=annotator.timeout,
+                        max_tokens=annotator.max_tokens, agent=top_agent,
+                    )
+
             cfg.learning = LearningConfig(
                 agent=top_agent,
-                explorer=_parse_agent(learning_raw.get("explorer", {})),
-                pipeline_analyzer=_parse_agent(learning_raw.get("pipeline_analyzer", {})),
-                annotator=_parse_agent(annotator_raw),
+                explorer=explorer,
+                pipeline_analyzer=pipeline_analyzer,
+                annotator=annotator,
             )
         else:
             # Flat (legacy) format: apply the same values to all agents.
