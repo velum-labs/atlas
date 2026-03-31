@@ -21,7 +21,7 @@ uv run alma-atlas --help
 
 ## Project structure
 
-```
+```text
 atlas/
 ├── packages/
 │   ├── alma-atlas/          # CLI + MCP server + pipeline
@@ -52,6 +52,19 @@ uv run pytest
 
 # Run a specific package's tests
 uv run pytest packages/alma-atlas/
+```
+
+## Documentation
+
+```bash
+# Install the docs toolchain alongside the workspace packages
+uv sync --all-packages --group docs
+
+# Preview the docs site locally
+uv run mkdocs serve
+
+# Build docs with warnings treated as errors
+uv run mkdocs build --strict
 ```
 
 ## Code style

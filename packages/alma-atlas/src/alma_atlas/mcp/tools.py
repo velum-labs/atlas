@@ -35,15 +35,19 @@ from alma_atlas.config import AtlasConfig
 
 @dataclass(frozen=True)
 class AtlasToolSpec:
+    """Declarative description of one Atlas MCP tool."""
+
     name: str
     description: str
     input_schema: dict[str, Any]
 
     def to_tool(self) -> Tool:
+        """Convert this spec into the MCP SDK's `Tool` payload."""
         return Tool(name=self.name, description=self.description, inputSchema=self.input_schema)
 
 
 def _tool_specs() -> tuple[AtlasToolSpec, ...]:
+    """Return the canonical Atlas MCP tool catalog."""
     return (
         AtlasToolSpec(
             name="atlas_search",
@@ -141,7 +145,11 @@ def _tool_specs() -> tuple[AtlasToolSpec, ...]:
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Search query describing the data you need"},
-                    "limit": {"type": "integer", "description": "Maximum number of suggestions to return", "default": 10},
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of suggestions to return",
+                        "default": 10,
+                    },
                 },
                 "required": ["query"],
             },
@@ -163,8 +171,15 @@ def _tool_specs() -> tuple[AtlasToolSpec, ...]:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "asset_id": {"type": "string", "description": "Filter violations to a specific asset ID (omit for all assets)"},
-                    "limit": {"type": "integer", "description": "Maximum number of violations to return", "default": 50},
+                    "asset_id": {
+                        "type": "string",
+                        "description": "Filter violations to a specific asset ID (omit for all assets)",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of violations to return",
+                        "default": 50,
+                    },
                 },
             },
         ),
@@ -177,6 +192,7 @@ def _tool_specs() -> tuple[AtlasToolSpec, ...]:
 
 
 def _db_path(cfg: AtlasConfig) -> Path:
+    """Resolve the configured Atlas SQLite database path."""
     from alma_atlas.graph_service import require_db_path
 
     return require_db_path(cfg)
@@ -501,10 +517,7 @@ def _handle_check_contract(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[
     violations: list[str] = []
     for check in checks:
         issues = check.issues
-        violations.extend(
-            str(issue.get("message", "Unknown contract validation issue"))
-            for issue in issues
-        )
+        violations.extend(str(issue.get("message", "Unknown contract validation issue")) for issue in issues)
 
     if not violations:
         lines = [

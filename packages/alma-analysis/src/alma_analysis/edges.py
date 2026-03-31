@@ -1,7 +1,8 @@
 """Edge extraction from SQL for lineage stitching.
 
-Provides a simple Edge dataclass and extract_edges() function that wraps
-the lineage_extractor to derive upstream→downstream table edges from SQL.
+Provides a small `Edge` dataclass and an `extract_edges()` helper that wraps
+the canonical sqlkit lineage extraction utilities to derive
+upstream-to-downstream table edges from SQL.
 """
 
 from __future__ import annotations
@@ -25,14 +26,15 @@ def extract_edges(sql: str, consumer_id: str, dialect: object = "postgres") -> l
     """Extract lineage edges from a SQL query.
 
     Args:
-        sql:         SQL query string.
+        sql: SQL query string.
         consumer_id: Identifier for the downstream consumer (table or query).
-        dialect:     SQL dialect name (str) or a Dialect object with a ``name`` attribute.
+        dialect: SQL dialect name or a dialect-like object with a `name` attribute.
 
     Returns:
-        A list of Edge objects where each entry is upstream_table → consumer_id.
-        If the SQL declares an explicit write target (INSERT INTO / CREATE TABLE AS),
-        that target is used as downstream_id instead of consumer_id.
+        A list of edges where each entry links one upstream table to the
+        downstream target. If the SQL declares an explicit write target
+        (`INSERT INTO` or `CREATE TABLE AS`), that target is used instead of
+        `consumer_id`.
     """
     dialect_name = getattr(dialect, "name", str(dialect))
     result = extract_lineage(sql, dialect=dialect_name)

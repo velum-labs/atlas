@@ -108,7 +108,7 @@ class SchemaObjectKind(StrEnum):
 
 @dataclass(frozen=True)
 class ManagedSecret:
-    """Credential encrypted and persisted by Observatory."""
+    """Credential encrypted and persisted by Atlas."""
 
     ciphertext: bytes
     storage_kind: SecretStorageKind = SecretStorageKind.MANAGED_SECRET
@@ -374,12 +374,8 @@ class AirflowAdapterConfig:
         )
         if self.timeout_seconds < 1:
             raise ValueError("timeout_seconds must be >= 1")
-        if self.auth_token_secret is None and (
-            self.username is None or self.password_secret is None
-        ):
-            raise ValueError(
-                "airflow adapters require either auth_token_secret or both username and password_secret"
-            )
+        if self.auth_token_secret is None and (self.username is None or self.password_secret is None):
+            raise ValueError("airflow adapters require either auth_token_secret or both username and password_secret")
 
 
 @dataclass(frozen=True)

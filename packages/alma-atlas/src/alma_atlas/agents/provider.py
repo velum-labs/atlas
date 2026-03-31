@@ -37,12 +37,12 @@ class LLMProvider(abc.ABC):
         """Run analysis and return a validated structured response.
 
         Args:
-            system_prompt:   Instructions for the LLM.
-            user_prompt:     User-facing content (edges + file snippets).
+            system_prompt: Instructions for the LLM.
+            user_prompt: User-facing content (edges + file snippets).
             response_schema: Pydantic model class to validate the response.
 
         Returns:
-            A validated instance of *response_schema*.
+            A validated instance of `response_schema`.
         """
         ...
 
@@ -66,9 +66,7 @@ class MockProvider(LLMProvider):
         user_prompt: str,
         response_schema: type[T],
     ) -> T:
-        if self._fixed_result is not None and isinstance(
-            self._fixed_result, response_schema
-        ):
+        if self._fixed_result is not None and isinstance(self._fixed_result, response_schema):
             return self._fixed_result  # type: ignore[return-value]
         from alma_atlas.agents.schemas import AssetEnrichmentResult, ExplorerResult, PipelineAnalysisResult
 
@@ -118,19 +116,19 @@ def make_provider(
     """Instantiate an LLM provider by name.
 
     Args:
-        provider_name:  One of ``"acp"`` or ``"mock"``.
-        model:          Unused -- the ACP agent binary controls model choice.
-        api_key:        Unused -- pass credentials via agent_env instead.
-        timeout:        Unused (kept for backward-compatible call sites).
-        max_tokens:     Unused (kept for backward-compatible call sites).
-        agent_command:  ACP agent binary to spawn (``"acp"`` only).
-        agent_args:     Extra CLI arguments for the ACP agent subprocess.
-        agent_env:      Extra environment variables for the ACP agent subprocess.
-        agent_cwd:      Working directory for the ACP agent session.
-        runtime:        Optional shared ACP runtime/session manager.
+        provider_name: One of ``"acp"`` or ``"mock"``.
+        model: Unused. The ACP agent binary controls model choice.
+        api_key: Unused. Pass credentials via `agent_env` instead.
+        timeout: Unused, kept for backward-compatible call sites.
+        max_tokens: Unused, kept for backward-compatible call sites.
+        agent_command: ACP agent binary to spawn when `provider_name` is ``"acp"``.
+        agent_args: Extra CLI arguments for the ACP agent subprocess.
+        agent_env: Extra environment variables for the ACP agent subprocess.
+        agent_cwd: Working directory for the ACP agent session.
+        runtime: Optional shared ACP runtime/session manager.
         enable_terminal:
-                        Whether Atlas should advertise ACP terminal support.
-        mcp_servers:    Optional MCP server configs injected during ``session/new``.
+            Whether Atlas should advertise ACP terminal support.
+        mcp_servers: Optional MCP server configs injected during ``session/new``.
 
     Returns:
         A configured :class:`LLMProvider` instance.
@@ -163,6 +161,4 @@ def make_provider(
         )
     if provider_name == "mock":
         return MockProvider()
-    raise ValueError(
-        f"Unknown provider: {provider_name!r}. Choose from: acp, mock"
-    )
+    raise ValueError(f"Unknown provider: {provider_name!r}. Choose from: acp, mock")

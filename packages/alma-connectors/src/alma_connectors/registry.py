@@ -79,6 +79,8 @@ type SetupInstructionsFactory = Callable[[], SetupInstructions]
 
 @dataclass(frozen=True)
 class ConnectorSpec:
+    """Canonical definition for one supported connector kind."""
+
     kind: str
     adapter_kind: SourceAdapterKind
     allowed_params: frozenset[str]
@@ -600,9 +602,7 @@ def _decode_bigquery_config(
     return BigQueryAdapterConfig(
         project_id=str(config.get("project_id", "")),
         service_account_secret=(
-            deserialize_secret(dict(service_account_secret or {}))
-            if service_account_secret is not None
-            else None
+            deserialize_secret(dict(service_account_secret or {})) if service_account_secret is not None else None
         ),
         location=str(config.get("location") or DEFAULT_BIGQUERY_LOCATION),
         lookback_hours=int(config.get("lookback_hours") or DEFAULT_BIGQUERY_LOOKBACK_HOURS),
@@ -624,7 +624,9 @@ def _decode_snowflake_config(
         database=str(config.get("database") or ""),
         role=str(config.get("role") or ""),
         include_schemas=tuple(str(item) for item in (config.get("include_schemas") or [])),
-        exclude_schemas=tuple(str(item) for item in (config.get("exclude_schemas") or DEFAULT_SNOWFLAKE_EXCLUDE_SCHEMAS)),
+        exclude_schemas=tuple(
+            str(item) for item in (config.get("exclude_schemas") or DEFAULT_SNOWFLAKE_EXCLUDE_SCHEMAS)
+        ),
         lookback_hours=int(config.get("lookback_hours") or DEFAULT_SNOWFLAKE_LOOKBACK_HOURS),
         max_query_rows=int(config.get("max_query_rows") or DEFAULT_SNOWFLAKE_MAX_QUERY_ROWS),
         probe_target=(str(config["probe_target"]) if config.get("probe_target") is not None else None),
@@ -655,16 +657,10 @@ def _decode_airflow_config(
     return AirflowAdapterConfig(
         base_url=str(config.get("base_url", "")),
         auth_token_secret=(
-            deserialize_secret(dict(auth_token_secret or {}))
-            if auth_token_secret is not None
-            else None
+            deserialize_secret(dict(auth_token_secret or {})) if auth_token_secret is not None else None
         ),
         username=(str(config["username"]) if config.get("username") is not None else None),
-        password_secret=(
-            deserialize_secret(dict(password_secret or {}))
-            if password_secret is not None
-            else None
-        ),
+        password_secret=(deserialize_secret(dict(password_secret or {})) if password_secret is not None else None),
         timeout_seconds=int(config.get("timeout_seconds") or 30),
     )
 
@@ -705,17 +701,9 @@ def _decode_metabase_config(
     password_secret = secrets.get("password")
     return MetabaseAdapterConfig(
         instance_url=str(config.get("instance_url", "")),
-        api_key=(
-            deserialize_secret(dict(api_key_secret or {}))
-            if api_key_secret is not None
-            else None
-        ),
+        api_key=(deserialize_secret(dict(api_key_secret or {})) if api_key_secret is not None else None),
         username=(str(config["username"]) if config.get("username") is not None else None),
-        password=(
-            deserialize_secret(dict(password_secret or {}))
-            if password_secret is not None
-            else None
-        ),
+        password=(deserialize_secret(dict(password_secret or {})) if password_secret is not None else None),
         timeout_seconds=int(config.get("timeout_seconds") or 30),
     )
 

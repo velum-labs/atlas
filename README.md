@@ -4,7 +4,7 @@
 [![CI](https://github.com/almaos/atlas/actions/workflows/ci.yml/badge.svg)](https://github.com/almaos/atlas/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
-**Open-source data stack discovery CLI + MCP server**
+Open-source data stack discovery CLI + MCP server
 
 Alma Atlas scans warehouses, dbt projects, orchestration systems, and BI/semantic layers into one local graph, then exposes that graph over [Model Context Protocol](https://modelcontextprotocol.io) so agents can answer questions with live schema, lineage, and query-context instead of guessing from code alone.
 
@@ -135,7 +135,7 @@ flowchart TD
 ## Package Layout
 
 | Package | Purpose |
-|---------|---------|
+| ------- | ------- |
 | `alma-atlas` | CLI, MCP server, scan orchestration, learning, sync |
 | `alma-atlas-store` | SQLite repositories and migrations |
 | `alma-connectors` | Source adapters |
@@ -147,6 +147,8 @@ flowchart TD
 ## Documentation
 
 - [Quickstart](docs/quickstart.md)
+- [Reference Overview](docs/reference/index.md)
+- [API Reference](docs/reference/api/index.md)
 - [MCP Tools Reference](docs/mcp-tools.md)
 - [Config Reference](docs/config-reference.md)
 - [Adapters](docs/adapters.md)
