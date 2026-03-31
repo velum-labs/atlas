@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from alma_atlas.local_secrets import LocalSecretStore
+from alma_atlas.source_records import AtlasSourceRecord
 from alma_atlas.source_registry import source_secret_paths
 
 
@@ -46,29 +47,55 @@ class AtlasConfigStore:
         self.paths.config_dir.mkdir(parents=True, exist_ok=True)
 
     def load_sources(self) -> list[dict[str, Any]]:
+        return [record.to_dict() for record in self.load_source_records()]
+
+    def load_source_records(self) -> list[AtlasSourceRecord]:
         if not self.paths.sources_file.exists():
             return []
         raw = json.loads(self.paths.sources_file.read_text(encoding="utf-8"))
         if not isinstance(raw, list):
             raise ValueError("sources.json must contain a JSON array")
-        loaded: list[dict[str, Any]] = []
+        loaded: list[AtlasSourceRecord] = []
         for item in raw:
             if not isinstance(item, dict):
                 raise ValueError("each persisted source must be a JSON object")
             kind = str(item["kind"])
             source_id = str(item["id"])
             params = self._deserialize_source_params(kind, source_id, item.get("params", {}))
-            loaded.append({"id": source_id, "kind": kind, "params": params})
+            raw_state = item.get("state")
+            state = raw_state if isinstance(raw_state, dict) else None
+            loaded.append(
+                AtlasSourceRecord.from_dict(
+                    {
+                        "id": source_id,
+                        "kind": kind,
+                        "params": params,
+                        "state": state,
+                    }
+                )
+            )
         return loaded
 
     def save_sources(self, sources: list[dict[str, Any]]) -> None:
+        self.save_source_records([AtlasSourceRecord.from_dict(source) for source in sources])
+
+    def save_source_records(self, sources: list[AtlasSourceRecord]) -> None:
         self.ensure_dir()
         payload = []
         for source in sources:
-            kind = str(source["kind"])
-            source_id = str(source["id"])
-            params = self._serialize_source_params(kind, source_id, source.get("params", {}))
-            payload.append({"id": source_id, "kind": kind, "params": params})
+            kind = source.definition.kind
+            source_id = source.definition.id
+            params = self._serialize_source_params(kind, source_id, source.definition.params)
+            record_payload = {
+                "id": source_id,
+                "kind": kind,
+                "params": params,
+            }
+            if source.state.observation_cursor is not None:
+                record_payload["state"] = {
+                    "observation_cursor": dict(source.state.observation_cursor),
+                }
+            payload.append(record_payload)
         self.paths.sources_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     def load_team_config(self) -> dict[str, Any]:

@@ -12,6 +12,8 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
+from alma_connectors.registry import CONNECTOR_SPECS, SUPPORTED_SOURCE_KINDS
+
 
 @dataclass(frozen=True)
 class SourceDefinition:
@@ -23,131 +25,13 @@ class SourceDefinition:
 
 
 SOURCE_DEFINITIONS: dict[str, SourceDefinition] = {
-    "bigquery": SourceDefinition(
-        kind="bigquery",
-        allowed_params=frozenset(
-            {
-                "credentials",
-                "lookback_hours",
-                "location",
-                "max_column_rows",
-                "max_job_rows",
-                "observation_cursor",
-                "probe_target",
-                "project",
-                "project_id",
-                "service_account_env",
-            }
-        ),
-    ),
-    "postgres": SourceDefinition(
-        kind="postgres",
-        allowed_params=frozenset(
-            {
-                "dsn",
-                "dsn_env",
-                "exclude_schemas",
-                "include_schemas",
-                "log_capture",
-                "observation_cursor",
-                "probe_target",
-                "read_replica",
-                "schema",
-            }
-        ),
-        secret_paths=(("dsn",), ("read_replica", "dsn")),
-    ),
-    "dbt": SourceDefinition(
-        kind="dbt",
-        allowed_params=frozenset(
-            {
-                "catalog_path",
-                "manifest_path",
-                "observation_cursor",
-                "project_name",
-                "run_results_path",
-            }
-        ),
-    ),
-    "snowflake": SourceDefinition(
-        kind="snowflake",
-        allowed_params=frozenset(
-            {
-                "account",
-                "account_secret_env",
-                "database",
-                "exclude_schemas",
-                "include_schemas",
-                "lookback_hours",
-                "max_query_rows",
-                "observation_cursor",
-                "probe_target",
-                "role",
-                "warehouse",
-            }
-        ),
-    ),
-    "airflow": SourceDefinition(
-        kind="airflow",
-        allowed_params=frozenset(
-            {
-                "auth_token",
-                "auth_token_env",
-                "base_url",
-                "observation_cursor",
-                "password",
-                "password_env",
-                "username",
-            }
-        ),
-        secret_paths=(("auth_token",), ("password",)),
-    ),
-    "looker": SourceDefinition(
-        kind="looker",
-        allowed_params=frozenset(
-            {
-                "client_id",
-                "client_id_env",
-                "client_secret",
-                "client_secret_env",
-                "instance_url",
-                "observation_cursor",
-                "port",
-            }
-        ),
-        secret_paths=(("client_id",), ("client_secret",)),
-    ),
-    "fivetran": SourceDefinition(
-        kind="fivetran",
-        allowed_params=frozenset(
-            {
-                "api_key",
-                "api_key_env",
-                "api_secret",
-                "api_secret_env",
-                "observation_cursor",
-            }
-        ),
-        secret_paths=(("api_key",), ("api_secret",)),
-    ),
-    "metabase": SourceDefinition(
-        kind="metabase",
-        allowed_params=frozenset(
-            {
-                "api_key",
-                "api_key_env",
-                "instance_url",
-                "observation_cursor",
-                "password",
-                "password_env",
-                "username",
-            }
-        ),
-        secret_paths=(("api_key",), ("password",)),
-    ),
+    kind: SourceDefinition(
+        kind=kind,
+        allowed_params=spec.allowed_params,
+        secret_paths=spec.secret_paths,
+    )
+    for kind, spec in CONNECTOR_SPECS.items()
 }
-
-SUPPORTED_SOURCE_KINDS = frozenset(SOURCE_DEFINITIONS)
 
 
 def get_source_definition(kind: str) -> SourceDefinition:

@@ -45,39 +45,24 @@ See [docs/quickstart.md](docs/quickstart.md) for connector-specific setup and ex
 
 ## Supported Source Kinds
 
-| Kind | CLI register | Canonical assets | Traffic | Graph lineage | Notes |
-|------|--------------|------------------|---------|---------------|-------|
-| `bigquery` | Yes | Yes | Yes | Yes | Traffic-derived lineage + schema metadata |
-| `postgres` | Yes | Yes | Yes | Yes | `pg_stat_statements` and optional log capture |
-| `snowflake` | Yes | Yes | Yes | Yes | Requires `account_secret_env` connection JSON |
-| `dbt` | Yes | Yes | No | Yes | Reads manifest/catalog artifacts |
-| `airflow` | Yes | Yes | Yes | Yes | DAG discovery, task traffic, orchestration metadata |
-| `looker` | Yes | Yes | No | Yes | Semantic-model assets + declared lineage |
-| `fivetran` | Yes | Yes | No | Yes | Connector discovery + connector API lineage |
-| `metabase` | Yes | Yes | Yes | Limited | Database/table discovery + query activity |
+Atlas currently supports:
 
-See [docs/adapters.md](docs/adapters.md) for details and required params.
+- `bigquery`
+- `postgres`
+- `snowflake`
+- `dbt`
+- `airflow`
+- `looker`
+- `fivetran`
+- `metabase`
+
+Use [docs/adapters.md](docs/adapters.md) for examples and setup notes. The canonical source-kind contract lives in `alma_atlas.source_registry` and the connector runtime registry.
 
 ## MCP Tools
 
-`alma-atlas serve` currently registers **12** tools:
+`alma-atlas serve` registers the Atlas MCP tool set for search, schema lookup, lineage, contracts, violations, and team sync.
 
-| Tool | Description |
-|------|-------------|
-| `atlas_search` | Search assets by ID, name, or keyword |
-| `atlas_get_asset` | Return one asset as JSON |
-| `atlas_get_annotations` | Return learned business annotations |
-| `atlas_lineage` | Traverse upstream or downstream lineage |
-| `atlas_status` | Summarize assets, edges, and queries |
-| `atlas_get_schema` | Return the latest schema snapshot |
-| `atlas_impact` | Show downstream blast radius |
-| `atlas_get_query_patterns` | Show top stored query fingerprints |
-| `atlas_suggest_tables` | Rank likely tables for a search intent |
-| `atlas_check_contract` | Validate an asset against stored contracts |
-| `atlas_list_violations` | Show recent unresolved violations |
-| `atlas_team_sync` | Trigger a team graph sync |
-
-See [docs/mcp-tools.md](docs/mcp-tools.md) for the reference.
+See [docs/mcp-tools.md](docs/mcp-tools.md) for usage examples. The canonical tool catalog lives in `alma_atlas.mcp.tools`.
 
 ## Asset IDs
 

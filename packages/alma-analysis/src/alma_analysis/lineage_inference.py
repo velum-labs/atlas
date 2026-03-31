@@ -27,8 +27,7 @@ from alma_connectors.source_adapter_v2 import (
     ScopeContext,
     SourceAdapterKindV2,
 )
-
-from alma_analysis.lineage_extractor import extract_lineage
+from alma_sqlkit.lineage import extract_lineage
 
 logger = logging.getLogger(__name__)
 

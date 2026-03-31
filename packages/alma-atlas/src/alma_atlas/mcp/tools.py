@@ -489,24 +489,18 @@ async def _handle_team_sync(cfg: AtlasConfig) -> list[TextContent]:
 
 
 def _handle_check_contract(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
-    from alma_atlas.contract_validation import (
-        select_contracts_for_validation,
-        validate_contract_spec,
-    )
-    from alma_atlas_store.contract_repository import ContractRepository
+    from alma_atlas.contract_service import validate_stored_contracts_for_asset
     from alma_atlas_store.db import Database
-    from alma_atlas_store.schema_repository import SchemaRepository
 
     asset_id = arguments["asset_id"]
     with Database(_db_path(cfg)) as db:
-        contracts = select_contracts_for_validation(ContractRepository(db).list_for_asset(asset_id))
-        if not contracts:
+        checks = validate_stored_contracts_for_asset(db, asset_id)
+        if not checks:
             return [TextContent(type="text", text=f"No contracts found for asset: {asset_id}")]
-        snapshot = SchemaRepository(db).get_latest(asset_id)
 
     violations: list[str] = []
-    for contract in contracts:
-        issues = validate_contract_spec(contract, snapshot)
+    for check in checks:
+        issues = check.issues
         violations.extend(
             str(issue.get("message", "Unknown contract validation issue"))
             for issue in issues
@@ -515,7 +509,7 @@ def _handle_check_contract(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[
     if not violations:
         lines = [
             f"Contract check PASSED for {asset_id}",
-            f"  {len(contracts)} contract(s) validated, no violations found.",
+            f"  {len(checks)} contract(s) validated, no violations found.",
         ]
     else:
         lines = [f"Contract check FAILED for {asset_id}: {len(violations)} violation(s)\n"]

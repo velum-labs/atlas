@@ -32,7 +32,7 @@ without mutating `sources.json`. Each persisted entry is:
 }
 ```
 
-Atlas persists incremental traffic cursors back into `params.observation_cursor` for connectors that support resume.
+Atlas may also persist runtime source state alongside the definition, for example an `observation_cursor` used by connectors that support resume. Treat the local file format as Atlas-owned implementation detail; code-owned source-kind semantics live in `alma_atlas.source_registry` and the connector registry.
 
 ### BigQuery
 
@@ -67,7 +67,7 @@ If neither is set, Atlas uses Application Default Credentials.
 }
 ```
 
-Supported params:
+Common params:
 
 - `dsn` or `dsn_env`
 - `include_schemas`
@@ -188,6 +188,8 @@ Supported top-level keys:
 - `hooks`
 - `learning`
 - `enrichment` (legacy alias for `learning`)
+
+Source definitions in `atlas.yml` use the same raw wire shape as `sources.json`, but the authoritative source-kind contract is code-owned rather than documented here.
 
 ### Learning
 

@@ -1,19 +1,6 @@
 # Adapters
 
-Atlas scans all supported source kinds through the same canonical runtime, but each connector exposes a different capability mix.
-
-## Capability Summary
-
-| Kind | Register via CLI | Assets | Traffic | Lineage | Orchestration |
-|------|------------------|--------|---------|---------|---------------|
-| BigQuery | Yes | Yes | Yes | Yes | No |
-| PostgreSQL | Yes | Yes | Yes | Yes | No |
-| Snowflake | Yes | Yes | Yes | Yes | No |
-| dbt | Yes | Yes | No | Yes | No |
-| Airflow | Yes | Yes | Yes | Yes | Yes |
-| Looker | Yes | Yes | No | Yes | No |
-| Fivetran | Yes | Yes | No | Yes | Yes |
-| Metabase | Yes | Yes | Yes | No | No |
+Atlas scans all supported source kinds through the same canonical runtime, but this page is intentionally descriptive rather than authoritative. The canonical source-kind contract lives in `alma_atlas.source_registry`; runtime connector behavior lives in the connector registry and adapter code.
 
 ## BigQuery
 
@@ -23,7 +10,7 @@ Use either:
 - `credentials` path in `sources.json`
 - `service_account_env` pointing at raw JSON in an env var
 
-Important params:
+Common params:
 
 - `project_id`
 - `location`
@@ -33,7 +20,7 @@ Important params:
 
 ## PostgreSQL
 
-Important params:
+Common params:
 
 - `dsn` or `dsn_env`
 - `include_schemas`
@@ -52,7 +39,7 @@ Snowflake registration is env-backed. Atlas expects `account_secret_env` to poin
 - `user`
 - `password`
 
-Optional params:
+Common params:
 
 - `warehouse`
 - `database`
@@ -65,7 +52,7 @@ Optional params:
 
 Atlas reads dbt artifacts directly from disk.
 
-Important params:
+Common params:
 
 - `manifest_path`
 - `catalog_path`
@@ -78,7 +65,7 @@ dbt source nodes are projected into the canonical graph as `external_table` asse
 
 ## Airflow
 
-Important params:
+Common params:
 
 - `base_url`
 - `auth_token` or `auth_token_env`
@@ -88,7 +75,7 @@ Atlas projects DAG discovery, task-execution traffic, Airflow-derived lineage, a
 
 ## Looker
 
-Important params:
+Common params:
 
 - `instance_url`
 - `client_id` / `client_secret`
@@ -99,7 +86,7 @@ Atlas projects explores as semantic-model assets and declared lineage from `sql_
 
 ## Fivetran
 
-Important params:
+Common params:
 
 - `api_key` / `api_secret`
 - `api_key_env` / `api_secret_env`
@@ -108,7 +95,7 @@ Atlas projects connector discovery, connector API lineage, and orchestration sch
 
 ## Metabase
 
-Important params:
+Common params:
 
 - `instance_url`
 - `api_key` / `api_key_env`

@@ -159,6 +159,8 @@ def _fetch_columns_per_dataset(
         dataset_id = _get_dataset_id(ds)
         if not dataset_id or remaining <= 0:
             break
+
+        # TODO(@000alen): injection risk?
         per_ds_sql = f"""
             SELECT
               table_schema,
@@ -259,9 +261,11 @@ def _build_consumer_identity(
 
     if dag_id:
         source_type = "airflow"
+        # TODO(@000alen): magic number?
         confidence = 0.95
     elif user_email:
         source_type = "user"
+        # TODO(@000alen): magic number?
         confidence = 0.7
 
     if dag_id and task_id:
@@ -785,6 +789,7 @@ class BigQueryAdapter(SourceAdapter):
 
         job_config = bigquery.QueryJobConfig(
             query_parameters=query_parameters,
+            # TODO(@000alen): magic number? should be configurable
             job_timeout_ms=300_000,  # 5-minute hard cap
         )
         logger.debug(

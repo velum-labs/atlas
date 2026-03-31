@@ -9,11 +9,9 @@ from pathlib import Path
 from typing import Any, Literal
 
 from alma_atlas.config import AtlasConfig, SourceConfig, get_config, load_atlas_yml
+from alma_atlas.contract_service import validate_contract_document
 from alma_atlas.contract_validation import (
     resolve_contract_columns as _resolve_contract_columns,
-)
-from alma_atlas.contract_validation import (
-    validate_contract_columns,
 )
 from alma_atlas.pipeline.scan import ScanAllResult
 from alma_atlas_store.db import Database
@@ -314,11 +312,13 @@ def validate_contracts(
                 document = _load_contract_document(path)
                 contract_id = document.contract_id
                 asset_id = document.asset_id
-                issues = validate_contract_columns(
+                check = validate_contract_document(
                     contract_id=document.contract_id,
+                    asset_id=document.asset_id,
                     columns=document.columns,
                     snapshot=schema_repo.get_latest(document.asset_id),
                 )
+                issues = check.issues
             except Exception as exc:
                 issues = [
                     {

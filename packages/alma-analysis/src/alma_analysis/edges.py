@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from alma_analysis.lineage_extractor import extract_lineage
+from alma_sqlkit.lineage import extract_lineage
 
 
 @dataclass

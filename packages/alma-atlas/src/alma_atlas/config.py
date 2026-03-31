@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from alma_atlas.config_store import AtlasConfigStore
+from alma_atlas.source_records import AtlasSourceDefinition, AtlasSourceRecord, AtlasSourceState
 from alma_atlas.source_registry import redact_source_params
 
 # Known top-level keys for atlas.yml.  Unknown keys are rejected (fail-closed).
@@ -249,7 +250,11 @@ class AtlasConfig:
 
     def load_sources(self) -> list[SourceConfig]:
         """Load registered sources from disk."""
-        return [SourceConfig(**raw) for raw in self._store().load_sources()]
+        return [self._source_config_from_record(record) for record in self.load_source_records()]
+
+    def load_source_records(self) -> list[AtlasSourceRecord]:
+        """Load registered source definitions plus runtime state from disk."""
+        return self._store().load_source_records()
 
     def resolved_sources(self) -> list[SourceConfig]:
         """Return the effective sources for the current run.
@@ -257,15 +262,21 @@ class AtlasConfig:
         Runtime-only sources from ``atlas.yml`` take precedence when present.
         Otherwise Atlas falls back to the persisted source registry.
         """
+        return [self._source_config_from_record(record) for record in self.resolved_source_records()]
+
+    def resolved_source_records(self) -> list[AtlasSourceRecord]:
+        """Return the effective source definitions for the current run."""
         if self.sources:
-            return list(self.sources)
-        return self.load_sources()
+            return [self._record_from_source_config(source) for source in self.sources]
+        return self.load_source_records()
 
     def save_sources(self, sources: list[SourceConfig]) -> None:
         """Persist registered sources to disk."""
-        self._store().save_sources(
-            [{"id": source.id, "kind": source.kind, "params": source.params} for source in sources]
-        )
+        self.save_source_records([self._record_from_source_config(source) for source in sources])
+
+    def save_source_records(self, sources: list[AtlasSourceRecord]) -> None:
+        """Persist registered source definitions plus runtime state to disk."""
+        self._store().save_source_records(sources)
 
     def add_source(self, source: SourceConfig) -> None:
         """Add or update a source in the config file."""
@@ -282,6 +293,32 @@ class AtlasConfig:
             return False
         self.save_sources(new_sources)
         return True
+
+    @staticmethod
+    def _record_from_source_config(source: SourceConfig) -> AtlasSourceRecord:
+        params = dict(source.params)
+        observation_cursor = params.pop("observation_cursor", None)
+        return AtlasSourceRecord(
+            definition=AtlasSourceDefinition(
+                id=source.id,
+                kind=source.kind,
+                params=params,
+            ),
+            state=AtlasSourceState(
+                observation_cursor=dict(observation_cursor) if isinstance(observation_cursor, dict) else None,
+            ),
+        )
+
+    @staticmethod
+    def _source_config_from_record(record: AtlasSourceRecord) -> SourceConfig:
+        params = dict(record.definition.params)
+        if record.state.observation_cursor is not None:
+            params["observation_cursor"] = dict(record.state.observation_cursor)
+        return SourceConfig(
+            id=record.definition.id,
+            kind=record.definition.kind,
+            params=params,
+        )
 
 
 _config: AtlasConfig | None = None

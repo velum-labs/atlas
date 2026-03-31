@@ -5,10 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from alma_atlas.contract_validation import (
-    select_contracts_for_validation,
-    validate_contract_spec,
-)
+from alma_atlas.contract_service import validate_snapshot_contracts
 from alma_atlas.enforcement.drift import DriftReport, DriftViolation
 
 
@@ -29,7 +26,7 @@ def run_enforcement_for_snapshot(snapshot: Any, source_id: str, db: Any) -> tupl
 
     for obj in snapshot.objects:
         asset_id = f"{source_id}::{obj.schema_name}.{obj.object_name}"
-        contracts = select_contracts_for_validation(contract_repo.list_for_asset(asset_id))
+        contracts = contract_repo.list_for_asset(asset_id)
         current_cols = [
             ColumnInfo(
                 name=column.name,
@@ -44,9 +41,12 @@ def run_enforcement_for_snapshot(snapshot: Any, source_id: str, db: Any) -> tupl
         if not contracts:
             continue
 
-        for contract in contracts:
-            issues = validate_contract_spec(contract, current)
-            if not issues:
+        for check in validate_snapshot_contracts(
+            asset_id=asset_id,
+            contracts=contracts,
+            snapshot=current,
+        ):
+            if check.passed:
                 continue
 
             has_violations = True
@@ -58,19 +58,20 @@ def run_enforcement_for_snapshot(snapshot: Any, source_id: str, db: Any) -> tupl
                         severity=str(issue["severity"]),
                         details={
                             **issue,
-                            "contract_id": contract.id,
+                            "contract_id": check.contract_id,
                         },
                     )
-                    for issue in issues
+                    for issue in check.issues
                 ]
             )
+            contract = next(contract for contract in contracts if contract.id == check.contract_id)
             result = engine.enforce(report, contract.mode)
             if result.blocked:
                 any_blocked = True
                 log.warning(
                     "[enforcement/enforce] Pipeline BLOCKED for asset %s contract %s — %d error violation(s) detected.",
                     asset_id,
-                    contract.id,
+                    check.contract_id,
                     report.error_count,
                 )
 

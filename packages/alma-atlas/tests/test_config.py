@@ -117,6 +117,29 @@ def test_save_sources_encrypts_literal_secrets(tmp_path: Path) -> None:
     assert loaded[0].params["dsn"] == secret_dsn
 
 
+def test_save_sources_persists_observation_cursor_as_state(tmp_path: Path) -> None:
+    cfg = AtlasConfig(config_dir=tmp_path)
+    cfg.save_sources(
+        [
+            SourceConfig(
+                id="pg:warehouse",
+                kind="postgres",
+                params={
+                    "dsn_env": "PG_URL",
+                    "observation_cursor": {"last_seen": "2024-01-01T00:00:00Z"},
+                },
+            )
+        ]
+    )
+
+    raw = json.loads(cfg.sources_file.read_text())
+    assert "observation_cursor" not in raw[0]["params"]
+    assert raw[0]["state"]["observation_cursor"]["last_seen"] == "2024-01-01T00:00:00Z"
+
+    loaded = cfg.load_sources()
+    assert loaded[0].params["observation_cursor"]["last_seen"] == "2024-01-01T00:00:00Z"
+
+
 # ---------------------------------------------------------------------------
 # AtlasConfig — add_source
 # ---------------------------------------------------------------------------

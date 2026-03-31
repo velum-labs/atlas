@@ -1,8 +1,9 @@
 name: Publish Packages
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - "v*"
 
 permissions:
   contents: read
@@ -42,18 +43,15 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
-      - name: Extract version from release tag
-        id: version
+      - name: Verify release version
         run: |
-          TAG="${{ github.event.release.tag_name }}"
-          # Strip leading 'v' if present
-          VERSION="${TAG#v}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Sync versions
-        run: |
-          echo "${{ steps.version.outputs.version }}" > VERSION
-          python3 scripts/sync-versions.py
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          REPO_VERSION="$(tr -d '\n' < VERSION)"
+          if [[ "$TAG_VERSION" != "$REPO_VERSION" ]]; then
+            echo "Tag version ($TAG_VERSION) does not match VERSION ($REPO_VERSION)" >&2
+            exit 1
+          fi
+          python3 scripts/sync-versions.py --check
 
       - name: Build package
         working-directory: packages/${{ matrix.package }}

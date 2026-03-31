@@ -1,10 +1,12 @@
 # MCP Tools Reference
 
-Atlas currently registers **12** MCP tools when you run `alma-atlas serve`.
+Atlas registers the MCP tool set defined in `alma_atlas.mcp.tools` when you run `alma-atlas serve`.
 
 All tools require a populated local Atlas database. Run `alma-atlas scan` first.
 
 ## Tool Catalog
+
+This page is a usage guide. The authoritative tool catalog and input schemas are code-owned in `alma_atlas.mcp.tools`.
 
 | Tool | Input | Description |
 |------|-------|-------------|
