@@ -4,25 +4,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass, field
-from typing import Any
 
+from alma_ports.asset import Asset
 from alma_atlas_store.db import Database
-
-
-@dataclass
-class Asset:
-    """A data asset record as stored in the Atlas SQLite database."""
-
-    id: str
-    source: str
-    kind: str
-    name: str
-    description: str | None = None
-    tags: list[str] = field(default_factory=list)
-    metadata: dict[str, Any] = field(default_factory=dict)
-    first_seen: str | None = None
-    last_seen: str | None = None
 
 
 class AssetRepository:

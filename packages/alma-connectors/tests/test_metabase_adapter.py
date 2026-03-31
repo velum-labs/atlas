@@ -15,6 +15,7 @@ from alma_connectors import (
     SourceAdapterStatus,
 )
 from alma_connectors.adapters.metabase import MetabaseAdapter
+from alma_connectors.source_adapter import MetabaseAdapterConfig
 from alma_connectors.source_adapter_v2 import AdapterCapability
 
 # ---------------------------------------------------------------------------
@@ -30,10 +31,13 @@ def _make_persisted() -> PersistedSourceAdapter:
         id=_ADAPTER_ID,
         key="metabase-prod",
         display_name="Metabase Prod",
-        kind=SourceAdapterKind.POSTGRES,  # v1 kind used as placeholder
+        kind=SourceAdapterKind.METABASE,
         target_id="metabase-prod",
         status=SourceAdapterStatus.READY,
-        config=ExternalSecretRef(provider="env", reference="UNUSED"),
+        config=MetabaseAdapterConfig(
+            instance_url=_INSTANCE_URL,
+            api_key=ExternalSecretRef(provider="env", reference="METABASE_API_KEY"),
+        ),
     )
 
 

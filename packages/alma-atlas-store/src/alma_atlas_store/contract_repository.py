@@ -4,24 +4,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
+from alma_ports.contract import Contract
 from alma_atlas_store.db import Database
-
-
-@dataclass
-class Contract:
-    """A data contract definition for an asset."""
-
-    id: str
-    asset_id: str
-    version: str
-    spec: dict[str, Any]
-    status: str = "draft"
-    mode: Literal["shadow", "warn", "enforce"] = "shadow"
-    created_at: str | None = None
-    updated_at: str | None = None
 
 
 class ContractRepository:

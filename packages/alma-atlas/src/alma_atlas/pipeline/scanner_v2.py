@@ -1,10 +1,8 @@
-"""Capability-aware extraction pipeline for SourceAdapterV2 adapters.
+"""Capability-aware helper types for the canonical scan runtime.
 
-Implements:
-  - CapabilityRouter: builds an ordered extraction plan from probe() results
-  - ExtractionPipeline: executes the plan in canonical capability order
-  - ScannerV2: top-level orchestrator with automatic v1 fallback
-  - run_scan_v2(): drop-in replacement for run_scan() for v2 adapters
+`pipeline/scan.py` is the authoritative scan spine. This module keeps the
+capability planning/execution helpers used by that runtime plus a small
+compatibility facade (`ScannerV2` / `run_scan_v2`) for legacy call sites.
 """
 
 from __future__ import annotations
@@ -31,6 +29,7 @@ from alma_connectors.source_adapter_v2 import (
 
 if TYPE_CHECKING:
     from alma_atlas.config import AtlasConfig, SourceConfig
+    from alma_atlas.pipeline.scan import ScanResult
     from alma_connectors.source_adapter import PersistedSourceAdapter
 
 logger = logging.getLogger(__name__)
@@ -211,11 +210,7 @@ class ExtractionPipeline:
 
 
 class ScannerV2:
-    """Top-level orchestrator for v2 adapter scans.
-
-    Detects whether an adapter implements SourceAdapterV2 or the legacy v1
-    SourceAdapter and routes accordingly, ensuring backward compatibility.
-    """
+    """Compatibility facade over the canonical scan runtime."""
 
     def __init__(self, cfg: AtlasConfig) -> None:
         self._cfg = cfg
@@ -225,222 +220,19 @@ class ScannerV2:
         from alma_atlas.pipeline.scan import run_scan
 
         result = run_scan(source, self._cfg)
-        return ScanResultV2(
-            source_id=result.source_id,
-            asset_count=result.asset_count,
-            edge_count=result.edge_count,
-            error=result.error,
-            warnings=list(result.warnings),
-        )
-
-    def _fire_hooks(self, result: ScanResultV2) -> None:
-        """Fire post-scan hooks for a completed v2 scan result."""
-        import asyncio as _asyncio
-        from datetime import UTC, datetime
-
-        from alma_atlas.hooks import HookEvent, HookExecutor
-
-        event_type = "scan_error" if result.error else "scan_complete"
-        data: dict = {"asset_count": result.asset_count, "edge_count": result.edge_count}
-        if result.error:
-            data["error"] = result.error
-        if result.warnings:
-            data["warnings"] = list(result.warnings)
-
-        event = HookEvent(
-            event_type=event_type,
-            source_id=result.source_id,
-            timestamp=datetime.now(UTC).isoformat(),
-            data=data,
-        )
-        executor = HookExecutor(self._cfg.hooks)
-        try:
-            _asyncio.run(executor.fire(event))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Failed to fire hooks for source %s: %s", result.source_id, exc)
-
-    def _scan_v2(
-        self,
-        adapter: SourceAdapterV2,
-        persisted: PersistedSourceAdapter,
-        source: SourceConfig,
-    ) -> ScanResultV2:
-        """Run the full v2 extraction pipeline for one source."""
-        router = CapabilityRouter()
-        pipeline = ExtractionPipeline(adapter, persisted)
-
-        from alma_ports.errors import ExtractionError
-
-        # --- probe ---
-        try:
-            probe_results = asyncio.run(adapter.probe(persisted))
-        except Exception as exc:
-            raise ExtractionError(f"Capability probing failed: {exc}") from exc
-
-        plan = router.build_plan(probe_results)
-
-        if not plan.capabilities:
-            return ScanResultV2(
-                source_id=source.id,
-                capabilities_skipped=plan.skipped,
-                warnings=["No capabilities available; nothing extracted."],
-            )
-
-        # --- extract ---
-        try:
-            results, extraction_warnings = asyncio.run(pipeline.execute(plan))
-        except Exception as exc:
-            raise ExtractionError(f"Extraction pipeline failed: {exc}") from exc
-
-        # --- store ---
-        store_warnings: list[str] = []
-        asset_count = 0
-        edge_count = 0
-        try:
-            asset_count, edge_count = _store_v2_results(
-                results, persisted, source, self._cfg
-            )
-        except Exception as exc:
-            logger.warning("Failed to store extraction results for source %s: %s", source.id, exc)
-            store_warnings.append(f"ExtractionError: Failed to store extraction results: {exc}")
-
-        scan_result = ScanResultV2(
-            source_id=source.id,
-            capabilities_run=list(results.keys()),
-            capabilities_skipped=plan.skipped,
-            asset_count=asset_count,
-            edge_count=edge_count,
-            warnings=extraction_warnings + store_warnings,
-            results=results,
-        )
-
-        # Fire post-scan hooks.
-        if self._cfg.hooks:
-            self._fire_hooks(scan_result)
-
-        return scan_result
+        return scan_result_to_v2(result)
 
 
-# ---------------------------------------------------------------------------
-# Storage helpers
-# ---------------------------------------------------------------------------
+def scan_result_to_v2(result: ScanResult) -> ScanResultV2:
+    """Convert the canonical scan result into the v2 compatibility shape."""
 
-
-def _store_v2_results(
-    results: dict[AdapterCapability, Any],
-    persisted: PersistedSourceAdapter,
-    source: SourceConfig,
-    cfg: AtlasConfig,
-) -> tuple[int, int]:
-    """Persist v2 extraction results to the Atlas SQLite store.
-
-    For every capability result:
-      - Serialise and upsert into v2_extraction_results.
-    Additionally:
-      - SCHEMA: upsert objects as assets in the assets table.
-      - LINEAGE: upsert edges in the edges table.
-
-    Returns:
-        Tuple of (asset_count, edge_count) written.
-    """
-    from alma_atlas_store.asset_repository import Asset, AssetRepository
-    from alma_atlas_store.db import Database
-    from alma_atlas_store.edge_repository import Edge, EdgeRepository  # Edge used for schema deps
-
-    asset_count = 0
-    edge_count = 0
-
-    if cfg.db_path is None:
-        raise ValueError("Atlas db_path is not configured")
-
-    with Database(cfg.db_path) as db:
-        # Raw serialised snapshots
-        for cap, result in results.items():
-            _upsert_extraction_result(db, persisted.key, cap, result)
-
-        # Derived: assets from SCHEMA
-        if AdapterCapability.SCHEMA in results:
-            from alma_atlas_store.schema_repository import ColumnInfo, SchemaRepository
-            from alma_atlas_store.schema_repository import SchemaSnapshot as StoreSnapshot
-
-            schema_result: SchemaSnapshotV2 = results[AdapterCapability.SCHEMA]
-            repo = AssetRepository(db)
-            schema_repo = SchemaRepository(db)
-            for obj in schema_result.objects:
-                asset_id = f"{source.id}::{obj.schema_name}.{obj.object_name}"
-                repo.upsert(
-                    Asset(
-                        id=asset_id,
-                        source=source.id,
-                        kind=obj.kind.value,
-                        name=f"{obj.schema_name}.{obj.object_name}",
-                    )
-                )
-                asset_count += 1
-
-                # Persist column-level schema snapshot for MCP tools and drift detection.
-                if obj.columns:
-                    store_snapshot = StoreSnapshot(
-                        asset_id=asset_id,
-                        columns=[
-                            ColumnInfo(
-                                name=c.name,
-                                type=getattr(c, "data_type", None) or getattr(c, "type", "unknown"),
-                                nullable=getattr(c, "nullable", True),
-                            )
-                            for c in obj.columns
-                        ],
-                    )
-                    schema_repo.upsert(store_snapshot)
-
-            # Schema-level object dependencies
-            if schema_result.dependencies:
-                edge_repo = EdgeRepository(db)
-                asset_id_map = {
-                    (obj.schema_name, obj.object_name): f"{source.id}::{obj.schema_name}.{obj.object_name}"
-                    for obj in schema_result.objects
-                }
-                for dep in schema_result.dependencies:
-                    upstream_id = asset_id_map.get((dep.target_schema, dep.target_object))
-                    downstream_id = asset_id_map.get((dep.source_schema, dep.source_object))
-                    if upstream_id and downstream_id:
-                        edge_repo.upsert(
-                            Edge(upstream_id=upstream_id, downstream_id=downstream_id, kind="depends_on")
-                        )
-                        edge_count += 1
-
-        # Derived: lineage edges — stored in v2_lineage_edges (no FK constraints)
-        if AdapterCapability.LINEAGE in results:
-            lineage_result: LineageSnapshot = results[AdapterCapability.LINEAGE]
-            captured_at = lineage_result.meta.captured_at.isoformat()
-            for edge in lineage_result.edges:
-                row_id = f"{persisted.key}:{edge.source_object}:{edge.target_object}:{edge.edge_kind.value}"
-                db.conn.execute(
-                    """
-                    INSERT INTO v2_lineage_edges
-                        (id, adapter_key, source_object, target_object, edge_kind, confidence, metadata, captured_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET
-                        confidence  = excluded.confidence,
-                        metadata    = excluded.metadata,
-                        captured_at = excluded.captured_at,
-                        stored_at   = CURRENT_TIMESTAMP
-                    """,
-                    (
-                        row_id,
-                        persisted.key,
-                        edge.source_object,
-                        edge.target_object,
-                        edge.edge_kind.value,
-                        edge.confidence,
-                        json.dumps(_serialise(edge.metadata)),
-                        captured_at,
-                    ),
-                )
-                edge_count += 1
-            db.conn.commit()
-
-    return asset_count, edge_count
+    return ScanResultV2(
+        source_id=result.source_id,
+        asset_count=result.asset_count,
+        edge_count=result.edge_count,
+        error=result.error,
+        warnings=list(result.warnings),
+    )
 
 
 def _upsert_extraction_result(
@@ -449,7 +241,8 @@ def _upsert_extraction_result(
     cap: AdapterCapability,
     result: Any,
 ) -> None:
-    """Serialise one extraction result and upsert into v2_extraction_results."""
+    """Serialise one extraction result and upsert into `v2_extraction_results`."""
+
     meta = result.meta
     row_id = f"{adapter_key}:{cap.value}:{meta.captured_at.isoformat()}"
     payload = json.dumps(_serialise(result))
@@ -480,11 +273,12 @@ def _upsert_extraction_result(
 
 def _serialise(obj: Any) -> Any:
     """Recursively convert dataclasses / enums / datetimes to JSON-safe types."""
+
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         return {k: _serialise(v) for k, v in dataclasses.asdict(obj).items()}
     if isinstance(obj, datetime):
         return obj.isoformat()
-    if hasattr(obj, "value"):  # StrEnum / Enum
+    if hasattr(obj, "value"):
         return obj.value
     if isinstance(obj, (list, tuple)):
         return [_serialise(i) for i in obj]

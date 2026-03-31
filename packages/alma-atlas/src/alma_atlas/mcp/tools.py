@@ -211,13 +211,11 @@ def register(server: Server, cfg: AtlasConfig) -> None:
 
 
 def _handle_search(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
-    from alma_atlas_store.asset_repository import AssetRepository
-    from alma_atlas_store.db import Database
+    from alma_atlas.graph_service import search_assets
 
     query = arguments["query"]
     limit = arguments.get("limit", 20)
-    with Database(cfg.db_path) as db:
-        results = AssetRepository(db).search(query)[:limit]
+    results = search_assets(cfg.db_path, query, limit=limit)
     if not results:
         return [TextContent(type="text", text=f"No assets found matching {query!r}.")]
     lines = [f"Found {len(results)} asset(s) matching {query!r}:\n"]
@@ -307,66 +305,43 @@ def _handle_get_annotations(cfg: AtlasConfig, arguments: dict[str, Any]) -> list
 
 
 def _handle_lineage(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
-    from alma_analysis.lineage import Edge, compute_lineage
-    from alma_atlas_store.db import Database
-    from alma_atlas_store.edge_repository import EdgeRepository
+    from alma_atlas.graph_service import get_lineage_summary
 
     asset_id = arguments["asset_id"]
     direction = arguments["direction"]
     depth = arguments.get("depth")
 
-    with Database(cfg.db_path) as db:
-        raw_edges = EdgeRepository(db).list_all()
+    summary = get_lineage_summary(cfg.db_path, asset_id, direction=direction, depth=depth)
 
-    edges = [Edge(upstream_id=e.upstream_id, downstream_id=e.downstream_id, kind=e.kind) for e in raw_edges]
-    graph = compute_lineage(edges)
-
-    if not graph.has_asset(asset_id):
+    if not summary.asset_exists:
         return [TextContent(type="text", text=f"Asset not found in lineage graph: {asset_id}")]
 
-    if direction == "upstream":
-        related = graph.upstream(asset_id, depth=depth)
-    else:
-        related = graph.downstream(asset_id, depth=depth)
-
-    if not related:
+    if not summary.related:
         return [TextContent(type="text", text=f"No {direction} assets found for {asset_id}.")]
 
-    lines = [f"{direction.capitalize()} lineage for {asset_id} ({len(related)} nodes):"]
-    for node in related:
+    lines = [f"{direction.capitalize()} lineage for {asset_id} ({len(summary.related)} nodes):"]
+    for node in summary.related:
         lines.append(f"  {node}")
     return [TextContent(type="text", text="\n".join(lines))]
 
 
 def _handle_status(cfg: AtlasConfig) -> list[TextContent]:
-    from alma_atlas_store.asset_repository import AssetRepository
-    from alma_atlas_store.db import Database
-    from alma_atlas_store.edge_repository import EdgeRepository
-    from alma_atlas_store.query_repository import QueryRepository
+    from alma_atlas.graph_service import get_graph_status
 
-    with Database(cfg.db_path) as db:
-        assets = AssetRepository(db).list_all()
-        edges = EdgeRepository(db).list_all()
-        queries = QueryRepository(db).list_all()
-
-    kind_counts: dict[str, int] = {}
-    source_counts: dict[str, int] = {}
-    for a in assets:
-        kind_counts[a.kind] = kind_counts.get(a.kind, 0) + 1
-        source_counts[a.source] = source_counts.get(a.source, 0) + 1
+    summary = get_graph_status(cfg.db_path)
 
     lines = [
-        f"Atlas graph: {len(assets)} assets, {len(edges)} edges, {len(queries)} query fingerprints",
+        f"Atlas graph: {summary.asset_count} assets, {summary.edge_count} edges, {summary.query_count} query fingerprints",
         "",
         "Assets by kind:",
     ]
-    for kind, count in sorted(kind_counts.items()):
+    for kind, count in sorted(summary.kind_counts.items()):
         lines.append(f"  {kind}: {count}")
 
-    if source_counts:
+    if summary.source_counts:
         lines.append("")
         lines.append("Assets by source:")
-        for source, count in sorted(source_counts.items()):
+        for source, count in sorted(summary.source_counts.items()):
             lines.append(f"  {source}: {count}")
 
     return [TextContent(type="text", text="\n".join(lines))]
@@ -571,21 +546,10 @@ def _handle_list_violations(cfg: AtlasConfig, arguments: dict[str, Any]) -> list
 
 
 async def _handle_team_sync(cfg: AtlasConfig) -> list[TextContent]:
-    cfg.load_team_config()
-    if not cfg.team_server_url or not cfg.team_api_key:
-        return [TextContent(type="text", text="Team sync not configured. Run `alma-atlas team init` first.")]
-    if not cfg.db_path or not cfg.db_path.exists():
-        return [TextContent(type="text", text="No Atlas database found. Run `alma-atlas scan` first.")]
+    from alma_atlas.graph_service import run_team_sync
 
-    from alma_atlas.sync.auth import TeamAuth
-    from alma_atlas.sync.client import SyncClient
-    from alma_atlas_store.db import Database
-
-    auth = TeamAuth(cfg.team_api_key)
     try:
-        async with SyncClient(cfg.team_server_url, auth, cfg.team_id or "default") as client:
-            with Database(cfg.db_path) as db:
-                response = await client.full_sync(db, cfg)
+        response = await run_team_sync(cfg)
         return [
             TextContent(
                 type="text",

@@ -9,7 +9,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from alma_atlas.config import AtlasConfig, PostScanHook, load_atlas_yml
-from alma_atlas.hooks import HookEvent, HookExecutor, HookResult, make_hook_event
+from alma_atlas.hooks import (
+    HookEvent,
+    HookExecutor,
+    HookResult,
+    make_drift_detected_event,
+    make_hook_event,
+    make_scan_result_event,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -61,6 +68,18 @@ def test_make_hook_event_stamps_timestamp() -> None:
     assert e.source_id == "my-source"
     assert e.data == {"error": "oops"}
     assert "T" in e.timestamp  # ISO 8601
+
+
+def test_make_scan_result_event_builds_scan_complete_payload() -> None:
+    event = make_scan_result_event(source_id="src", asset_count=5, edge_count=3)
+    assert event.event_type == "scan_complete"
+    assert event.data == {"asset_count": 5, "edge_count": 3}
+
+
+def test_make_drift_detected_event_builds_payload() -> None:
+    event = make_drift_detected_event(source_id="src", blocked=True, asset_count=2)
+    assert event.event_type == "drift_detected"
+    assert event.data == {"blocked": True, "asset_count": 2}
 
 
 # ---------------------------------------------------------------------------

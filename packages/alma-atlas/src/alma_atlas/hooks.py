@@ -56,6 +56,47 @@ def make_hook_event(event_type: str, source_id: str, **data: object) -> HookEven
     )
 
 
+def make_scan_result_event(
+    *,
+    source_id: str,
+    asset_count: int,
+    edge_count: int,
+    error: str | None = None,
+    warnings: list[str] | None = None,
+) -> HookEvent:
+    """Build the canonical hook event for one completed scan result."""
+
+    data: dict[str, object] = {
+        "asset_count": asset_count,
+        "edge_count": edge_count,
+    }
+    if error:
+        data["error"] = error
+    if warnings:
+        data["warnings"] = list(warnings)
+    return make_hook_event(
+        "scan_error" if error else "scan_complete",
+        source_id,
+        **data,
+    )
+
+
+def make_drift_detected_event(
+    *,
+    source_id: str,
+    blocked: bool,
+    asset_count: int,
+) -> HookEvent:
+    """Build the canonical hook event for drift detection."""
+
+    return make_hook_event(
+        "drift_detected",
+        source_id,
+        blocked=blocked,
+        asset_count=asset_count,
+    )
+
+
 class HookExecutor:
     """Runs configured hooks, with error isolation per hook."""
 

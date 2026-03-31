@@ -180,25 +180,19 @@ def scan(
     # Fire post-scan hooks for each source result.
     if cfg.hooks and all_result is not None:
         import asyncio as _asyncio
-        from datetime import UTC, datetime
 
-        from alma_atlas.hooks import HookEvent, HookExecutor
+        from alma_atlas.hooks import HookExecutor, make_scan_result_event
 
         executor = HookExecutor(cfg.hooks)
 
         async def _fire_all_hooks() -> None:
             for result in all_result.results:  # type: ignore[union-attr]
-                event_type = "scan_error" if result.error else "scan_complete"
-                data: dict = {"asset_count": result.asset_count, "edge_count": result.edge_count}
-                if result.error:
-                    data["error"] = result.error
-                if result.warnings:
-                    data["warnings"] = list(result.warnings)
-                event = HookEvent(
-                    event_type=event_type,
+                event = make_scan_result_event(
                     source_id=result.source_id,
-                    timestamp=datetime.now(UTC).isoformat(),
-                    data=data,
+                    asset_count=result.asset_count,
+                    edge_count=result.edge_count,
+                    error=result.error,
+                    warnings=result.warnings,
                 )
                 hook_results = await executor.fire(event)
                 for hr in hook_results:
@@ -213,21 +207,10 @@ def scan(
         if cfg.team_server_url and cfg.team_api_key and cfg.db_path is not None:
             import asyncio
 
-            from alma_atlas.sync.auth import TeamAuth
-            from alma_atlas.sync.client import SyncClient
-            from alma_atlas_store.db import Database
+            from alma_atlas.graph_service import run_team_sync
 
             try:
-                auth = TeamAuth(cfg.team_api_key)
-                server_url = cfg.team_server_url
-                db_path = cfg.db_path
-
-                async def _run_sync() -> None:
-                    async with SyncClient(server_url, auth, cfg.team_id or "default") as client:
-                        with Database(db_path) as db:
-                            await client.full_sync(db, cfg)
-
-                asyncio.run(_run_sync())
+                asyncio.run(run_team_sync(cfg))
                 if normalized_output_format != "json":
                     rprint("[dim]Team sync complete.[/dim]")
             except Exception as exc:

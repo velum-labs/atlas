@@ -76,6 +76,10 @@ class SourceAdapterKind(StrEnum):
     BIGQUERY = "bigquery"
     DBT = "dbt"
     SNOWFLAKE = "snowflake"
+    AIRFLOW = "airflow"
+    LOOKER = "looker"
+    FIVETRAN = "fivetran"
+    METABASE = "metabase"
 
 
 class SourceAdapterStatus(StrEnum):
@@ -326,7 +330,117 @@ class SnowflakeAdapterConfig:
         )
 
 
-type SourceAdapterConfig = PostgresAdapterConfig | BigQueryAdapterConfig | DbtAdapterConfig | SnowflakeAdapterConfig
+@dataclass(frozen=True)
+class AirflowAdapterConfig:
+    """Canonical persisted config for Airflow adapters."""
+
+    base_url: str
+    auth_token_secret: SourceAdapterSecret | None = None
+    username: str | None = None
+    password_secret: SourceAdapterSecret | None = None
+    timeout_seconds: int = 30
+
+    def __post_init__(self) -> None:
+        normalized_base_url = _normalize_required_string(self.base_url, field_name="base_url").rstrip("/")
+        if not normalized_base_url:
+            raise ValueError("base_url must be a non-empty string")
+        object.__setattr__(self, "base_url", normalized_base_url)
+        object.__setattr__(
+            self,
+            "username",
+            _normalize_optional_string(self.username, field_name="username"),
+        )
+        if self.timeout_seconds < 1:
+            raise ValueError("timeout_seconds must be >= 1")
+        if self.auth_token_secret is None and (
+            self.username is None or self.password_secret is None
+        ):
+            raise ValueError(
+                "airflow adapters require either auth_token_secret or both username and password_secret"
+            )
+
+
+@dataclass(frozen=True)
+class LookerAdapterConfig:
+    """Canonical persisted config for Looker adapters."""
+
+    instance_url: str
+    client_id: SourceAdapterSecret
+    client_secret: SourceAdapterSecret
+    port: int = 19999
+    timeout_seconds: int = 30
+
+    def __post_init__(self) -> None:
+        normalized_instance_url = _normalize_required_string(
+            self.instance_url,
+            field_name="instance_url",
+        ).rstrip("/")
+        if not normalized_instance_url:
+            raise ValueError("instance_url must be a non-empty string")
+        object.__setattr__(self, "instance_url", normalized_instance_url)
+        if self.port < 1 or self.port > 65_535:
+            raise ValueError("port must be between 1 and 65535")
+        if self.timeout_seconds < 1:
+            raise ValueError("timeout_seconds must be >= 1")
+
+
+@dataclass(frozen=True)
+class FivetranAdapterConfig:
+    """Canonical persisted config for Fivetran adapters."""
+
+    api_key: SourceAdapterSecret
+    api_secret: SourceAdapterSecret
+    api_base: str = "https://api.fivetran.com"
+    timeout_seconds: int = 30
+
+    def __post_init__(self) -> None:
+        normalized_api_base = _normalize_required_string(self.api_base, field_name="api_base").rstrip("/")
+        if not normalized_api_base:
+            raise ValueError("api_base must be a non-empty string")
+        object.__setattr__(self, "api_base", normalized_api_base)
+        if self.timeout_seconds < 1:
+            raise ValueError("timeout_seconds must be >= 1")
+
+
+@dataclass(frozen=True)
+class MetabaseAdapterConfig:
+    """Canonical persisted config for Metabase adapters."""
+
+    instance_url: str
+    api_key: SourceAdapterSecret | None = None
+    username: str | None = None
+    password: SourceAdapterSecret | None = None
+    timeout_seconds: int = 30
+
+    def __post_init__(self) -> None:
+        normalized_instance_url = _normalize_required_string(
+            self.instance_url,
+            field_name="instance_url",
+        ).rstrip("/")
+        if not normalized_instance_url:
+            raise ValueError("instance_url must be a non-empty string")
+        object.__setattr__(self, "instance_url", normalized_instance_url)
+        object.__setattr__(
+            self,
+            "username",
+            _normalize_optional_string(self.username, field_name="username"),
+        )
+        if self.timeout_seconds < 1:
+            raise ValueError("timeout_seconds must be >= 1")
+        if self.api_key is None and (self.username is None or self.password is None):
+            raise ValueError("metabase adapters require api_key or both username and password")
+
+
+type SourceAdapterConfig = (
+    PostgresAdapterConfig
+    | BigQueryAdapterConfig
+    | DbtAdapterConfig
+    | SnowflakeAdapterConfig
+    | AirflowAdapterConfig
+    | LookerAdapterConfig
+    | FivetranAdapterConfig
+    | MetabaseAdapterConfig
+)
 
 
 @dataclass(frozen=True)
@@ -364,6 +478,8 @@ def resolve_probe_target(adapter: PersistedSourceAdapter) -> str:
         return adapter.config.probe_target or "primary"
     if isinstance(adapter.config, BigQueryAdapterConfig):
         return adapter.config.probe_target or "metadata_only"
+    if isinstance(adapter.config, SnowflakeAdapterConfig):
+        return adapter.config.probe_target or "primary"
     return "primary"
 
 
@@ -391,6 +507,10 @@ def apply_probe_routing_override(
         raise ValueError("read_replica is only supported for postgres adapters")
     if isinstance(adapter.config, DbtAdapterConfig):
         raise ValueError("dbt adapters do not support probe routing overrides")
+    if not hasattr(adapter.config, "probe_target"):
+        if override.probe_target is not None:
+            raise ValueError(f"{adapter.kind.value} adapters do not support probe routing overrides")
+        return adapter
     updated_config = replace(
         adapter.config,
         probe_target=(override.probe_target if override.probe_target is not None else adapter.config.probe_target),

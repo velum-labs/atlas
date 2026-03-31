@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +24,14 @@ _KNOWN_ATLAS_YML_KEYS = frozenset({"version", "sources", "team", "hooks", "learn
 
 # Keys whose values must be redacted in __repr__ output.
 _SECRET_PARAM_KEYS = frozenset({"dsn", "password", "api_key", "api_secret", "client_secret", "auth_token"})
+
+SUPPORTED_LEARNING_PROVIDERS = frozenset({"acp", "mock"})
+DEFAULT_AGENT_PROVIDER = "mock"
+DEFAULT_AGENT_MODEL = "claude-opus-4-6"
+DEFAULT_EXPLORER_MODEL = "claude-haiku-4-5-20251001"
+DEFAULT_AGENT_API_KEY_ENV = "ANTHROPIC_API_KEY"
+DEFAULT_AGENT_TIMEOUT = 120
+DEFAULT_AGENT_MAX_TOKENS = 4096
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +46,16 @@ def default_config_dir() -> Path:
     if env:
         return Path(env)
     return Path.home() / ".alma"
+
+
+def _validate_learning_provider(provider: str, *, context: str) -> str:
+    if provider not in SUPPORTED_LEARNING_PROVIDERS:
+        raise ValueError(
+            f"{context}: unsupported learning provider {provider!r}. "
+            f"Supported providers: {sorted(SUPPORTED_LEARNING_PROVIDERS)}. "
+            "Use 'provider: acp' with an optional 'agent.command', or 'provider: mock'."
+        )
+    return provider
 
 
 @dataclass
@@ -55,15 +73,25 @@ class AgentProcessConfig:
 
 @dataclass
 class AgentConfig:
-    """Configuration for a single learning agent."""
+    """Configuration for a single learning agent.
 
-    provider: str = "mock"  # mock | acp
-    model: str = "claude-opus-4-6"
-    api_key_env: str = "ANTHROPIC_API_KEY"  # env var name containing the key
-    timeout: int = 120
-    max_tokens: int = 4096
-    # ACP agent subprocess config.  Set when provider == "acp".
+    Atlas only supports ``mock`` and ACP-backed agents at runtime.
+    ``model``, ``api_key_env``, ``timeout``, and ``max_tokens`` are preserved
+    as compatibility metadata for existing configs and tests; ACP execution is
+    controlled by ``agent`` / ``provider`` rather than these fields.
+    """
+
+    provider: str = DEFAULT_AGENT_PROVIDER  # mock | acp
+    model: str = DEFAULT_AGENT_MODEL
+    api_key_env: str = DEFAULT_AGENT_API_KEY_ENV
+    timeout: int = DEFAULT_AGENT_TIMEOUT
+    max_tokens: int = DEFAULT_AGENT_MAX_TOKENS
+    # ACP agent subprocess config. Set when provider == "acp".
     agent: AgentProcessConfig | None = None
+
+    def with_agent_process(self, agent: AgentProcessConfig) -> AgentConfig:
+        """Return a copy with a shared ACP agent subprocess config."""
+        return replace(self, agent=agent)
 
 
 @dataclass
@@ -79,28 +107,28 @@ class LearningConfig:
     ``annotator`` sub-sections each carry their own :class:`AgentConfig`.
     """
 
-    # Flat fields — preserved for backward compatibility.
-    provider: str = "mock"  # mock | acp
-    model: str = "claude-opus-4-6"
-    api_key_env: str = "ANTHROPIC_API_KEY"  # env var name containing the key
-    timeout: int = 120
-    max_tokens: int = 4096
-    # ACP agent subprocess config.  Set when provider == "acp" or via agent: key.
+    # Flat fields — preserved for backward compatibility with older atlas.yml.
+    provider: str = DEFAULT_AGENT_PROVIDER  # mock | acp
+    model: str = DEFAULT_AGENT_MODEL
+    api_key_env: str = DEFAULT_AGENT_API_KEY_ENV
+    timeout: int = DEFAULT_AGENT_TIMEOUT
+    max_tokens: int = DEFAULT_AGENT_MAX_TOKENS
+    # ACP agent subprocess config. Set when provider == "acp" or via agent: key.
     agent: AgentProcessConfig | None = None
 
     # Per-agent configs.  When the flat YAML format is used these are
     # populated from the flat fields by ``load_atlas_yml``.
     explorer: AgentConfig = field(
         default_factory=lambda: AgentConfig(
-            provider="mock",
-            model="claude-haiku-4-5-20251001",
+            provider=DEFAULT_AGENT_PROVIDER,
+            model=DEFAULT_EXPLORER_MODEL,
         )
     )
     pipeline_analyzer: AgentConfig = field(
-        default_factory=lambda: AgentConfig(provider="mock")
+        default_factory=lambda: AgentConfig(provider=DEFAULT_AGENT_PROVIDER)
     )
     annotator: AgentConfig = field(
-        default_factory=lambda: AgentConfig(provider="mock")
+        default_factory=lambda: AgentConfig(provider=DEFAULT_AGENT_PROVIDER)
     )
 
 
@@ -350,7 +378,6 @@ def load_atlas_yml(path: Path | str) -> AtlasConfig:
     if learning_raw:
         _per_agent_keys = frozenset({"explorer", "pipeline_analyzer", "annotator", "asset_enricher"})
         has_nested = bool(set(learning_raw) & _per_agent_keys)
-        _SUPPORTED_PROVIDERS = frozenset({"acp", "mock"})
 
         def _parse_agent_process_config(sub: dict) -> AgentProcessConfig | None:
             """Parse an optional ``agent:`` sub-key into an AgentProcessConfig."""
@@ -366,19 +393,16 @@ def load_atlas_yml(path: Path | str) -> AtlasConfig:
         if has_nested:
             # Nested per-agent format: each sub-key is an AgentConfig.
             def _parse_agent(sub: dict) -> AgentConfig:
-                provider = sub.get("provider", "mock")
-                if provider not in _SUPPORTED_PROVIDERS:
-                    raise ValueError(
-                        "atlas.yml: unsupported learning provider "
-                        f"{provider!r}. Supported providers: {sorted(_SUPPORTED_PROVIDERS)}. "
-                        "Use 'provider: acp' with an optional 'agent.command', or 'provider: mock'."
-                    )
+                provider = _validate_learning_provider(
+                    sub.get("provider", DEFAULT_AGENT_PROVIDER),
+                    context="atlas.yml",
+                )
                 return AgentConfig(
                     provider=provider,
-                    model=sub.get("model", "claude-opus-4-6"),
-                    api_key_env=sub.get("api_key_env", "ANTHROPIC_API_KEY"),
-                    timeout=int(sub.get("timeout", 120)),
-                    max_tokens=int(sub.get("max_tokens", 4096)),
+                    model=sub.get("model", DEFAULT_AGENT_MODEL),
+                    api_key_env=sub.get("api_key_env", DEFAULT_AGENT_API_KEY_ENV),
+                    timeout=int(sub.get("timeout", DEFAULT_AGENT_TIMEOUT)),
+                    max_tokens=int(sub.get("max_tokens", DEFAULT_AGENT_MAX_TOKENS)),
                     agent=_parse_agent_process_config(sub),
                 )
 
@@ -395,23 +419,11 @@ def load_atlas_yml(path: Path | str) -> AtlasConfig:
             # Propagate top-level agent config to sub-agents that lack their own.
             if top_agent is not None:
                 if explorer.agent is None:
-                    explorer = AgentConfig(
-                        provider=explorer.provider, model=explorer.model,
-                        api_key_env=explorer.api_key_env, timeout=explorer.timeout,
-                        max_tokens=explorer.max_tokens, agent=top_agent,
-                    )
+                    explorer = explorer.with_agent_process(top_agent)
                 if pipeline_analyzer.agent is None:
-                    pipeline_analyzer = AgentConfig(
-                        provider=pipeline_analyzer.provider, model=pipeline_analyzer.model,
-                        api_key_env=pipeline_analyzer.api_key_env, timeout=pipeline_analyzer.timeout,
-                        max_tokens=pipeline_analyzer.max_tokens, agent=top_agent,
-                    )
+                    pipeline_analyzer = pipeline_analyzer.with_agent_process(top_agent)
                 if annotator.agent is None:
-                    annotator = AgentConfig(
-                        provider=annotator.provider, model=annotator.model,
-                        api_key_env=annotator.api_key_env, timeout=annotator.timeout,
-                        max_tokens=annotator.max_tokens, agent=top_agent,
-                    )
+                    annotator = annotator.with_agent_process(top_agent)
 
             cfg.learning = LearningConfig(
                 agent=top_agent,
@@ -421,17 +433,14 @@ def load_atlas_yml(path: Path | str) -> AtlasConfig:
             )
         else:
             # Flat (legacy) format: apply the same values to all agents.
-            flat_provider = learning_raw.get("provider", "mock")
-            if flat_provider not in _SUPPORTED_PROVIDERS:
-                raise ValueError(
-                    "atlas.yml: unsupported learning.provider "
-                    f"{flat_provider!r}. Supported providers: {sorted(_SUPPORTED_PROVIDERS)}. "
-                    "Use 'learning.agent.command' for ACP-backed agents or 'provider: mock'."
-                )
-            flat_model = learning_raw.get("model", "claude-opus-4-6")
-            flat_api_key_env = learning_raw.get("api_key_env", "ANTHROPIC_API_KEY")
-            flat_timeout = int(learning_raw.get("timeout", 120))
-            flat_max_tokens = int(learning_raw.get("max_tokens", 4096))
+            flat_provider = _validate_learning_provider(
+                learning_raw.get("provider", DEFAULT_AGENT_PROVIDER),
+                context="atlas.yml",
+            )
+            flat_model = learning_raw.get("model", DEFAULT_AGENT_MODEL)
+            flat_api_key_env = learning_raw.get("api_key_env", DEFAULT_AGENT_API_KEY_ENV)
+            flat_timeout = int(learning_raw.get("timeout", DEFAULT_AGENT_TIMEOUT))
+            flat_max_tokens = int(learning_raw.get("max_tokens", DEFAULT_AGENT_MAX_TOKENS))
             flat_agent = _parse_agent_process_config(learning_raw)
 
             def _flat_agent() -> AgentConfig:

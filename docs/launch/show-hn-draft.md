@@ -1,5 +1,8 @@
 # Show HN: Alma Atlas — open-source data intelligence for AI coding tools
 
+> Historical launch draft only. This file is not the current product or runtime
+> source of truth; use the main README and current docs instead.
+
 ---
 
 **Title:** Show HN: Alma Atlas – open-source MCP server that gives AI agents live knowledge of your data stack

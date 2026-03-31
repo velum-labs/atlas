@@ -68,7 +68,9 @@ class Scope(BaseModel):
                 )
         # Check for collision with CTE name
         if alias in self.ctes:
-            raise ValueError(f"Alias '{alias}' conflicts with CTE name in scope")
+            existing_cte = self.ctes[alias]
+            if existing_cte.table_id != instance.table_id:
+                raise ValueError(f"Alias '{alias}' conflicts with CTE name in scope")
         self.relations[alias] = instance
 
     def add_cte(self, name: str, instance: RelationInstance) -> None:

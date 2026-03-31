@@ -50,6 +50,8 @@ def team_init(
 @app.command("sync")
 def team_sync() -> None:
     """Push local changes to the team server and pull team contracts."""
+    from alma_atlas.graph_service import run_team_sync
+
     cfg = get_config()
     cfg.load_team_config()
 
@@ -61,24 +63,9 @@ def team_sync() -> None:
         rprint("[yellow]No Atlas database found. Run [bold]alma-atlas scan[/bold] first.[/yellow]")
         raise typer.Exit(1)
 
-    from alma_atlas.sync.auth import TeamAuth
-    from alma_atlas.sync.client import SyncClient
-    from alma_atlas_store.db import Database
-
-    auth = TeamAuth(cfg.team_api_key)
-    server_url = cfg.team_server_url
-    db_path = cfg.db_path
-    assert server_url is not None
-    assert db_path is not None
-
     with console.status("[bold]Syncing with team server…"):
         try:
-            async def _run_sync():
-                async with SyncClient(server_url, auth, cfg.team_id or "default") as client:
-                    with Database(db_path) as db:
-                        return await client.full_sync(db, cfg)
-
-            response = asyncio.run(_run_sync())
+            response = asyncio.run(run_team_sync(cfg))
             rprint(
                 f"[green]Sync complete[/green] — "
                 f"{response.accepted_count} record(s) accepted, "

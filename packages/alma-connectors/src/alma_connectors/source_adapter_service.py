@@ -7,8 +7,12 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
+from alma_connectors.adapters.airflow import AirflowAdapter
 from alma_connectors.adapters.bigquery import BigQueryAdapter
 from alma_connectors.adapters.dbt import DbtAdapter
+from alma_connectors.adapters.fivetran import FivetranAdapter
+from alma_connectors.adapters.looker import LookerAdapter
+from alma_connectors.adapters.metabase import MetabaseAdapter
 from alma_connectors.adapters.postgres import (
     _DEFAULT_POSTGRES_EXCLUDE_SCHEMAS,
     _DEFAULT_POSTGRES_INCLUDE_SCHEMAS,
@@ -17,11 +21,15 @@ from alma_connectors.adapters.postgres import (
 from alma_connectors.adapters.snowflake import SnowflakeAdapter
 from alma_connectors.credentials import decrypt_credential, encrypt_credential
 from alma_connectors.source_adapter import (
+    AirflowAdapterConfig,
     BigQueryAdapterConfig,
     ConnectionTestResult,
     DbtAdapterConfig,
     ExternalSecretRef,
+    FivetranAdapterConfig,
+    LookerAdapterConfig,
     ManagedSecret,
+    MetabaseAdapterConfig,
     PersistedSourceAdapter,
     PostgresAdapterConfig,
     PostgresLogCaptureConfig,
@@ -37,6 +45,8 @@ from alma_connectors.source_adapter import (
     SourceAdapterStatus,
     TrafficObservationResult,
 )
+from alma_connectors.source_adapter_runtime import RuntimeSourceAdapter, instantiate_runtime_adapter
+from alma_connectors.source_adapter_v2 import AdapterCapability
 
 
 def _require_dict(value: object, *, field_name: str) -> dict[str, Any]:
@@ -66,34 +76,10 @@ class SourceAdapterService:
 
     def __init__(self, *, encryption_key: str) -> None:
         self._encryption_key = encryption_key
-        self._registry: dict[SourceAdapterKind, SourceAdapter] = {
-            SourceAdapterKind.POSTGRES: PostgresAdapter(
-                resolve_secret=self.resolve_secret,
-            ),
-            SourceAdapterKind.BIGQUERY: BigQueryAdapter(
-                resolve_secret=self.resolve_secret,
-            ),
-            SourceAdapterKind.SNOWFLAKE: SnowflakeAdapter(
-                resolve_secret=self.resolve_secret,
-            ),
-        }
 
-    def _get_adapter(self, adapter: PersistedSourceAdapter) -> SourceAdapter:
-        """Return the runtime adapter for a persisted adapter.
-
-        DbtAdapter is instantiated per-call from the persisted config because
-        its paths are stored in instance state (unlike stateless v1 adapters).
-        """
-        if adapter.kind == SourceAdapterKind.DBT:
-            if not isinstance(adapter.config, DbtAdapterConfig):
-                raise ValueError("dbt adapter requires DbtAdapterConfig")
-            return DbtAdapter(
-                manifest_path=adapter.config.manifest_path,
-                catalog_path=adapter.config.catalog_path,
-                run_results_path=adapter.config.run_results_path,
-                project_name=adapter.config.project_name,
-            )
-        return self._registry[adapter.kind]
+    def _get_adapter(self, adapter: PersistedSourceAdapter) -> RuntimeSourceAdapter:
+        """Return the runtime adapter for a persisted adapter."""
+        return instantiate_runtime_adapter(adapter, resolve_secret=self.resolve_secret)
 
     def encrypt_secret(self, secret: str) -> bytes:
         return encrypt_credential(secret, key=self._encryption_key)
@@ -111,6 +97,8 @@ class SourceAdapterService:
         if isinstance(secret, ManagedSecret):
             return self.decrypt_secret(secret.ciphertext)
         provider = secret.provider.lower()
+        if provider == "literal":
+            return secret.reference
         if provider in {"env", "environment"}:
             resolved = os.getenv(secret.reference)
             if resolved is None:
@@ -119,12 +107,45 @@ class SourceAdapterService:
         raise ValueError(f"external secret provider '{secret.provider}' is not supported for live resolution")
 
     def get_capabilities(self, adapter: PersistedSourceAdapter) -> SourceAdapterCapabilities:
-        return self._get_adapter(adapter).capabilities
+        runtime_adapter = self._get_adapter(adapter)
+        capabilities = getattr(runtime_adapter, "capabilities", None)
+        if capabilities is not None:
+            return capabilities
+
+        declared_capabilities = getattr(runtime_adapter, "declared_capabilities", frozenset())
+        can_introspect = bool(
+            declared_capabilities
+            & frozenset({AdapterCapability.DISCOVER, AdapterCapability.SCHEMA})
+        )
+        return SourceAdapterCapabilities(
+            can_test_connection=True,
+            can_introspect_schema=can_introspect,
+            can_observe_traffic=AdapterCapability.TRAFFIC in declared_capabilities,
+            can_execute_query=False,
+        )
 
     def get_setup_instructions(self, kind: SourceAdapterKind) -> SetupInstructions:
+        if kind == SourceAdapterKind.POSTGRES:
+            return PostgresAdapter(resolve_secret=self.resolve_secret).get_setup_instructions()
+        if kind == SourceAdapterKind.BIGQUERY:
+            return BigQueryAdapter(resolve_secret=self.resolve_secret).get_setup_instructions()
+        if kind == SourceAdapterKind.SNOWFLAKE:
+            return SnowflakeAdapter(resolve_secret=self.resolve_secret).get_setup_instructions()
         if kind == SourceAdapterKind.DBT:
-            return DbtAdapter(manifest_path="").get_setup_instructions()
-        return self._registry[kind].get_setup_instructions()
+            return DbtAdapter(manifest_path="placeholder/manifest.json").get_setup_instructions()
+        if kind == SourceAdapterKind.AIRFLOW:
+            return AirflowAdapter(base_url="https://airflow.example.com", auth_token="token").get_setup_instructions()
+        if kind == SourceAdapterKind.LOOKER:
+            return LookerAdapter(
+                instance_url="https://looker.example.com",
+                client_id="client-id",
+                client_secret="client-secret",
+            ).get_setup_instructions()
+        if kind == SourceAdapterKind.FIVETRAN:
+            return FivetranAdapter(api_key="api-key", api_secret="api-secret").get_setup_instructions()
+        if kind == SourceAdapterKind.METABASE:
+            return MetabaseAdapter(instance_url="https://metabase.example.com", api_key="api-key").get_setup_instructions()
+        raise ValueError(f"unsupported adapter kind for setup instructions: {kind}")
 
     def serialize_definition(
         self,
@@ -213,6 +234,67 @@ class SourceAdapterService:
                 "project_name": config.project_name,
             }
             secrets: dict[str, dict[str, Any]] = {}
+            return payload, secrets
+
+        if definition.kind == SourceAdapterKind.AIRFLOW:
+            config = definition.config
+            if not isinstance(config, AirflowAdapterConfig):
+                raise ValueError("airflow adapter definition requires airflow config")
+            payload = {
+                "base_url": config.base_url,
+                "username": config.username,
+                "timeout_seconds": config.timeout_seconds,
+            }
+            secrets: dict[str, dict[str, Any]] = {}
+            if config.auth_token_secret is not None:
+                secrets["auth_token_secret"] = self._serialize_secret(config.auth_token_secret)
+            if config.password_secret is not None:
+                secrets["password_secret"] = self._serialize_secret(config.password_secret)
+            return payload, secrets
+
+        if definition.kind == SourceAdapterKind.LOOKER:
+            config = definition.config
+            if not isinstance(config, LookerAdapterConfig):
+                raise ValueError("looker adapter definition requires looker config")
+            payload = {
+                "instance_url": config.instance_url,
+                "port": config.port,
+                "timeout_seconds": config.timeout_seconds,
+            }
+            secrets = {
+                "client_id": self._serialize_secret(config.client_id),
+                "client_secret": self._serialize_secret(config.client_secret),
+            }
+            return payload, secrets
+
+        if definition.kind == SourceAdapterKind.FIVETRAN:
+            config = definition.config
+            if not isinstance(config, FivetranAdapterConfig):
+                raise ValueError("fivetran adapter definition requires fivetran config")
+            payload = {
+                "api_base": config.api_base,
+                "timeout_seconds": config.timeout_seconds,
+            }
+            secrets = {
+                "api_key": self._serialize_secret(config.api_key),
+                "api_secret": self._serialize_secret(config.api_secret),
+            }
+            return payload, secrets
+
+        if definition.kind == SourceAdapterKind.METABASE:
+            config = definition.config
+            if not isinstance(config, MetabaseAdapterConfig):
+                raise ValueError("metabase adapter definition requires metabase config")
+            payload = {
+                "instance_url": config.instance_url,
+                "username": config.username,
+                "timeout_seconds": config.timeout_seconds,
+            }
+            secrets: dict[str, dict[str, Any]] = {}
+            if config.api_key is not None:
+                secrets["api_key"] = self._serialize_secret(config.api_key)
+            if config.password is not None:
+                secrets["password"] = self._serialize_secret(config.password)
             return payload, secrets
 
         raise ValueError(f"unsupported adapter kind for serialization: {definition.kind}")
@@ -329,6 +411,73 @@ class SourceAdapterService:
                 catalog_path=(str(config["catalog_path"]) if config.get("catalog_path") is not None else None),
                 run_results_path=(str(config["run_results_path"]) if config.get("run_results_path") is not None else None),
                 project_name=(str(config["project_name"]) if config.get("project_name") is not None else None),
+            )
+        elif kind == SourceAdapterKind.AIRFLOW:
+            auth_token_secret = secrets.get("auth_token_secret")
+            password_secret = secrets.get("password_secret")
+            adapter_config = AirflowAdapterConfig(
+                base_url=str(config.get("base_url", "")),
+                auth_token_secret=(
+                    self._secret_from_storage_payload(
+                        _require_dict(auth_token_secret or {}, field_name="auth_token_secret")
+                    )
+                    if auth_token_secret is not None
+                    else None
+                ),
+                username=(str(config["username"]) if config.get("username") is not None else None),
+                password_secret=(
+                    self._secret_from_storage_payload(
+                        _require_dict(password_secret or {}, field_name="password_secret")
+                    )
+                    if password_secret is not None
+                    else None
+                ),
+                timeout_seconds=int(config.get("timeout_seconds") or 30),
+            )
+        elif kind == SourceAdapterKind.LOOKER:
+            adapter_config = LookerAdapterConfig(
+                instance_url=str(config.get("instance_url", "")),
+                client_id=self._secret_from_storage_payload(
+                    _require_dict(secrets.get("client_id") or {}, field_name="client_id")
+                ),
+                client_secret=self._secret_from_storage_payload(
+                    _require_dict(secrets.get("client_secret") or {}, field_name="client_secret")
+                ),
+                port=int(config.get("port") or 19999),
+                timeout_seconds=int(config.get("timeout_seconds") or 30),
+            )
+        elif kind == SourceAdapterKind.FIVETRAN:
+            adapter_config = FivetranAdapterConfig(
+                api_key=self._secret_from_storage_payload(
+                    _require_dict(secrets.get("api_key") or {}, field_name="api_key")
+                ),
+                api_secret=self._secret_from_storage_payload(
+                    _require_dict(secrets.get("api_secret") or {}, field_name="api_secret")
+                ),
+                api_base=str(config.get("api_base") or "https://api.fivetran.com"),
+                timeout_seconds=int(config.get("timeout_seconds") or 30),
+            )
+        elif kind == SourceAdapterKind.METABASE:
+            api_key_secret = secrets.get("api_key")
+            password_secret = secrets.get("password")
+            adapter_config = MetabaseAdapterConfig(
+                instance_url=str(config.get("instance_url", "")),
+                api_key=(
+                    self._secret_from_storage_payload(
+                        _require_dict(api_key_secret or {}, field_name="api_key")
+                    )
+                    if api_key_secret is not None
+                    else None
+                ),
+                username=(str(config["username"]) if config.get("username") is not None else None),
+                password=(
+                    self._secret_from_storage_payload(
+                        _require_dict(password_secret or {}, field_name="password")
+                    )
+                    if password_secret is not None
+                    else None
+                ),
+                timeout_seconds=int(config.get("timeout_seconds") or 30),
             )
         else:
             raise ValueError(f"unsupported adapter kind for deserialization: {kind}")

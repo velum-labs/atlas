@@ -233,9 +233,13 @@ class TestJoinFlattening:
 
         result = normalizer.normalize(outer_join)
 
-        # Structure should be preserved but children normalized
-        assert isinstance(result, Join)
-        assert isinstance(result.left, Join) or isinstance(result.right, Join)
+        # Inner-join flattening preserves semantics by lifting ON predicates
+        # into a Selection over a left-deep join tree.
+        assert isinstance(result, Selection)
+        assert isinstance(result.input, Join)
+        assert isinstance(result.predicate, CompoundPredicate)
+        assert result.predicate.op == LogicalOp.AND
+        assert len(result.predicate.operands) == 2
 
     def test_do_not_flatten_outer_joins(self, normalizer: RANormalizer) -> None:
         """Test that outer joins are not reordered."""
@@ -279,6 +283,10 @@ class TestJoinOrderCanonicalization:
         )
 
         result = normalizer.normalize(join)
+
+        if isinstance(result, Selection):
+            assert isinstance(result.input, Join)
+            result = result.input
 
         assert isinstance(result, Join)
         # 'c' < 'o', so customers should be on left

@@ -1,3 +1,28 @@
 # alma-atlas
 
-Alma Atlas — open-source data stack discovery CLI + MCP server
+The `alma-atlas` package is the canonical runtime for Atlas.
+
+It owns:
+
+- CLI entrypoints under `src/alma_atlas/cli/`
+- the authoritative scan orchestration in `src/alma_atlas/pipeline/scan.py`
+- learning / enrichment orchestration in `src/alma_atlas/pipeline/learn.py`
+- MCP server and tools in `src/alma_atlas/mcp/`
+- team sync flows in `src/alma_atlas/sync/`
+- runtime configuration in `src/alma_atlas/config.py`
+
+## Runtime architecture
+
+The current runtime model is:
+
+- source registration rules and defaults live in `src/alma_atlas/source_specs.py`
+- source-to-runtime adapter construction lives in `src/alma_atlas/source_runtime.py`
+- graph read/query helpers shared by CLI and MCP live in `src/alma_atlas/graph_service.py`
+- `src/alma_atlas/pipeline/scan.py` remains the single authoritative scan spine
+- `src/alma_atlas/pipeline/scanner_v2.py` is a compatibility facade plus capability-planning helpers
+
+## Notes
+
+- Learning is ACP-first: real runs use `provider: acp` and `learning.agent.command`
+- `sources.json` is the persisted registry for `alma-atlas connect`
+- `atlas.yml` and `--connections` can override runtime sources without mutating persisted state

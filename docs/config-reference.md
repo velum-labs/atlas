@@ -20,7 +20,9 @@ export ALMA_CONFIG_DIR=/etc/alma
 
 ## `sources.json`
 
-`sources.json` is the canonical on-disk source registry. Each entry is:
+`sources.json` is the canonical persisted source registry for `alma-atlas connect`.
+Runtime scans can also supply sources through `atlas.yml` or `--connections`
+without mutating `sources.json`. Each persisted entry is:
 
 ```json
 {
@@ -175,7 +177,8 @@ Supported params:
 
 ## `atlas.yml`
 
-`atlas.yml` is the runtime config file used by `--config-file` and `get_config()` autodiscovery.
+`atlas.yml` is the runtime config file used by `--config-file` and `get_config()`
+autodiscovery. It can define runtime-only sources, hooks, and learning settings.
 
 Supported top-level keys:
 
@@ -189,6 +192,11 @@ Supported top-level keys:
 ### Learning
 
 ACP is the only supported non-mock learning provider.
+
+`agent.command` is the authoritative execution setting for real learning runs.
+`model`, `api_key_env`, `timeout`, and `max_tokens` are retained only for
+backward-compatible config parsing and tests; the ACP runtime does not use them
+to choose or authenticate the underlying model process.
 
 Example:
 
@@ -210,6 +218,16 @@ learning:
 ```
 
 `mock` remains available for tests and no-op local flows.
+
+Legacy flat format is still accepted:
+
+```yaml
+version: 1
+learning:
+  provider: acp
+  agent:
+    command: claude-agent-acp
+```
 
 ## Asset IDs
 

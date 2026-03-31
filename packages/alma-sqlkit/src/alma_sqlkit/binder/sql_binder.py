@@ -41,7 +41,7 @@ from alma_algebrakit.naming import (
     generate_cte_id,
     generate_subquery_id,
 )
-from alma_algebrakit.schema import Catalog, DataType, SQLDataType
+from alma_algebrakit.schema import Catalog, ColumnSchema, DataType, SQLDataType, TableSchema
 from alma_algebrakit.scope import (
     AmbiguousColumnError,
     RelationInstance,
@@ -142,10 +142,29 @@ class SQLBinder:
 
         return self._bind_select(parsed)
 
-    def _bind_select(self, select: exp.Select) -> BoundQuery:
+    def _build_table_schema(
+        self,
+        *,
+        table_name: str,
+        table_id: str,
+        bound_query: BoundQuery,
+    ) -> TableSchema:
+        columns: list[ColumnSchema] = []
+        for index, (column_name, data_type) in enumerate(bound_query.output_schema()):
+            safe_column_name = column_name or f"col_{index + 1}"
+            columns.append(
+                ColumnSchema(
+                    name=safe_column_name,
+                    column_id=f"{table_id}.{safe_column_name}",
+                    data_type=data_type,
+                )
+            )
+        return TableSchema(name=table_name, table_id=table_id, columns=columns)
+
+    def _bind_select(self, select: exp.Select, scope: Scope | None = None) -> BoundQuery:
         """Bind a SELECT statement."""
         # Create new scope using alma_algebrakit's Scope
-        scope = Scope()
+        scope = scope or Scope()
         self._current_scope = scope
 
         # Process CTEs first
@@ -236,13 +255,22 @@ class SQLBinder:
             cte_query = cte.this
 
             if isinstance(cte_query, exp.Select):
-                # Recursively bind CTE query
-                self._bind_select(cte_query)
+                # Recursively bind the CTE query in a child scope so it can
+                # see earlier CTEs but still produces its own derived schema.
+                cte_scope = Scope(parent=scope)
+                bound_cte = self._bind_select(cte_query, cte_scope)
+                cte_table_id = generate_cte_id(cte_name)
+                cte_schema = self._build_table_schema(
+                    table_name=cte_name,
+                    table_id=cte_table_id,
+                    bound_query=bound_cte,
+                )
 
                 # Create RelationInstance for CTE
                 cte_instance = RelationInstance(
-                    table_id=generate_cte_id(cte_name),
+                    table_id=cte_table_id,
                     alias=cte_name,
+                    schema=cte_schema,
                     is_cte=True,
                 )
 
@@ -264,6 +292,18 @@ class SQLBinder:
             table_name = table_expr.name
             alias = table_expr.alias if table_expr.alias else table_name
 
+            cte_instance = scope.get_relation(table_name)
+            if cte_instance is not None and cte_instance.is_cte:
+                scope.add_relation(
+                    RelationInstance(
+                        table_id=cte_instance.table_id,
+                        alias=alias,
+                        schema=cte_instance.schema,
+                        is_cte=True,
+                    )
+                )
+                return
+
             # Look up in catalog
             table_schema = self.catalog.get_table(table_name)
 
@@ -283,13 +323,20 @@ class SQLBinder:
 
             if isinstance(inner_select, exp.Select):
                 # Create child scope for subquery
-                scope.create_child_scope()
-                self._bind_select(inner_select)
+                child_scope = scope.create_child_scope()
+                bound_subquery = self._bind_select(inner_select, child_scope)
+                subquery_table_id = generate_subquery_id(alias)
+                subquery_schema = self._build_table_schema(
+                    table_name=alias,
+                    table_id=subquery_table_id,
+                    bound_query=bound_subquery,
+                )
 
                 # Create RelationInstance for subquery
                 instance = RelationInstance(
-                    table_id=generate_subquery_id(alias),
+                    table_id=subquery_table_id,
                     alias=alias,
+                    schema=subquery_schema,
                     is_subquery=True,
                 )
 

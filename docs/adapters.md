@@ -13,7 +13,7 @@ Atlas scans all supported source kinds through the same canonical runtime, but e
 | Airflow | Yes | Yes | Yes | Yes | Yes |
 | Looker | Yes | Yes | No | Yes | No |
 | Fivetran | Yes | Yes | No | Yes | Yes |
-| Metabase | Yes | Yes | Yes | Limited | No |
+| Metabase | Yes | Yes | Yes | No | No |
 
 ## BigQuery
 
@@ -119,5 +119,7 @@ Atlas projects connected databases/tables plus query activity. Lineage is curren
 ## Notes
 
 - Asset IDs always use `source_id::{object_ref}`.
+- All connectors now flow through the same canonical persisted adapter model and runtime adapter factory as the core warehouse adapters.
 - Community connectors no longer rely on a separate v1 scan path; they are scanned through the same capability-probed runtime as the core warehouse adapters.
-- If a source param is not documented here, Atlas now rejects it instead of silently ignoring it.
+- If a source param is not documented here, Atlas rejects it instead of silently ignoring it.
+- `sources.json` is the persisted registry for `alma-atlas connect`; `atlas.yml` and `--connections` can override runtime sources without changing persisted state.

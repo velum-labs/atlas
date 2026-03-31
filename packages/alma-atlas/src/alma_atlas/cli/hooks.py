@@ -70,7 +70,7 @@ def test_hook(
     ] = None,
 ) -> None:
     """Fire a test event to verify hook connectivity."""
-    from alma_atlas.hooks import HookEvent, HookExecutor
+    from alma_atlas.hooks import HookExecutor, make_scan_result_event
 
     cfg = _load_hooks_cfg(config_file)
 
@@ -85,13 +85,11 @@ def test_hook(
             rprint(f"[red]Hook not found:[/red] {hook_name!r}")
             raise typer.Exit(1)
 
-    from datetime import UTC, datetime
-
-    event = HookEvent(
-        event_type="scan_complete",
+    event = make_scan_result_event(
         source_id="test",
-        timestamp=datetime.now(UTC).isoformat(),
-        data={"test": True, "asset_count": 0, "edge_count": 0},
+        asset_count=0,
+        edge_count=0,
+        warnings=["test"],
     )
 
     # Temporarily override events so all hooks fire on scan_complete

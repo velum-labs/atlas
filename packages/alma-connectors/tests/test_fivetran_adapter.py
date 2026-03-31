@@ -15,6 +15,7 @@ from alma_connectors import (
     SourceAdapterStatus,
 )
 from alma_connectors.adapters.fivetran import FivetranAdapter
+from alma_connectors.source_adapter import FivetranAdapterConfig
 from alma_connectors.source_adapter_v2 import AdapterCapability, LineageEdgeKind
 
 # ---------------------------------------------------------------------------
@@ -29,10 +30,13 @@ def _make_persisted() -> PersistedSourceAdapter:
         id=_ADAPTER_ID,
         key="fivetran-prod",
         display_name="Fivetran Prod",
-        kind=SourceAdapterKind.POSTGRES,  # v1 kind used as placeholder
+        kind=SourceAdapterKind.FIVETRAN,
         target_id="fivetran-prod",
         status=SourceAdapterStatus.READY,
-        config=ExternalSecretRef(provider="env", reference="UNUSED"),
+        config=FivetranAdapterConfig(
+            api_key=ExternalSecretRef(provider="env", reference="FIVETRAN_API_KEY"),
+            api_secret=ExternalSecretRef(provider="env", reference="FIVETRAN_API_SECRET"),
+        ),
     )
 
 

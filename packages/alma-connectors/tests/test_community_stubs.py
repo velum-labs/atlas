@@ -20,7 +20,7 @@ from alma_connectors.adapters.airflow import AirflowAdapter
 from alma_connectors.adapters.looker import LookerAdapter
 from alma_connectors.adapters.metabase import MetabaseAdapter
 from alma_connectors.source_adapter import (
-    BigQueryAdapterConfig,
+    AirflowAdapterConfig,
     ExternalSecretRef,
     PersistedSourceAdapter,
     SourceAdapterKind,
@@ -41,11 +41,11 @@ def _fake_persisted(key: str = "test-adapter") -> PersistedSourceAdapter:
         id=str(uuid4()),
         key=key,
         display_name="Test Adapter",
-        kind=SourceAdapterKind.DBT,  # stand-in — stubs don't inspect kind
+        kind=SourceAdapterKind.AIRFLOW,
         target_id="target-stub",
-        config=BigQueryAdapterConfig(
-            service_account_secret=_FAKE_SECRET,
-            project_id="fake-project",
+        config=AirflowAdapterConfig(
+            base_url="https://airflow.example.com",
+            auth_token_secret=ExternalSecretRef(provider="literal", reference="tok-abc"),
         ),
         status=SourceAdapterStatus.READY,
     )

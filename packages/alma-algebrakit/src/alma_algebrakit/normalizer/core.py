@@ -383,26 +383,31 @@ class RANormalizer:
         # Relation or other base case
         return expr
 
-    def _collect_inner_join_leaves(self, expr: RAExpression) -> list[RAExpression]:
-        """Collect leaf nodes from a nested inner-join tree.
+    def _collect_inner_join_parts(
+        self,
+        expr: RAExpression,
+    ) -> tuple[list[RAExpression], list[Predicate]]:
+        """Collect leaves and ON predicates from a nested inner-join tree."""
 
-        Recursively descends through INNER JOIN nodes, collecting leaves so that
-        a right-deep (or arbitrarily nested) tree can be rebuilt as left-deep.
-        """
         if isinstance(expr, Join) and expr.join_type == JoinType.INNER:
-            return self._collect_inner_join_leaves(expr.left) + self._collect_inner_join_leaves(
-                expr.right
-            )
-        return [self._flatten_inner_joins(expr)]
+            left_leaves, left_conditions = self._collect_inner_join_parts(expr.left)
+            right_leaves, right_conditions = self._collect_inner_join_parts(expr.right)
+            conditions = [*left_conditions, *right_conditions]
+            if expr.condition is not None:
+                conditions.append(expr.condition)
+            return left_leaves + right_leaves, conditions
+        return [self._flatten_inner_joins(expr)], []
 
     def _flatten_inner_joins(self, expr: RAExpression) -> RAExpression:
         """Flatten nested inner joins into a left-deep join tree.
 
         Collects all leaf relations from a nested inner-join tree and rebuilds
-        them as a left-associative (left-deep) sequence of inner joins.  The
-        ON conditions of the original tree are dropped because each individual
-        ON clause only makes sense in the context of its original subtree; the
-        parent normalizer will re-push selection predicates after flattening.
+        them as a left-associative (left-deep) sequence of inner joins.
+
+        For inner joins, `A JOIN B ON c1 JOIN C ON c2` is equivalent to
+        `SELECT ... FROM A JOIN B JOIN C WHERE c1 AND c2`, so the flattened
+        form preserves semantics by lifting all ON predicates into a single
+        Selection above the rebuilt join tree.
 
         Note: This is only safe for inner joins. Outer joins cannot be reordered.
         """
@@ -419,7 +424,7 @@ class RANormalizer:
                 )
 
             # Collect all leaf nodes and rebuild as left-deep
-            leaves = self._collect_inner_join_leaves(expr)
+            leaves, conditions = self._collect_inner_join_parts(expr)
             result: RAExpression = leaves[0]
             for leaf in leaves[1:]:
                 result = Join(
@@ -428,7 +433,16 @@ class RANormalizer:
                     join_type=JoinType.INNER,
                     condition=None,
                 )
-            return result
+            if not conditions:
+                return result
+            if len(conditions) == 1:
+                combined_predicate = conditions[0]
+            else:
+                combined_predicate = CompoundPredicate(
+                    op=LogicalOp.AND,
+                    operands=conditions,
+                )
+            return Selection(predicate=combined_predicate, input=result)
 
         if isinstance(expr, Selection):
             return Selection(

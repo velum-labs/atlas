@@ -1,5 +1,8 @@
 # Why AI writes bad SQL — and how to fix it with a data intelligence layer
 
+> Historical launch draft only. This file is not the current product or runtime
+> source of truth; use the main README and current docs instead.
+
 ---
 
 ## The problem

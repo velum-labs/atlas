@@ -513,7 +513,6 @@ class SQLEmitter:
         is_recursive = any(getattr(cte_def, "recursive", False) for cte_def in with_expr.ctes)
 
         # Wrap main query with WITH clause
-        # Note: sqlglot uses 'with_' (with underscore) because 'with' is a Python keyword
         if isinstance(main_ast, exp.Select):
             with_clause = exp.With(expressions=cte_exprs, recursive=is_recursive)
             main_ast.set("with_", with_clause)

@@ -33,16 +33,14 @@ def search(
         raise typer.Exit(1)
 
     from alma_atlas.config import get_config
-    from alma_atlas_store.asset_repository import AssetRepository
-    from alma_atlas_store.db import Database
+    from alma_atlas.graph_service import search_assets
 
     cfg = get_config()
     if not cfg.db_path or not cfg.db_path.exists():
         rprint("[yellow]No Atlas database found. Run [bold]alma-atlas scan[/bold] first.[/yellow]")
         return
 
-    with Database(cfg.db_path) as db:
-        results = AssetRepository(db).search(query)[:limit]
+    results = search_assets(cfg.db_path, query, limit=limit)
 
     if not results:
         rprint(f"[dim]No assets found matching [bold]{query!r}[/bold][/dim]")

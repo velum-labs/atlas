@@ -16,6 +16,7 @@ from alma_connectors.source_adapter import (
     PersistedSourceAdapter,
     QueryResult,
     SetupInstructions,
+    SourceAdapterKind as SourceAdapterKindV2,
 )
 
 __all__ = [
@@ -98,21 +99,6 @@ class ExtractionScope(StrEnum):
     DATABASE = "database"
     SCHEMA = "schema"
     OBJECT = "object"
-
-
-class SourceAdapterKindV2(StrEnum):
-    """All supported adapter kinds, including v2 additions."""
-
-    # Carried over from v1
-    POSTGRES = "postgres"
-    BIGQUERY = "bigquery"
-    DBT = "dbt"
-    SNOWFLAKE = "snowflake"
-    # v2 additions
-    AIRFLOW = "airflow"
-    LOOKER = "looker"
-    FIVETRAN = "fivetran"
-    METABASE = "metabase"
 
 
 # ---------------------------------------------------------------------------

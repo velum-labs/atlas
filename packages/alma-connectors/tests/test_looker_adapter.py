@@ -10,7 +10,8 @@ import pytest
 
 from alma_connectors.adapters.looker import LookerAdapter
 from alma_connectors.source_adapter import (
-    DbtAdapterConfig,
+    ExternalSecretRef,
+    LookerAdapterConfig,
     PersistedSourceAdapter,
     SourceAdapterKind,
     SourceAdapterStatus,
@@ -35,10 +36,14 @@ def _make_persisted() -> PersistedSourceAdapter:
         id=_ADAPTER_ID,
         key="looker-prod",
         display_name="Looker Prod",
-        kind=SourceAdapterKind.DBT,  # stand-in; LookerAdapter never inspects v1 kind
+        kind=SourceAdapterKind.LOOKER,
         target_id="looker-prod",
         status=SourceAdapterStatus.READY,
-        config=DbtAdapterConfig(manifest_path="/tmp/manifest.json"),
+        config=LookerAdapterConfig(
+            instance_url="https://mycompany.looker.com",
+            client_id=ExternalSecretRef(provider="literal", reference="cid"),
+            client_secret=ExternalSecretRef(provider="literal", reference="csecret"),
+        ),
     )
 
 

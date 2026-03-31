@@ -1,7 +1,11 @@
 """Shared source adapter helpers for Alma Atlas."""
 
+from alma_connectors.adapters.airflow import AirflowAdapter
 from alma_connectors.adapters.bigquery import BigQueryAdapter
 from alma_connectors.adapters.dbt import DbtAdapter
+from alma_connectors.adapters.fivetran import FivetranAdapter
+from alma_connectors.adapters.looker import LookerAdapter
+from alma_connectors.adapters.metabase import MetabaseAdapter
 from alma_connectors.adapters.postgres import PostgresAdapter
 from alma_connectors.adapters.snowflake import SnowflakeAdapter
 from alma_connectors.credentials import decrypt_credential, encrypt_credential
@@ -54,10 +58,14 @@ from alma_connectors.edge_model import (
     type_warning_to_json,
 )
 from alma_connectors.source_adapter import (
+    AirflowAdapterConfig,
     BigQueryAdapterConfig,
     ConnectionTestResult,
     ExternalSecretRef,
+    FivetranAdapterConfig,
+    LookerAdapterConfig,
     ManagedSecret,
+    MetabaseAdapterConfig,
     ObservedQueryEvent,
     PersistedSourceAdapter,
     PostgresAdapterConfig,
@@ -81,6 +89,10 @@ from alma_connectors.source_adapter import (
     apply_probe_routing_override,
     normalize_source_adapter_key,
     resolve_probe_target,
+)
+from alma_connectors.source_adapter_runtime import (
+    RuntimeSourceAdapter,
+    instantiate_runtime_adapter,
 )
 from alma_connectors.source_adapter_service import SourceAdapterService
 from alma_connectors.source_adapter_v2 import (
@@ -113,9 +125,17 @@ from alma_connectors.source_adapter_v2 import (
 
 __all__ = [
     # v1 adapters and types
+    "AirflowAdapter",
+    "AirflowAdapterConfig",
     "BigQueryAdapter",
     "BigQueryAdapterConfig",
     "DbtAdapter",
+    "FivetranAdapter",
+    "FivetranAdapterConfig",
+    "LookerAdapter",
+    "LookerAdapterConfig",
+    "MetabaseAdapter",
+    "MetabaseAdapterConfig",
     "PostgresAdapter",
     "SnowflakeAdapter",
     "SnowflakeAdapterConfig",
@@ -155,6 +175,7 @@ __all__ = [
     "SourceAdapterProbeRoutingOverride",
     "SourceAdapterStatus",
     "SourceAdapterService",
+    "RuntimeSourceAdapter",
     "SourceColumnSchema",
     "SourceObjectDependency",
     "SourceTableSchema",
@@ -187,6 +208,7 @@ __all__ = [
     "probe_state_from_row",
     "probe_state_to_row_payload",
     "resolve_probe_target",
+    "instantiate_runtime_adapter",
     "transport_group_from_row",
     "transport_group_to_row_payload",
     "type_mapping_from_json",

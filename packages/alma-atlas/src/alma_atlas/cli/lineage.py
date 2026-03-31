@@ -38,35 +38,24 @@ def downstream(
 
 
 def _show_lineage(asset_id: str, direction: str, depth: int | None) -> None:
-    from alma_analysis.lineage import Edge, compute_lineage
     from alma_atlas.config import get_config
-    from alma_atlas_store.db import Database
-    from alma_atlas_store.edge_repository import EdgeRepository
+    from alma_atlas.graph_service import get_lineage_summary
 
     cfg = get_config()
     if not cfg.db_path or not cfg.db_path.exists():
         rprint("[yellow]No Atlas database found. Run [bold]alma-atlas scan[/bold] first.[/yellow]")
         return
 
-    with Database(cfg.db_path) as db:
-        raw_edges = EdgeRepository(db).list_all()
+    summary = get_lineage_summary(cfg.db_path, asset_id, direction=direction, depth=depth)
 
-    edges = [Edge(upstream_id=e.upstream_id, downstream_id=e.downstream_id, kind=e.kind) for e in raw_edges]
-    graph = compute_lineage(edges)
-
-    if not graph.has_asset(asset_id):
+    if not summary.asset_exists:
         rprint(f"[yellow]Asset not found in lineage graph:[/yellow] [bold]{asset_id}[/bold]")
         return
 
-    if direction == "upstream":
-        related = graph.upstream(asset_id, depth=depth)
-    else:
-        related = graph.downstream(asset_id, depth=depth)
-
     tree = Tree(f"[bold cyan]{asset_id}[/bold cyan]")
-    for node in related:
+    for node in summary.related:
         tree.add(f"[dim]{node}[/dim]")
 
     direction_label = "Upstream" if direction == "upstream" else "Downstream"
-    rprint(f"[bold]{direction_label} lineage[/bold] ({len(related)} nodes):")
+    rprint(f"[bold]{direction_label} lineage[/bold] ({len(summary.related)} nodes):")
     console.print(tree)

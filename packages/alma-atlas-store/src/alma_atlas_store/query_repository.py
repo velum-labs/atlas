@@ -4,22 +4,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
 
+from alma_ports.query import QueryObservation
 from alma_atlas_store.db import Database
-
-
-@dataclass
-class QueryObservation:
-    """A deduplicated SQL query observation."""
-
-    fingerprint: str
-    sql_text: str
-    tables: list[str]
-    source: str
-    first_seen: str | None = None
-    last_seen: str | None = None
-    execution_count: int = 1
 
 
 class QueryRepository:

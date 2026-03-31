@@ -16,7 +16,7 @@ from alma_connectors import (
     SourceAdapterStatus,
 )
 from alma_connectors.adapters.airflow import AirflowAdapter
-from alma_connectors.source_adapter import BigQueryAdapterConfig
+from alma_connectors.source_adapter import AirflowAdapterConfig
 from alma_connectors.source_adapter_v2 import (
     AdapterCapability,
     LineageEdgeKind,
@@ -36,12 +36,12 @@ def _make_adapter() -> PersistedSourceAdapter:
         id=_ADAPTER_ID,
         key="airflow-prod",
         display_name="Airflow Prod",
-        kind=SourceAdapterKind.BIGQUERY,  # v1 kind — only adapter.key is used
+        kind=SourceAdapterKind.AIRFLOW,
         target_id="airflow-prod",
         status=SourceAdapterStatus.READY,
-        config=BigQueryAdapterConfig(
-            service_account_secret=ExternalSecretRef(provider="env", reference="BQ_SA"),
-            project_id="unused",
+        config=AirflowAdapterConfig(
+            base_url=_BASE_URL,
+            auth_token_secret=ExternalSecretRef(provider="env", reference="AIRFLOW_AUTH_TOKEN"),
         ),
     )
 

@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Annotated
-from urllib.parse import urlparse
 
 import typer
 from rich import print as rprint
@@ -22,15 +21,29 @@ from rich.console import Console
 from rich.table import Table
 
 from alma_atlas.config import SourceConfig, get_config
+from alma_atlas.source_specs import (
+    DEFAULT_AIRFLOW_AUTH_TOKEN_ENV,
+    DEFAULT_BIGQUERY_LOCATION,
+    DEFAULT_FIVETRAN_API_KEY_ENV,
+    DEFAULT_FIVETRAN_API_SECRET_ENV,
+    DEFAULT_LOOKER_CLIENT_ID_ENV,
+    DEFAULT_LOOKER_CLIENT_SECRET_ENV,
+    DEFAULT_LOOKER_PORT,
+    DEFAULT_POSTGRES_SCHEMA,
+    DEFAULT_SNOWFLAKE_ACCOUNT_SECRET_ENV,
+    make_airflow_source,
+    make_bigquery_source,
+    make_dbt_source,
+    make_fivetran_source,
+    make_looker_source,
+    make_metabase_source,
+    make_postgres_source,
+    make_snowflake_source,
+    resolve_dbt_auxiliary_paths,
+)
 
 app = typer.Typer(help="Register and manage data source connections.")
 console = Console()
-
-
-def _slug_from_url(url: str) -> str:
-    parsed = urlparse(url)
-    host = parsed.hostname or url
-    return host.replace(".", "-")
 
 
 def _read_dbt_project_name(manifest_path: str) -> str | None:
@@ -54,23 +67,23 @@ def connect_bigquery(
         str | None,
         typer.Option("--service-account-env", help="Env var containing the raw service account JSON payload."),
     ] = None,
-    location: Annotated[str, typer.Option("--location", help="BigQuery location / region.")] = "us",
+    location: Annotated[
+        str,
+        typer.Option("--location", help="BigQuery location / region."),
+    ] = DEFAULT_BIGQUERY_LOCATION,
 ) -> None:
     """Register a Google BigQuery data source."""
-    if credentials and service_account_env:
-        rprint("[red]Error:[/red] Use either --credentials or --service-account-env, not both.")
-        raise typer.Exit(1)
     cfg = get_config()
-    params: dict[str, str] = {"project_id": project, "location": location}
-    if credentials:
-        params["credentials"] = credentials
-    if service_account_env:
-        params["service_account_env"] = service_account_env
-    source = SourceConfig(
-        id=f"bigquery:{project}",
-        kind="bigquery",
-        params=params,
-    )
+    try:
+        source = make_bigquery_source(
+            project=project,
+            credentials=credentials,
+            service_account_env=service_account_env,
+            location=location,
+        )
+    except ValueError as exc:
+        rprint(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1) from exc
     cfg.add_source(source)
     rprint(f"[green]Connected:[/green] BigQuery project [bold]{project}[/bold]")
 
@@ -78,19 +91,13 @@ def connect_bigquery(
 @app.command("postgres")
 def connect_postgres(
     dsn: Annotated[str, typer.Option("--dsn", help="PostgreSQL connection string.")],
-    schema: Annotated[str, typer.Option("--schema", help="Schema to scan.")] = "public",
+    schema: Annotated[str, typer.Option("--schema", help="Schema to scan.")] = DEFAULT_POSTGRES_SCHEMA,
 ) -> None:
     """Register a PostgreSQL data source."""
     cfg = get_config()
-    db_name = dsn.rsplit("/", 1)[-1].split("?")[0]
-    # Include schema in ID to allow multiple schemas from same database
-    source_id = f"postgres:{db_name}" if schema == "public" else f"postgres:{db_name}:{schema}"
-    source = SourceConfig(
-        id=source_id,
-        kind="postgres",
-        params={"dsn": dsn, "include_schemas": [schema]},
-    )
+    source = make_postgres_source(dsn=dsn, schema=schema)
     cfg.add_source(source)
+    db_name = dsn.rsplit("/", 1)[-1].split("?")[0]
     rprint(f"[green]Connected:[/green] Postgres database [bold]{db_name}[/bold] (schema: {schema})")
 
 
@@ -103,7 +110,7 @@ def connect_snowflake(
             "--account-secret-env",
             help="Env var containing the Snowflake connection JSON payload.",
         ),
-    ] = "SNOWFLAKE_CONNECTION_JSON",
+    ] = DEFAULT_SNOWFLAKE_ACCOUNT_SECRET_ENV,
     warehouse: Annotated[str | None, typer.Option("--warehouse")] = None,
     database: Annotated[str | None, typer.Option("--database")] = None,
     role: Annotated[str | None, typer.Option("--role")] = None,
@@ -111,22 +118,13 @@ def connect_snowflake(
 ) -> None:
     """Register a Snowflake data source."""
     cfg = get_config()
-    params: dict[str, object] = {
-        "account": account,
-        "account_secret_env": account_secret_env,
-    }
-    if warehouse is not None:
-        params["warehouse"] = warehouse
-    if database is not None:
-        params["database"] = database
-    if role is not None:
-        params["role"] = role
-    if schema is not None:
-        params["include_schemas"] = [schema]
-    source = SourceConfig(
-        id=f"snowflake:{account}",
-        kind="snowflake",
-        params=params,
+    source = make_snowflake_source(
+        account=account,
+        account_secret_env=account_secret_env,
+        warehouse=warehouse,
+        database=database,
+        role=role,
+        schema=schema,
     )
     cfg.add_source(source)
     rprint(f"[green]Connected:[/green] Snowflake account [bold]{account}[/bold]")
@@ -166,20 +164,13 @@ def connect_dbt(
     if detected_project is None:
         detected_project = Path(manifest_path).resolve().parent.parent.name
 
-    project_dir_path = Path(manifest_path).resolve().parent
-    catalog_path = project_dir_path / "catalog.json"
-    run_results_path = project_dir_path / "run_results.json"
-
     cfg = get_config()
-    source = SourceConfig(
-        id=f"dbt:{detected_project}",
-        kind="dbt",
-        params={
-            "manifest_path": manifest_path,
-            **({"catalog_path": str(catalog_path)} if catalog_path.exists() else {}),
-            **({"run_results_path": str(run_results_path)} if run_results_path.exists() else {}),
-            "project_name": detected_project,
-        },
+    catalog_path, run_results_path = resolve_dbt_auxiliary_paths(manifest_path)
+    source = make_dbt_source(
+        manifest_path=manifest_path,
+        project_name=detected_project,
+        catalog_path=catalog_path,
+        run_results_path=run_results_path,
     )
     cfg.add_source(source)
     rprint(f"[green]Connected:[/green] dbt project from [bold]{manifest_path}[/bold]")
@@ -191,23 +182,17 @@ def connect_airflow(
     auth_token_env: Annotated[
         str | None,
         typer.Option("--auth-token-env", help="Env var containing the Airflow auth token."),
-    ] = "AIRFLOW_AUTH_TOKEN",
+    ] = DEFAULT_AIRFLOW_AUTH_TOKEN_ENV,
     username: Annotated[str | None, typer.Option("--username")] = None,
     password: Annotated[str | None, typer.Option("--password", hide_input=True)] = None,
 ) -> None:
     """Register an Apache Airflow source."""
     cfg = get_config()
-    params: dict[str, object] = {"base_url": base_url}
-    if auth_token_env:
-        params["auth_token_env"] = auth_token_env
-    if username is not None:
-        params["username"] = username
-    if password is not None:
-        params["password"] = password
-    source = SourceConfig(
-        id=f"airflow:{_slug_from_url(base_url)}",
-        kind="airflow",
-        params=params,
+    source = make_airflow_source(
+        base_url=base_url,
+        auth_token_env=auth_token_env,
+        username=username,
+        password=password,
     )
     cfg.add_source(source)
     rprint(f"[green]Connected:[/green] Airflow instance [bold]{base_url}[/bold]")
@@ -219,24 +204,20 @@ def connect_looker(
     client_id_env: Annotated[
         str,
         typer.Option("--client-id-env", help="Env var containing the Looker client ID."),
-    ] = "LOOKER_CLIENT_ID",
+    ] = DEFAULT_LOOKER_CLIENT_ID_ENV,
     client_secret_env: Annotated[
         str,
         typer.Option("--client-secret-env", help="Env var containing the Looker client secret."),
-    ] = "LOOKER_CLIENT_SECRET",
-    port: Annotated[int, typer.Option("--port", help="Looker API port.")] = 19999,
+    ] = DEFAULT_LOOKER_CLIENT_SECRET_ENV,
+    port: Annotated[int, typer.Option("--port", help="Looker API port.")] = DEFAULT_LOOKER_PORT,
 ) -> None:
     """Register a Looker source."""
     cfg = get_config()
-    source = SourceConfig(
-        id=f"looker:{_slug_from_url(instance_url)}",
-        kind="looker",
-        params={
-            "instance_url": instance_url,
-            "client_id_env": client_id_env,
-            "client_secret_env": client_secret_env,
-            "port": port,
-        },
+    source = make_looker_source(
+        instance_url=instance_url,
+        client_id_env=client_id_env,
+        client_secret_env=client_secret_env,
+        port=port,
     )
     cfg.add_source(source)
     rprint(f"[green]Connected:[/green] Looker instance [bold]{instance_url}[/bold]")
@@ -247,22 +228,15 @@ def connect_fivetran(
     api_key_env: Annotated[
         str,
         typer.Option("--api-key-env", help="Env var containing the Fivetran API key."),
-    ] = "FIVETRAN_API_KEY",
+    ] = DEFAULT_FIVETRAN_API_KEY_ENV,
     api_secret_env: Annotated[
         str,
         typer.Option("--api-secret-env", help="Env var containing the Fivetran API secret."),
-    ] = "FIVETRAN_API_SECRET",
+    ] = DEFAULT_FIVETRAN_API_SECRET_ENV,
 ) -> None:
     """Register a Fivetran source."""
     cfg = get_config()
-    source = SourceConfig(
-        id="fivetran:default",
-        kind="fivetran",
-        params={
-            "api_key_env": api_key_env,
-            "api_secret_env": api_secret_env,
-        },
-    )
+    source = make_fivetran_source(api_key_env=api_key_env, api_secret_env=api_secret_env)
     cfg.add_source(source)
     rprint("[green]Connected:[/green] Fivetran account")
 
@@ -278,25 +252,17 @@ def connect_metabase(
     password: Annotated[str | None, typer.Option("--password", hide_input=True)] = None,
 ) -> None:
     """Register a Metabase source."""
-    if api_key_env is None and (username is None or password is None):
-        rprint(
-            "[red]Error:[/red] Provide either --api-key-env or both --username and --password."
-        )
-        raise typer.Exit(1)
-
     cfg = get_config()
-    params: dict[str, object] = {"instance_url": instance_url}
-    if api_key_env is not None:
-        params["api_key_env"] = api_key_env
-    if username is not None:
-        params["username"] = username
-    if password is not None:
-        params["password"] = password
-    source = SourceConfig(
-        id=f"metabase:{_slug_from_url(instance_url)}",
-        kind="metabase",
-        params=params,
-    )
+    try:
+        source = make_metabase_source(
+            instance_url=instance_url,
+            api_key_env=api_key_env,
+            username=username,
+            password=password,
+        )
+    except ValueError as exc:
+        rprint(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1) from exc
     cfg.add_source(source)
     rprint(f"[green]Connected:[/green] Metabase instance [bold]{instance_url}[/bold]")
 

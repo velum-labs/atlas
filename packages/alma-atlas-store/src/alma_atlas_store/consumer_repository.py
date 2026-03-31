@@ -4,24 +4,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass, field
-from typing import Any
-
+from alma_ports.consumer import Consumer
 from alma_atlas_store.db import Database
-
-
-@dataclass
-class Consumer:
-    """A data consumer (user, service, dashboard, notebook, etc.)."""
-
-    id: str
-    kind: str
-    name: str
-    source: str
-    asset_ids: list[str] = field(default_factory=list)
-    metadata: dict[str, Any] = field(default_factory=dict)
-    first_seen: str | None = None
-    last_seen: str | None = None
 
 
 class ConsumerRepository:

@@ -1,5 +1,8 @@
 # Twitter/X Thread Draft
 
+> Historical launch draft only. This file is not the current product or runtime
+> source of truth; use the main README and current docs instead.
+
 ---
 
 **Tweet 1 (hook)**

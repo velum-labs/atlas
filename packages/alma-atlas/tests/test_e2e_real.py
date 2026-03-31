@@ -1,7 +1,7 @@
 """Real end-to-end integration test for the Atlas agent enrichment pipeline.
 
 ZERO mocks — hits a real Postgres database (localhost:5433/customer) and a
-real Anthropic API (via ANTHROPIC_API_KEY env var).
+real ACP-backed agent process (which may in turn use ANTHROPIC_API_KEY).
 
 Flow:
   1. Scan Postgres (schemas: raw, staging, intermediate, analytics)
@@ -21,7 +21,8 @@ Infrastructure requirements:
   - Postgres at localhost:5433 (database: customer, user: postgres, password: testbed)
   - dbt manifest at /opt/velum/repos/atlas-testbed/scenarios/fintech-pg/dbt/target/manifest.json
   - Scenario repo at /opt/velum/repos/atlas-testbed/scenarios/fintech-pg/ (includes pipelines/ + dbt/)
-  - ANTHROPIC_API_KEY environment variable
+  - `claude-agent-acp` (or compatible ACP agent) available on PATH
+  - Agent credentials available in the environment for that ACP agent
 """
 
 from __future__ import annotations
@@ -30,11 +31,12 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 from pathlib import Path
 
 import pytest
 
-from alma_atlas.config import AgentConfig, AtlasConfig, LearningConfig, SourceConfig
+from alma_atlas.config import AgentConfig, AgentProcessConfig, AtlasConfig, LearningConfig, SourceConfig
 from alma_atlas.mcp.tools import _handle_get_annotations, _handle_lineage, _handle_status
 from alma_atlas.pipeline.learn import (
     get_unannotated_assets,
@@ -71,6 +73,25 @@ HAIKU_MODEL = "claude-haiku-4-5-20251001"
 SONNET_MODEL = "claude-haiku-4-5-20251001"
 
 
+def _require_real_e2e_prereqs() -> None:
+    """Skip the module when real external prerequisites are unavailable."""
+
+    if not Path(MANIFEST_PATH).exists():
+        pytest.skip(f"real_e2e prerequisites missing: manifest not found at {MANIFEST_PATH}")
+    if not PIPELINE_REPO.exists():
+        pytest.skip(f"real_e2e prerequisites missing: repo not found at {PIPELINE_REPO}")
+    if shutil.which("claude-agent-acp") is None:
+        pytest.skip("real_e2e prerequisites missing: claude-agent-acp not on PATH")
+
+    try:
+        import psycopg
+
+        with psycopg.connect(PG_DSN, connect_timeout=3):
+            pass
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"real_e2e prerequisites missing: cannot connect to Postgres ({exc})")
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -79,26 +100,27 @@ SONNET_MODEL = "claude-haiku-4-5-20251001"
 @pytest.fixture(scope="module")
 def atlas_cfg(tmp_path_factory: pytest.TempPathFactory) -> AtlasConfig:
     """AtlasConfig with an on-disk SQLite DB in a temporary directory."""
+    _require_real_e2e_prereqs()
     tmp = tmp_path_factory.mktemp("atlas_real_e2e")
     cfg = AtlasConfig(
         config_dir=tmp / "alma",
         db_path=tmp / "atlas.db",
         learning=LearningConfig(
-            provider="anthropic",
+            provider="acp",
             explorer=AgentConfig(
-                provider="anthropic",
+                provider="acp",
                 model=HAIKU_MODEL,
-                api_key_env="ANTHROPIC_API_KEY",
+                agent=AgentProcessConfig(command="claude-agent-acp"),
             ),
             pipeline_analyzer=AgentConfig(
-                provider="anthropic",
+                provider="acp",
                 model=SONNET_MODEL,
-                api_key_env="ANTHROPIC_API_KEY",
+                agent=AgentProcessConfig(command="claude-agent-acp"),
             ),
             annotator=AgentConfig(
-                provider="anthropic",
+                provider="acp",
                 model=SONNET_MODEL,
-                api_key_env="ANTHROPIC_API_KEY",
+                agent=AgentProcessConfig(command="claude-agent-acp"),
             ),
         ),
     )

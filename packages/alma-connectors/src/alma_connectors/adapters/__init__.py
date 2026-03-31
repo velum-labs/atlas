@@ -5,6 +5,7 @@ from alma_connectors.adapters.fivetran import FivetranAdapter
 from alma_connectors.adapters.looker import LookerAdapter
 from alma_connectors.adapters.metabase import MetabaseAdapter
 from alma_connectors.adapters.postgres import PostgresAdapter
+from alma_connectors.adapters.snowflake import SnowflakeAdapter
 
 __all__ = [
     "AirflowAdapter",
@@ -14,4 +15,5 @@ __all__ = [
     "LookerAdapter",
     "MetabaseAdapter",
     "PostgresAdapter",
+    "SnowflakeAdapter",
 ]
