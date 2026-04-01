@@ -112,7 +112,7 @@ async def _retry_with_backoff(  # noqa: UP047
     last_exc: Exception | None = None
     for attempt in range(max_attempts):
         try:
-            return fn()
+            return await asyncio.to_thread(fn)
         except Exception as exc:
             if not retryable(exc):
                 raise
@@ -133,20 +133,46 @@ async def _retry_with_backoff(  # noqa: UP047
 
 
 def _is_bq_retryable(exc: Exception) -> bool:
+    with contextlib.suppress(ImportError):
+        from google.api_core import exceptions as google_exceptions  # type: ignore[import-untyped]
+
+        retryable_types = (
+            google_exceptions.TooManyRequests,
+            google_exceptions.ServiceUnavailable,
+            google_exceptions.InternalServerError,
+            google_exceptions.BadGateway,
+            google_exceptions.GatewayTimeout,
+        )
+        if isinstance(exc, retryable_types):
+            return True
     msg = str(exc)
     codes = ("429", "503", "rateLimitExceeded", "backendError", "serviceUnavailable")
     return any(c in msg for c in codes)
 
 
 def _is_403(exc: Exception) -> bool:
+    with contextlib.suppress(ImportError):
+        from google.api_core import exceptions as google_exceptions  # type: ignore[import-untyped]
+
+        if isinstance(exc, google_exceptions.Forbidden):
+            return True
     msg = str(exc)
     return "403" in msg or "Access Denied" in msg or "Forbidden" in msg
+
+
+def _int_or_none(value: object) -> int | None:
+    if value is None:
+        return None
+    with contextlib.suppress(TypeError, ValueError):
+        return int(value)
+    return None
 
 
 def _fetch_columns_per_dataset(
     client: Any,
     project_id: str,
     bigquery: Any,
+    config: BigQueryAdapterConfig,
     max_rows: int,
 ) -> list[dict[str, Any]]:
     """Query INFORMATION_SCHEMA.COLUMNS per dataset when the region-level query fails (403)."""
@@ -174,10 +200,12 @@ def _fetch_columns_per_dataset(
             ORDER BY table_name, ordinal_position
             LIMIT @max_rows
         """
-        per_ds_config = bigquery.QueryJobConfig(
+        per_ds_config = _make_query_job_config(
+            bigquery,
+            config,
             query_parameters=[
                 bigquery.ScalarQueryParameter("max_rows", "INT64", remaining),
-            ]
+            ],
         )
         try:
             batch = [_row_to_dict(row) for row in client.query(per_ds_sql, job_config=per_ds_config).result()]
@@ -218,6 +246,27 @@ def _normalize_labels(raw_labels: Any) -> dict[str, str]:
             labels[str(key)] = str(value)
         return labels
     return {}
+
+
+def _make_query_job_config(
+    bigquery: Any,
+    config: BigQueryAdapterConfig,
+    *,
+    query_parameters: list[Any] | None = None,
+    dry_run: bool = False,
+    timeout_ms: int | None = None,
+) -> Any:
+    job_config_args: dict[str, Any] = {}
+    if query_parameters:
+        job_config_args["query_parameters"] = query_parameters
+    effective_timeout_ms = config.default_job_timeout_ms if timeout_ms is None else timeout_ms
+    if effective_timeout_ms > 0:
+        job_config_args["job_timeout_ms"] = effective_timeout_ms
+    if config.maximum_bytes_billed is not None:
+        job_config_args["maximum_bytes_billed"] = config.maximum_bytes_billed
+    if dry_run:
+        job_config_args["dry_run"] = True
+    return bigquery.QueryJobConfig(**job_config_args)
 
 
 def _extract_referenced_tables(raw_tables: Any) -> list[dict[str, str]]:
@@ -451,7 +500,13 @@ class BigQueryAdapter:
             raise ValueError(f"adapter '{adapter.key}' is not configured as bigquery")
         return adapter.config
 
-    def _get_client(self, project_id: str, service_account_json: str | None) -> Any:
+    def _get_client(
+        self,
+        project_id: str,
+        service_account_json: str | None,
+        *,
+        location: str | None = None,
+    ) -> Any:
         if self._client_factory is not None:
             return self._client_factory(project_id, service_account_json)
         bigquery = _get_bigquery_module()
@@ -463,8 +518,8 @@ class BigQueryAdapter:
                 info,
                 scopes=["https://www.googleapis.com/auth/bigquery"],
             )
-            return bigquery.Client(project=project_id, credentials=credentials)
-        return bigquery.Client(project=project_id)
+            return bigquery.Client(project=project_id, credentials=credentials, location=location)
+        return bigquery.Client(project=project_id, location=location)
 
     def _credentials(self, adapter: PersistedSourceAdapter) -> tuple[str, str | None]:
         """Return (project_id, service_account_json)."""
@@ -501,11 +556,14 @@ class BigQueryAdapter:
         self._validate_config(config)
         try:
             project_id, sa_json = self._credentials(adapter)
-            client = self._get_client(project_id, sa_json)
+            client = self._get_client(project_id, sa_json, location=config.location)
             bigquery = _get_bigquery_module()
 
             # Verify bigquery.jobs.create permission via a trivial query
-            probe = client.query("SELECT 1 AS probe", job_config=bigquery.QueryJobConfig())
+            probe = client.query(
+                "SELECT 1 AS probe",
+                job_config=_make_query_job_config(bigquery, config),
+            )
             probe.result()
 
             # Verify bigquery.datasets.list permission
@@ -544,7 +602,7 @@ class BigQueryAdapter:
         config = self._get_config(adapter)
         self._validate_config(config)
         project_id, sa_json = self._credentials(adapter)
-        client = self._get_client(project_id, sa_json)
+        client = self._get_client(project_id, sa_json, location=config.location)
         bigquery = _get_bigquery_module()
 
         # --- COLUMNS query (includes BQ partition/clustering extensions) ---
@@ -563,10 +621,12 @@ class BigQueryAdapter:
             ORDER BY table_schema, table_name, ordinal_position
             LIMIT @max_rows
         """
-        column_config = bigquery.QueryJobConfig(
+        column_config = _make_query_job_config(
+            bigquery,
+            config,
             query_parameters=[
                 bigquery.ScalarQueryParameter("max_rows", "INT64", config.max_column_rows),
-            ]
+            ],
         )
         try:
             query = client.query(columns_sql, job_config=column_config)
@@ -579,7 +639,11 @@ class BigQueryAdapter:
                     _col_exc,
                 )
                 rows = _fetch_columns_per_dataset(
-                    client, config.project_id, bigquery, config.max_column_rows
+                    client,
+                    config.project_id,
+                    bigquery,
+                    config,
+                    config.max_column_rows,
                 )
             else:
                 raise
@@ -624,7 +688,10 @@ class BigQueryAdapter:
                 FROM {_region}.INFORMATION_SCHEMA.TABLE_STORAGE
                 WHERE deleted = FALSE
             """
-            storage_job = client.query(storage_sql, job_config=bigquery.QueryJobConfig())
+            storage_job = client.query(
+                storage_sql,
+                job_config=_make_query_job_config(bigquery, config),
+            )
             for srow in storage_job.result():
                 sdict = _row_to_dict(srow)
                 ds = str(sdict.get("dataset_id", "")).strip()
@@ -672,7 +739,7 @@ class BigQueryAdapter:
         config = self._get_config(adapter)
         self._validate_config(config)
         project_id, sa_json = self._credentials(adapter)
-        client = self._get_client(project_id, sa_json)
+        client = self._get_client(project_id, sa_json, location=config.location)
         bigquery = _get_bigquery_module()
         jobs_view = f"{quote_bq_identifier(config.project_id)}.{quote_bq_identifier(f'region-{config.location}')}.INFORMATION_SCHEMA.JOBS_BY_PROJECT"
 
@@ -687,7 +754,10 @@ class BigQueryAdapter:
                   user_email,
                   labels,
                   query,
-                  referenced_tables
+                  referenced_tables,
+                  total_bytes_processed,
+                  total_slot_ms,
+                  cache_hit
                 FROM {jobs_view}
                 WHERE creation_time > @cursor
                   AND state = 'DONE'
@@ -710,7 +780,10 @@ class BigQueryAdapter:
                   user_email,
                   labels,
                   query,
-                  referenced_tables
+                  referenced_tables,
+                  total_bytes_processed,
+                  total_slot_ms,
+                  cache_hit
                 FROM {jobs_view}
                 WHERE creation_time >= @since
                   AND state = 'DONE'
@@ -724,10 +797,10 @@ class BigQueryAdapter:
                 bigquery.ScalarQueryParameter("max_rows", "INT64", config.max_job_rows),
             ]
 
-        job_config = bigquery.QueryJobConfig(
+        job_config = _make_query_job_config(
+            bigquery,
+            config,
             query_parameters=query_parameters,
-            # TODO(@000alen): magic number? should be configurable
-            job_timeout_ms=300_000,  # 5-minute hard cap
         )
         logger.debug(
             "BigQuery query started: capability=traffic adapter=%s", adapter.key
@@ -796,6 +869,17 @@ class BigQueryAdapter:
             # (happens for failed queries, DDL statements, and some scripted jobs).
             if not referenced_tables:
                 referenced_tables = _extract_tables_from_sql(sql)
+            cost_metadata: dict[str, object] = {}
+            if config.include_job_cost_stats:
+                total_bytes_processed = _int_or_none(row.get("total_bytes_processed"))
+                total_slot_ms = _int_or_none(row.get("total_slot_ms"))
+                cache_hit = row.get("cache_hit")
+                if total_bytes_processed is not None:
+                    cost_metadata["total_bytes_processed"] = total_bytes_processed
+                if total_slot_ms is not None:
+                    cost_metadata["total_slot_ms"] = total_slot_ms
+                if cache_hit is not None:
+                    cost_metadata["cache_hit"] = cache_hit
 
             events.append(
                 ObservedQueryEvent(
@@ -822,6 +906,7 @@ class BigQueryAdapter:
                         "dag_id": identity["dag_id"],
                         "task_id": identity["task_id"],
                         "referenced_tables": referenced_tables,
+                        **cost_metadata,
                     },
                     raw_payload=row,
                 )
@@ -859,15 +944,17 @@ class BigQueryAdapter:
         config = self._get_config(adapter)
         self._validate_config(config)
         project_id, sa_json = self._credentials(adapter)
-        client = self._get_client(project_id, sa_json)
+        client = self._get_client(project_id, sa_json, location=config.location)
         bigquery = _get_bigquery_module()
         del probe_target
 
         row_limit = max_rows if max_rows and max_rows > 0 else 100
         started_at = time.perf_counter()
         try:
-            job_config = bigquery.QueryJobConfig(dry_run=dry_run)
+            job_config = _make_query_job_config(bigquery, config, dry_run=dry_run)
             query_job = client.query(sql, job_config=job_config)
+            bytes_processed = _int_or_none(getattr(query_job, "total_bytes_processed", None))
+            bytes_billed = _int_or_none(getattr(query_job, "total_bytes_billed", None))
 
             if dry_run:
                 duration_ms = (time.perf_counter() - started_at) * 1000.0
@@ -877,6 +964,8 @@ class BigQueryAdapter:
                     row_count=0,
                     duration_ms=duration_ms,
                     content_hash=content_hash,
+                    bytes_processed=bytes_processed,
+                    bytes_billed=bytes_billed,
                 )
 
             rows: list[dict[str, object]] = []
@@ -894,6 +983,8 @@ class BigQueryAdapter:
                 duration_ms=duration_ms,
                 rows=tuple(rows),
                 truncated=truncated,
+                bytes_processed=bytes_processed,
+                bytes_billed=bytes_billed,
             )
         except Exception as exc:
             duration_ms = (time.perf_counter() - started_at) * 1000.0
@@ -932,7 +1023,7 @@ class BigQueryAdapter:
         config = self._get_config(adapter)
         self._validate_config(config)
         project_id, sa_json = self._credentials(adapter)
-        client = self._get_client(project_id, sa_json)
+        client = self._get_client(project_id, sa_json, location=config.location)
         bigquery = _get_bigquery_module()
 
         scope_ctx = ScopeContext(
@@ -967,7 +1058,7 @@ class BigQueryAdapter:
                 f".INFORMATION_SCHEMA.COLUMNS LIMIT 1"
             )
             try:
-                client.query(probe_sql, job_config=bigquery.QueryJobConfig()).result()
+                client.query(probe_sql, job_config=_make_query_job_config(bigquery, config)).result()
                 results.append(CapabilityProbeResult(
                     capability=AdapterCapability.SCHEMA,
                     available=True,
@@ -996,7 +1087,10 @@ class BigQueryAdapter:
                                 f".INFORMATION_SCHEMA.COLUMNS LIMIT 1"
                             )
                             try:
-                                client.query(_ds_probe_sql, job_config=bigquery.QueryJobConfig()).result()
+                                client.query(
+                                    _ds_probe_sql,
+                                    job_config=_make_query_job_config(bigquery, config),
+                                ).result()
                                 _ds_available = True
                                 break
                             except Exception:
@@ -1029,7 +1123,7 @@ class BigQueryAdapter:
             )
             probe_sql = f"SELECT 1 FROM {jobs_view} LIMIT 1"
             try:
-                client.query(probe_sql, job_config=bigquery.QueryJobConfig()).result()
+                client.query(probe_sql, job_config=_make_query_job_config(bigquery, config)).result()
                 results.append(CapabilityProbeResult(
                     capability=AdapterCapability.TRAFFIC,
                     available=True,
@@ -1055,7 +1149,7 @@ class BigQueryAdapter:
                 f"SELECT 1 FROM {_region}.INFORMATION_SCHEMA.VIEWS LIMIT 1",
             ):
                 try:
-                    client.query(probe_sql, job_config=bigquery.QueryJobConfig()).result()
+                    client.query(probe_sql, job_config=_make_query_job_config(bigquery, config)).result()
                 except Exception as exc:
                     probe_errors.append(str(exc))
                     missing_perms.extend(_missing_permissions_from_exc(exc))
@@ -1075,7 +1169,7 @@ class BigQueryAdapter:
         config = self._get_config(adapter)
         self._validate_config(config)
         project_id, sa_json = self._credentials(adapter)
-        client = self._get_client(project_id, sa_json)
+        client = self._get_client(project_id, sa_json, location=config.location)
         logger.debug(
             "BigQuery connection established: project=%s location=%s adapter=%s",
             project_id,
@@ -1132,7 +1226,7 @@ class BigQueryAdapter:
         config = self._get_config(adapter)
         self._validate_config(config)
         project_id, sa_json = self._credentials(adapter)
-        client = self._get_client(project_id, sa_json)
+        client = self._get_client(project_id, sa_json, location=config.location)
         bigquery = _get_bigquery_module()
         region_prefix = f"{quote_bq_identifier(project_id)}.{quote_bq_identifier(f'region-{config.location}')}"
 
@@ -1154,11 +1248,12 @@ class BigQueryAdapter:
             ORDER BY table_schema, table_name, ordinal_position
             LIMIT @max_rows
         """
-        column_config = bigquery.QueryJobConfig(
+        column_config = _make_query_job_config(
+            bigquery,
+            config,
             query_parameters=[
                 bigquery.ScalarQueryParameter("max_rows", "INT64", config.max_column_rows),
             ],
-            job_timeout_ms=300_000,  # 5-minute hard cap
         )
         logger.debug(
             "BigQuery query started: capability=schema adapter=%s", adapter.key
@@ -1180,7 +1275,11 @@ class BigQueryAdapter:
                     adapter.key,
                 )
                 col_rows = _fetch_columns_per_dataset(
-                    client, project_id, bigquery, config.max_column_rows
+                    client,
+                    project_id,
+                    bigquery,
+                    config,
+                    config.max_column_rows,
                 )
             else:
                 logger.error(
@@ -1233,7 +1332,10 @@ class BigQueryAdapter:
                 FROM {region_prefix}.INFORMATION_SCHEMA.TABLE_STORAGE
                 WHERE deleted = FALSE
             """
-            for srow in client.query(storage_sql, job_config=bigquery.QueryJobConfig(job_timeout_ms=300_000)).result():
+            for srow in client.query(
+                storage_sql,
+                job_config=_make_query_job_config(bigquery, config),
+            ).result():
                 sdict = _row_to_dict(srow)
                 ds = str(sdict.get("dataset_id", "")).strip()
                 tbl = str(sdict.get("table_id", "")).strip()
@@ -1264,7 +1366,10 @@ class BigQueryAdapter:
                 FROM {region_prefix}.INFORMATION_SCHEMA.TABLES
                 WHERE table_schema <> 'INFORMATION_SCHEMA'
             """
-            for row in client.query(tables_sql, job_config=bigquery.QueryJobConfig()).result():
+            for row in client.query(
+                tables_sql,
+                job_config=_make_query_job_config(bigquery, config),
+            ).result():
                 rdict = _row_to_dict(row)
                 ds = str(rdict.get("table_schema", "")).strip()
                 tbl = str(rdict.get("table_name", "")).strip()
@@ -1289,7 +1394,10 @@ class BigQueryAdapter:
                 FROM {region_prefix}.INFORMATION_SCHEMA.TABLE_OPTIONS
                 WHERE option_name = 'description'
             """
-            for row in client.query(opts_sql, job_config=bigquery.QueryJobConfig()).result():
+            for row in client.query(
+                opts_sql,
+                job_config=_make_query_job_config(bigquery, config),
+            ).result():
                 rdict = _row_to_dict(row)
                 ds = str(rdict.get("table_schema", "")).strip()
                 tbl = str(rdict.get("table_name", "")).strip()
@@ -1338,7 +1446,10 @@ class BigQueryAdapter:
                 FROM {region_prefix}.INFORMATION_SCHEMA.PARAMETERS
                 ORDER BY specific_schema, specific_name, ordinal_position
             """
-            for row in client.query(params_sql, job_config=bigquery.QueryJobConfig()).result():
+            for row in client.query(
+                params_sql,
+                job_config=_make_query_job_config(bigquery, config),
+            ).result():
                 rdict = _row_to_dict(row)
                 schema = str(rdict.get("specific_schema", "")).strip()
                 name = str(rdict.get("specific_name", "")).strip()
@@ -1371,7 +1482,10 @@ class BigQueryAdapter:
                   external_language
                 FROM {region_prefix}.INFORMATION_SCHEMA.ROUTINES
             """
-            for row in client.query(routines_sql, job_config=bigquery.QueryJobConfig()).result():
+            for row in client.query(
+                routines_sql,
+                job_config=_make_query_job_config(bigquery, config),
+            ).result():
                 rdict = _row_to_dict(row)
                 schema = str(rdict.get("routine_schema", "")).strip()
                 name = str(rdict.get("routine_name", "")).strip()
@@ -1416,7 +1530,10 @@ class BigQueryAdapter:
                 SELECT model_schema, model_name, model_type, last_modified_time
                 FROM {region_prefix}.INFORMATION_SCHEMA.MODELS
             """
-            for row in client.query(models_sql, job_config=bigquery.QueryJobConfig()).result():
+            for row in client.query(
+                models_sql,
+                job_config=_make_query_job_config(bigquery, config),
+            ).result():
                 rdict = _row_to_dict(row)
                 schema = str(rdict.get("model_schema", "")).strip()
                 name = str(rdict.get("model_name", "")).strip()
@@ -1497,7 +1614,7 @@ class BigQueryAdapter:
         config = self._get_config(adapter)
         self._validate_config(config)
         project_id, sa_json = self._credentials(adapter)
-        client = self._get_client(project_id, sa_json)
+        client = self._get_client(project_id, sa_json, location=config.location)
         bigquery = _get_bigquery_module()
 
         started_at = time.perf_counter()
@@ -1512,7 +1629,10 @@ class BigQueryAdapter:
             WHERE table_schema <> 'INFORMATION_SCHEMA'
         """
         try:
-            view_job = client.query(views_sql, job_config=bigquery.QueryJobConfig())
+            view_job = client.query(
+                views_sql,
+                job_config=_make_query_job_config(bigquery, config),
+            )
             for row in view_job.result():
                 d = _row_to_dict(row)
                 schema_name = str(d.get("table_schema", "")).strip()
@@ -1544,7 +1664,10 @@ class BigQueryAdapter:
             WHERE routine_schema <> 'INFORMATION_SCHEMA'
         """
         try:
-            routine_job = client.query(routines_sql, job_config=bigquery.QueryJobConfig())
+            routine_job = client.query(
+                routines_sql,
+                job_config=_make_query_job_config(bigquery, config),
+            )
             for row in routine_job.result():
                 d = _row_to_dict(row)
                 schema_name = str(d.get("routine_schema", "")).strip()
@@ -1587,7 +1710,10 @@ class BigQueryAdapter:
               AND table_schema <> 'INFORMATION_SCHEMA'
         """
         try:
-            table_job = client.query(tables_sql, job_config=bigquery.QueryJobConfig())
+            table_job = client.query(
+                tables_sql,
+                job_config=_make_query_job_config(bigquery, config),
+            )
             for row in table_job.result():
                 d = _row_to_dict(row)
                 schema_name = str(d.get("table_schema", "")).strip()

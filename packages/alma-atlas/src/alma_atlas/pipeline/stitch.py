@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+from datetime import UTC, datetime, timedelta
 
 from alma_atlas_store.asset_repository import AssetRepository
 from alma_atlas_store.db import Database
@@ -46,12 +47,24 @@ def _fingerprint(sql: str) -> str:
     return hashlib.sha256(normalised.encode()).hexdigest()[:16]
 
 
+def _stored_sql_text(sql: str, *, mode: str, dialect: object) -> str:
+    if mode == "fingerprint_only":
+        return ""
+    if mode == "redacted_sql":
+        from alma_sqlkit.normalize import normalize_sql
+
+        return normalize_sql(sql, dialect=dialect)
+    return sql
+
+
 def stitch(
     traffic: object,
     db: Database,
     *,
     source_id: str = "",
     source_kind: str = "",
+    query_storage_mode: str = "full_sql",
+    query_retention_days: int | None = None,
 ) -> int:
     """Derive and persist lineage edges from a set of query observations.
 
@@ -147,10 +160,18 @@ def stitch(
             query_repo.upsert(
                 QueryObservation(
                     fingerprint=_fingerprint(event.sql),
-                    sql_text=event.sql,
+                    sql_text=_stored_sql_text(
+                        event.sql,
+                        mode=query_storage_mode,
+                        dialect=dialect,
+                    ),
                     tables=tables,
                     source=source_id,
                 )
             )
+
+    if query_retention_days is not None:
+        cutoff = (datetime.now(UTC) - timedelta(days=query_retention_days)).strftime("%Y-%m-%d %H:%M:%S")
+        query_repo.prune_before(cutoff)
 
     return edges_written

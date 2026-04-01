@@ -1,0 +1,195 @@
+{
+  "metadata": {
+    "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json",
+    "dbt_version": "1.8.0",
+    "project_name": "atlas_fixture",
+    "adapter_type": "bigquery"
+  },
+  "nodes": {
+    "model.atlas_fixture.stg_orders": {
+      "unique_id": "model.atlas_fixture.stg_orders",
+      "resource_type": "model",
+      "name": "stg_orders",
+      "alias": "stg_orders",
+      "schema": "staging",
+      "database": "analytics",
+      "config": {
+        "materialized": "table"
+      },
+      "columns": {
+        "order_id": {
+          "name": "order_id",
+          "data_type": "INT64"
+        },
+        "customer_id": {
+          "name": "customer_id",
+          "data_type": "INT64"
+        },
+        "amount": {
+          "name": "amount",
+          "data_type": "NUMERIC"
+        }
+      },
+      "depends_on": {
+        "nodes": [
+          "source.atlas_fixture.raw.orders"
+        ]
+      },
+      "compiled_code": "select order_id, customer_id, amount from raw.orders",
+      "description": "Staged orders",
+      "tags": []
+    },
+    "model.atlas_fixture.stg_customers": {
+      "unique_id": "model.atlas_fixture.stg_customers",
+      "resource_type": "model",
+      "name": "stg_customers",
+      "alias": "stg_customers",
+      "schema": "staging",
+      "database": "analytics",
+      "config": {
+        "materialized": "view"
+      },
+      "columns": {
+        "customer_id": {
+          "name": "customer_id",
+          "data_type": "INT64"
+        },
+        "email": {
+          "name": "email",
+          "data_type": "STRING"
+        }
+      },
+      "depends_on": {
+        "nodes": [
+          "source.atlas_fixture.raw.customers"
+        ]
+      },
+      "compiled_code": "select customer_id, email from raw.customers",
+      "description": "Staged customers",
+      "tags": []
+    },
+    "model.atlas_fixture.orders_enriched": {
+      "unique_id": "model.atlas_fixture.orders_enriched",
+      "resource_type": "model",
+      "name": "orders_enriched",
+      "alias": "orders_enriched",
+      "schema": "marts",
+      "database": "analytics",
+      "config": {
+        "materialized": "table"
+      },
+      "columns": {
+        "order_id": {
+          "name": "order_id",
+          "data_type": "INT64"
+        },
+        "customer_id": {
+          "name": "customer_id",
+          "data_type": "INT64"
+        },
+        "email": {
+          "name": "email",
+          "data_type": "STRING"
+        },
+        "amount": {
+          "name": "amount",
+          "data_type": "NUMERIC"
+        }
+      },
+      "depends_on": {
+        "nodes": [
+          "model.atlas_fixture.stg_orders",
+          "model.atlas_fixture.stg_customers"
+        ]
+      },
+      "compiled_code": "select o.order_id, o.customer_id, c.email, o.amount from staging.stg_orders o join staging.stg_customers c using (customer_id)",
+      "description": "Orders enriched with customer details",
+      "tags": []
+    },
+    "model.atlas_fixture.customer_daily_value": {
+      "unique_id": "model.atlas_fixture.customer_daily_value",
+      "resource_type": "model",
+      "name": "customer_daily_value",
+      "alias": "customer_daily_value",
+      "schema": "marts",
+      "database": "analytics",
+      "config": {
+        "materialized": "table"
+      },
+      "columns": {
+        "customer_id": {
+          "name": "customer_id",
+          "data_type": "INT64"
+        },
+        "value_date": {
+          "name": "value_date",
+          "data_type": "DATE"
+        },
+        "daily_amount": {
+          "name": "daily_amount",
+          "data_type": "NUMERIC"
+        }
+      },
+      "depends_on": {
+        "nodes": [
+          "model.atlas_fixture.orders_enriched"
+        ]
+      },
+      "compiled_code": "select customer_id, current_date() as value_date, sum(amount) as daily_amount from marts.orders_enriched group by 1, 2",
+      "description": "Daily customer value snapshot",
+      "tags": []
+    }
+  },
+  "sources": {
+    "source.atlas_fixture.raw.orders": {
+      "unique_id": "source.atlas_fixture.raw.orders",
+      "resource_type": "source",
+      "name": "orders",
+      "alias": "orders",
+      "schema": "raw",
+      "database": "analytics",
+      "columns": {
+        "order_id": {
+          "name": "order_id",
+          "data_type": "INT64"
+        },
+        "customer_id": {
+          "name": "customer_id",
+          "data_type": "INT64"
+        },
+        "amount": {
+          "name": "amount",
+          "data_type": "NUMERIC"
+        }
+      },
+      "depends_on": {
+        "nodes": []
+      },
+      "description": "Raw orders source",
+      "tags": []
+    },
+    "source.atlas_fixture.raw.customers": {
+      "unique_id": "source.atlas_fixture.raw.customers",
+      "resource_type": "source",
+      "name": "customers",
+      "alias": "customers",
+      "schema": "raw",
+      "database": "analytics",
+      "columns": {
+        "customer_id": {
+          "name": "customer_id",
+          "data_type": "INT64"
+        },
+        "email": {
+          "name": "email",
+          "data_type": "STRING"
+        }
+      },
+      "depends_on": {
+        "nodes": []
+      },
+      "description": "Raw customers source",
+      "tags": []
+    }
+  }
+}

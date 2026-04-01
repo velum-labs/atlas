@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import re
@@ -63,6 +64,11 @@ from alma_connectors.source_adapter_v2 import (
 )
 
 logger = logging.getLogger(__name__)
+_DEFAULT_CONNECT_TIMEOUT_SECONDS = 10
+_DEFAULT_STATEMENT_TIMEOUT_MS = 30_000
+_DEFAULT_LOG_SCAN_MAX_LINES = 10_000
+_DEFAULT_LOG_SCAN_MAX_BYTES = 5_000_000
+_DEFAULT_LOG_SCAN_MAX_EVENTS = 2_000
 
 def _validate_postgres_dsn(dsn: str, field_name: str = "DSN") -> None:
     """Validate that dsn looks like a PostgreSQL connection string."""
@@ -119,6 +125,26 @@ async def _async_retry_with_backoff(  # noqa: UP047
                 )
                 await asyncio.sleep(delay)
     raise last_exc  # type: ignore[misc]
+
+
+def _readonly_options(*, statement_timeout_ms: int | None = _DEFAULT_STATEMENT_TIMEOUT_MS) -> str:
+    options = ["-c default_transaction_read_only=on"]
+    if statement_timeout_ms is not None:
+        options.append(f"-c statement_timeout={statement_timeout_ms}")
+    return " ".join(options)
+
+
+async def _run_blocking[T](fn: Callable[[], T]) -> T:
+    return await asyncio.to_thread(fn)
+
+
+async def _run_pg_call[T](fn: Callable[[], T], *, retry: bool = True) -> T:
+    async def _call() -> T:
+        return await _run_blocking(fn)
+
+    if not retry:
+        return await _call()
+    return await _async_retry_with_backoff(_call, retryable=_is_pg_retryable)
 
 
 _DEFAULT_POSTGRES_INCLUDE_SCHEMAS = ("public",)
@@ -313,23 +339,28 @@ class PostgresAdapter:
             conditions.append("table_schema <> ALL(%s)")
             params.append(exclude_schemas)
         where_clause = " AND ".join(conditions) if conditions else "TRUE"
-        with psycopg.connect(
-            dsn,
-            row_factory=dict_row,
-            options="-c default_transaction_read_only=on",
-            connect_timeout=10,
-        ) as conn:
-            table_row = conn.execute(
-                f"""
-                SELECT count(*) AS cnt
-                FROM information_schema.tables
-                WHERE {where_clause}
-                """,
-                params,
-            ).fetchone()
-            log_row = conn.execute(
-                "SELECT setting FROM pg_settings WHERE name = 'log_min_duration_statement'"
-            ).fetchone()
+        
+        def _fetch_validation_rows() -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+            with psycopg.connect(
+                dsn,
+                row_factory=dict_row,
+                options=_readonly_options(),
+                connect_timeout=_DEFAULT_CONNECT_TIMEOUT_SECONDS,
+            ) as conn:
+                table_row = conn.execute(
+                    f"""
+                    SELECT count(*) AS cnt
+                    FROM information_schema.tables
+                    WHERE {where_clause}
+                    """,
+                    params,
+                ).fetchone()
+                log_row = conn.execute(
+                    "SELECT setting FROM pg_settings WHERE name = 'log_min_duration_statement'"
+                ).fetchone()
+            return table_row, log_row
+
+        table_row, log_row = await _run_pg_call(_fetch_validation_rows)
         table_count = int((table_row or {}).get("cnt", 0))
         log_setting = (log_row or {}).get("setting")
         if log_setting is not None and log_setting != "-1":
@@ -454,10 +485,23 @@ class PostgresAdapter:
               AND {stats_where_clause}
         """
 
-        with psycopg.connect(dsn, row_factory=dict_row, connect_timeout=10) as conn:
-            rows = list(conn.execute(schema_sql, params + params).fetchall())
-            dependency_rows = list(conn.execute(dependency_sql, include_schemas).fetchall()) if include_schemas else []
-            stats_rows = list(conn.execute(stats_sql, stats_params).fetchall())
+        def _fetch_schema_rows() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+            with psycopg.connect(
+                dsn,
+                row_factory=dict_row,
+                options=_readonly_options(),
+                connect_timeout=_DEFAULT_CONNECT_TIMEOUT_SECONDS,
+            ) as conn:
+                rows = list(conn.execute(schema_sql, params + params).fetchall())
+                dependency_rows = (
+                    list(conn.execute(dependency_sql, include_schemas).fetchall())
+                    if include_schemas
+                    else []
+                )
+                stats_rows = list(conn.execute(stats_sql, stats_params).fetchall())
+            return rows, dependency_rows, stats_rows
+
+        rows, dependency_rows, stats_rows = await _run_pg_call(_fetch_schema_rows)
         row_count_by_object = {
             (str(row["schema_name"]), str(row["table_name"])): max(0, int(row["row_count"]))
             for row in stats_rows
@@ -514,7 +558,7 @@ class PostgresAdapter:
         """Observe traffic and return canonical query events."""
         config = self._get_config(adapter)
         if config.log_capture is not None:
-            return self._observe_from_logs(adapter, config.log_capture, since=since)
+            return await asyncio.to_thread(self._observe_from_logs, adapter, config.log_capture, since=since)
         return await self._observe_from_pg_stat_statements(adapter, since=since)
 
     def _observe_from_logs(
@@ -526,7 +570,9 @@ class PostgresAdapter:
     ) -> TrafficObservationResult:
         pending_errors: dict[str, dict[str, str]] = {}
         scanned_records = 0
+        scanned_bytes = 0
         events: list[ObservedQueryEvent] = []
+        errors: list[str] = []
         log_path = Path(log_capture.log_path)
 
         # Determine the starting byte offset from the stored cursor.
@@ -568,6 +614,19 @@ class PostgresAdapter:
 
             for raw_line in handle:
                 scanned_records += 1
+                scanned_bytes += len(raw_line.encode("utf-8", errors="ignore"))
+                if scanned_records > _DEFAULT_LOG_SCAN_MAX_LINES:
+                    errors.append(
+                        "log scan truncated after max lines;"
+                        f" increase the cap in code if {log_capture.log_path} is expected to be much larger."
+                    )
+                    break
+                if scanned_bytes > _DEFAULT_LOG_SCAN_MAX_BYTES:
+                    errors.append(
+                        "log scan truncated after max bytes;"
+                        f" increase the cap in code if {log_capture.log_path} is expected to be much larger."
+                    )
+                    break
                 match = _POSTGRES_LOG_PREFIX_PATTERN.match(raw_line.rstrip("\n"))
                 if match is None:
                     continue
@@ -626,6 +685,9 @@ class PostgresAdapter:
                             raw_payload=raw_payload,
                         )
                     )
+                    if len(events) >= _DEFAULT_LOG_SCAN_MAX_EVENTS:
+                        errors.append("log scan truncated after max events were emitted")
+                        break
                     continue
 
                 if level == "ERROR":
@@ -676,6 +738,9 @@ class PostgresAdapter:
                         raw_payload=raw_payload,
                     )
                 )
+                if len(events) >= _DEFAULT_LOG_SCAN_MAX_EVENTS:
+                    errors.append("log scan truncated after max events were emitted")
+                    break
 
             # Record byte position and inode after consuming the file so the
             # next run can seek past already-processed content.
@@ -692,6 +757,7 @@ class PostgresAdapter:
         return TrafficObservationResult(
             scanned_records=scanned_records,
             events=tuple(events),
+            errors=tuple(errors),
             observation_cursor=new_cursor,
         )
 
@@ -715,14 +781,17 @@ class PostgresAdapter:
                 "pg_stat_statements does not support time-based filtering;"
                 " all recorded statements are returned regardless of 'since'."
             )
-        try:
+        def _fetch_pg_stat_rows() -> list[dict[str, Any]]:
             with psycopg.connect(
                 dsn,
                 row_factory=dict_row,
-                options="-c default_transaction_read_only=on",
-                connect_timeout=10,
+                options=_readonly_options(),
+                connect_timeout=_DEFAULT_CONNECT_TIMEOUT_SECONDS,
             ) as conn:
-                rows = list(conn.execute(_PG_STAT_STATEMENTS_SQL).fetchall())
+                return list(conn.execute(_PG_STAT_STATEMENTS_SQL).fetchall())
+
+        try:
+            rows = await _run_pg_call(_fetch_pg_stat_rows)
         except psycopg.Error as exc:
             pgcode = getattr(exc, "pgcode", None)
             if pgcode == "42P01":  # undefined_table — extension not installed
@@ -792,14 +861,18 @@ class PostgresAdapter:
         dsn = self._get_dsn(adapter, probe_target=probe_target)
         started_at = time.perf_counter()
         row_limit = max_rows if max_rows and max_rows > 0 else 100
-        with psycopg.connect(
-            dsn,
-            row_factory=dict_row,
-            options="-c default_transaction_read_only=on -c statement_timeout=30000",
-            connect_timeout=10,
-        ) as conn:
-            result = conn.execute(sql)
-            rows = list(result.fetchmany(row_limit + 1))
+
+        def _fetch_query_rows() -> list[dict[str, Any]]:
+            with psycopg.connect(
+                dsn,
+                row_factory=dict_row,
+                options=_readonly_options(),
+                connect_timeout=_DEFAULT_CONNECT_TIMEOUT_SECONDS,
+            ) as conn:
+                result = conn.execute(sql)
+                return list(result.fetchmany(row_limit + 1))
+
+        rows = await _run_pg_call(_fetch_query_rows)
         duration_ms = (time.perf_counter() - started_at) * 1000.0
         truncated = len(rows) > row_limit
         visible_rows = rows[:row_limit]
@@ -834,44 +907,74 @@ class PostgresAdapter:
         pg_stat_message: str | None = None
         pg_stat_fallback_used = False
 
-        try:
+        def _probe_runtime_capabilities() -> tuple[bool, bool, bool, list[str], list[str], list[str], str | None, bool]:
+            info_schema_ok_local = False
+            pg_proc_ok_local = False
+            pg_stat_ok_local = False
+            info_schema_missing_local: list[str] = []
+            pg_proc_missing_local: list[str] = []
+            pg_stat_missing_local: list[str] = []
+            pg_stat_message_local: str | None = None
+            pg_stat_fallback_used_local = False
+
             with psycopg.connect(
                 dsn,
                 row_factory=dict_row,
                 autocommit=True,
-                options="-c default_transaction_read_only=on",
-                connect_timeout=10,
+                options=_readonly_options(),
+                connect_timeout=_DEFAULT_CONNECT_TIMEOUT_SECONDS,
             ) as conn:
                 try:
                     conn.execute("SELECT 1 FROM information_schema.schemata LIMIT 1")
-                    info_schema_ok = True
+                    info_schema_ok_local = True
                 except psycopg.Error as exc:
                     if getattr(exc, "pgcode", None) == "42501":
-                        info_schema_missing.append("SELECT ON information_schema.schemata")
+                        info_schema_missing_local.append("SELECT ON information_schema.schemata")
 
                 try:
                     conn.execute("SELECT 1 FROM pg_catalog.pg_proc LIMIT 1")
-                    pg_proc_ok = True
+                    pg_proc_ok_local = True
                 except psycopg.Error as exc:
                     if getattr(exc, "pgcode", None) == "42501":
-                        pg_proc_missing.append("SELECT ON pg_catalog.pg_proc")
+                        pg_proc_missing_local.append("SELECT ON pg_catalog.pg_proc")
 
                 try:
                     conn.execute("SELECT 1 FROM pg_stat_statements LIMIT 1")
-                    pg_stat_ok = True
+                    pg_stat_ok_local = True
                 except psycopg.Error as exc:
                     pgcode = getattr(exc, "pgcode", None)
                     if pgcode == "42P01":  # undefined_table — extension not loaded
-                        pg_stat_message = (
+                        pg_stat_message_local = (
                             "pg_stat_statements extension not loaded;"
                             " run: CREATE EXTENSION IF NOT EXISTS pg_stat_statements"
                         )
                         if config.log_capture is not None:
-                            pg_stat_fallback_used = True
+                            pg_stat_fallback_used_local = True
                     elif pgcode == "42501":
-                        pg_stat_missing.append("SELECT ON pg_stat_statements")
-        except psycopg.Error:
-            pass  # connection failure — all probes stay False
+                        pg_stat_missing_local.append("SELECT ON pg_stat_statements")
+
+            return (
+                info_schema_ok_local,
+                pg_proc_ok_local,
+                pg_stat_ok_local,
+                info_schema_missing_local,
+                pg_proc_missing_local,
+                pg_stat_missing_local,
+                pg_stat_message_local,
+                pg_stat_fallback_used_local,
+            )
+
+        with contextlib.suppress(psycopg.Error):
+            (
+                info_schema_ok,
+                pg_proc_ok,
+                pg_stat_ok,
+                info_schema_missing,
+                pg_proc_missing,
+                pg_stat_missing,
+                pg_stat_message,
+                pg_stat_fallback_used,
+            ) = await _run_pg_call(_probe_runtime_capabilities)
 
         scope = ExtractionScope.DATABASE
         results: list[CapabilityProbeResult] = []
@@ -938,20 +1041,23 @@ class PostgresAdapter:
         started_at = time.perf_counter()
         logger.debug("PostgreSQL discover started: adapter=%s", adapter.key)
 
-        with psycopg.connect(
-            dsn,
-            row_factory=dict_row,
-            options="-c default_transaction_read_only=on",
-            connect_timeout=10,
-        ) as conn:
-            rows = list(conn.execute("""
-                SELECT nspname
-                FROM pg_catalog.pg_namespace
-                WHERE nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
-                  AND nspname NOT LIKE 'pg_toast_%'
-                  AND nspname NOT LIKE 'pg_temp_%'
-                ORDER BY nspname
-            """).fetchall())
+        def _discover_rows() -> list[dict[str, Any]]:
+            with psycopg.connect(
+                dsn,
+                row_factory=dict_row,
+                options=_readonly_options(),
+                connect_timeout=_DEFAULT_CONNECT_TIMEOUT_SECONDS,
+            ) as conn:
+                return list(conn.execute("""
+                    SELECT nspname
+                    FROM pg_catalog.pg_namespace
+                    WHERE nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+                      AND nspname NOT LIKE 'pg_toast_%'
+                      AND nspname NOT LIKE 'pg_temp_%'
+                    ORDER BY nspname
+                """).fetchall())
+
+        rows = await _run_pg_call(_discover_rows)
 
         duration_ms = (time.perf_counter() - started_at) * 1000.0
         now = datetime.now(tz=UTC)
@@ -1027,14 +1133,18 @@ class PostgresAdapter:
             WHERE {freshness_where}
         """
 
-        with psycopg.connect(
-            dsn,
-            row_factory=dict_row,
-            options="-c default_transaction_read_only=on",
-            connect_timeout=10,
-        ) as conn:
-            routine_rows = list(conn.execute(routine_sql, routine_params).fetchall())
-            freshness_rows = list(conn.execute(freshness_sql, freshness_params).fetchall())
+        def _extract_schema_rows() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+            with psycopg.connect(
+                dsn,
+                row_factory=dict_row,
+                options=_readonly_options(),
+                connect_timeout=_DEFAULT_CONNECT_TIMEOUT_SECONDS,
+            ) as conn:
+                routine_rows = list(conn.execute(routine_sql, routine_params).fetchall())
+                freshness_rows = list(conn.execute(freshness_sql, freshness_params).fetchall())
+            return routine_rows, freshness_rows
+
+        routine_rows, freshness_rows = await _run_pg_call(_extract_schema_rows)
 
         freshness_by_table: dict[tuple[str, str], dict[str, Any]] = {
             (str(row["schemaname"]), str(row["relname"])): dict(row)
@@ -1180,14 +1290,18 @@ class PostgresAdapter:
         """
 
         started_at = time.perf_counter()
-        with psycopg.connect(
-            dsn,
-            row_factory=dict_row,
-            connect_timeout=10,
-            options="-c default_transaction_read_only=on",
-        ) as conn:
-            view_rows = list(conn.execute(view_sql, view_params).fetchall())
-            routine_rows = list(conn.execute(routine_sql, routine_params).fetchall())
+        def _extract_definition_rows() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+            with psycopg.connect(
+                dsn,
+                row_factory=dict_row,
+                connect_timeout=_DEFAULT_CONNECT_TIMEOUT_SECONDS,
+                options=_readonly_options(),
+            ) as conn:
+                view_rows = list(conn.execute(view_sql, view_params).fetchall())
+                routine_rows = list(conn.execute(routine_sql, routine_params).fetchall())
+            return view_rows, routine_rows
+
+        view_rows, routine_rows = await _run_pg_call(_extract_definition_rows)
 
         duration_ms = (time.perf_counter() - started_at) * 1000.0
         now = datetime.now(tz=UTC)

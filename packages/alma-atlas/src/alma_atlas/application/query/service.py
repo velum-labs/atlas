@@ -15,6 +15,9 @@ from alma_ports.query import QueryObservation
 from alma_ports.schema import SchemaSnapshot
 from alma_ports.violation import Violation
 
+_SUGGEST_TABLE_CANDIDATE_MULTIPLIER = 5
+_SUGGEST_TABLE_MAX_CANDIDATES = 100
+
 
 @dataclass(frozen=True)
 class GraphStatusSummary:
@@ -75,14 +78,19 @@ class GraphReadService:
         return asset, self.schemas.get_latest(asset_id)
 
     def get_query_patterns(self, *, top_n: int) -> list[QueryObservation]:
-        return self._all_queries()[:top_n]
+        return self.queries.list_top(top_n)
 
     def suggest_tables(self, query: str, *, limit: int) -> list[tuple[float, Asset, set[str]]]:
         query_tokens = {token.lower() for token in query.split() if token}
-        assets = self.assets.search(query)
+        candidate_limit = min(
+            max(limit * _SUGGEST_TABLE_CANDIDATE_MULTIPLIER, limit),
+            _SUGGEST_TABLE_MAX_CANDIDATES,
+        )
+        assets = self.assets.search(query)[:candidate_limit]
+        latest_snapshots = self.schemas.get_latest_many([asset.id for asset in assets])
         results: list[tuple[float, Asset, set[str]]] = []
         for asset in assets:
-            col_names = self._column_names_for_asset(asset)
+            col_names = self._column_names_for_asset(asset, latest_snapshots=latest_snapshots)
             if col_names and query_tokens:
                 union = query_tokens | col_names
                 jaccard = len(query_tokens & col_names) / len(union)
@@ -207,8 +215,17 @@ class GraphReadService:
             self._lineage_graph = compute_lineage([_to_lineage_edge(edge) for edge in self._all_edges()])
         return self._lineage_graph
 
-    def _column_names_for_asset(self, asset: Asset) -> set[str]:
-        snapshot = self.schemas.get_latest(asset.id)
+    def _column_names_for_asset(
+        self,
+        asset: Asset,
+        *,
+        latest_snapshots: dict[str, SchemaSnapshot] | None = None,
+    ) -> set[str]:
+        snapshot = (
+            latest_snapshots.get(asset.id)
+            if latest_snapshots is not None
+            else self.schemas.get_latest(asset.id)
+        )
         if snapshot:
             return {column.name.lower() for column in snapshot.columns}
         columns = asset.metadata.get("columns")

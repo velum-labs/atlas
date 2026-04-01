@@ -418,6 +418,46 @@ def test_per_pair_config_overrides_default(db: Database) -> None:
     assert any(uid.startswith("postgres:prod::") for uid in upstream_ids)
 
 
+def test_allowed_pairs_filters_cross_system_discovery(db: Database) -> None:
+    snapshots = {
+        "postgres:prod": _snapshot(_table("public", "customers", columns=(("id", "uuid"),))),
+        "bigquery:warehouse": _snapshot(_table("production", "customers", columns=(("id", "STRING"),))),
+        "snowflake:analytics": _snapshot(_table("PUBLIC", "customers", columns=(("id", "VARCHAR"),))),
+    }
+    _seed_assets(db, snapshots)
+
+    count = discover_cross_system_edges(
+        snapshots,
+        db,
+        allowed_pairs={("bigquery:warehouse", "postgres:prod")},
+    )
+
+    assert count == 1
+    edges = EdgeRepository(db).list_all()
+    assert len(edges) == 1
+    assert edges[0].upstream_id.startswith("postgres:prod::")
+    assert edges[0].downstream_id.startswith("bigquery:warehouse::")
+
+
+def test_max_pairs_truncates_discovery(db: Database, caplog: pytest.LogCaptureFixture) -> None:
+    snapshots = {
+        "postgres:prod": _snapshot(_table("public", "customers", columns=(("id", "uuid"),))),
+        "bigquery:warehouse": _snapshot(_table("production", "customers", columns=(("id", "STRING"),))),
+        "snowflake:analytics": _snapshot(_table("PUBLIC", "customers", columns=(("id", "VARCHAR"),))),
+    }
+    _seed_assets(db, snapshots)
+
+    with caplog.at_level("WARNING"):
+        count = discover_cross_system_edges(
+            snapshots,
+            db,
+            max_pairs=1,
+        )
+
+    assert count == 1
+    assert "truncated after 1 pair" in caplog.text
+
+
 # ---------------------------------------------------------------------------
 # resolve_dbt_source_edges
 # ---------------------------------------------------------------------------

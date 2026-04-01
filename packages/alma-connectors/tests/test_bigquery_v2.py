@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -41,8 +42,16 @@ class _FakeDataset:
 
 
 class _FakeQueryJob:
-    def __init__(self, rows: list[dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        total_bytes_processed: int | None = None,
+        total_bytes_billed: int | None = None,
+    ) -> None:
         self._rows = rows
+        self.total_bytes_processed = total_bytes_processed
+        self.total_bytes_billed = total_bytes_billed
 
     def result(self) -> list[dict[str, Any]]:
         return self._rows
@@ -64,6 +73,9 @@ class _FakeBQClient:
         model_rows: list[dict[str, Any]] | None = None,
         options_rows: list[dict[str, Any]] | None = None,
         parameter_rows: list[dict[str, Any]] | None = None,
+        query_rows: list[dict[str, Any]] | None = None,
+        query_total_bytes_processed: int | None = None,
+        query_total_bytes_billed: int | None = None,
         raise_on_list_datasets: Exception | None = None,
         raise_on_schema_query: Exception | None = None,
         raise_on_jobs_query: Exception | None = None,
@@ -81,6 +93,9 @@ class _FakeBQClient:
         self._model_rows = model_rows or []
         self._options_rows = options_rows or []
         self._parameter_rows = parameter_rows or []
+        self._query_rows = query_rows or []
+        self._query_total_bytes_processed = query_total_bytes_processed
+        self._query_total_bytes_billed = query_total_bytes_billed
         self._raise_on_list_datasets = raise_on_list_datasets
         self._raise_on_schema_query = raise_on_schema_query
         self._raise_on_jobs_query = raise_on_jobs_query
@@ -88,6 +103,7 @@ class _FakeBQClient:
         self._raise_on_routines_query = raise_on_routines_query
         self._raise_on_models_query = raise_on_models_query
         self.queries_issued: list[str] = []
+        self.job_configs: list[Any] = []
 
     def list_datasets(self) -> list[_FakeDataset]:
         if self._raise_on_list_datasets is not None:
@@ -96,6 +112,7 @@ class _FakeBQClient:
 
     def query(self, sql: str, job_config: Any = None) -> Any:
         self.queries_issued.append(sql)
+        self.job_configs.append(job_config)
         if "TABLE_STORAGE" in sql:
             return _FakeQueryJob(self._storage_rows)
         if "JOBS_BY_PROJECT" in sql:
@@ -127,7 +144,11 @@ class _FakeBQClient:
         if "INFORMATION_SCHEMA.TABLES" in sql:
             return _FakeQueryJob(self._table_ddl_rows)
         # probe SELECT 1, test_connection SELECT 1, etc.
-        return _FakeQueryJob([])
+        return _FakeQueryJob(
+            self._query_rows,
+            total_bytes_processed=self._query_total_bytes_processed,
+            total_bytes_billed=self._query_total_bytes_billed,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +160,9 @@ def _make_adapter(
     project_id: str = "acme-project",
     location: str = "us",
     observation_cursor: dict[str, object] | None = None,
+    maximum_bytes_billed: int | None = None,
+    default_job_timeout_ms: int = 300_000,
+    include_job_cost_stats: bool = True,
 ) -> PersistedSourceAdapter:
     return PersistedSourceAdapter(
         id="00000000-0000-0000-0000-000000000002",
@@ -151,6 +175,9 @@ def _make_adapter(
             service_account_secret=ExternalSecretRef(provider="env", reference="BQ_SA_JSON"),
             project_id=project_id,
             location=location,
+            maximum_bytes_billed=maximum_bytes_billed,
+            default_job_timeout_ms=default_job_timeout_ms,
+            include_job_cost_stats=include_job_cost_stats,
         ),
         observation_cursor=observation_cursor,
     )
@@ -773,6 +800,42 @@ def test_validate_location_format() -> None:
     _validate_bq_location("us")
     _validate_bq_location("us-central1")
     _validate_bq_location("eu-west1")
+
+
+def test_get_client_passes_location_to_bigquery_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_kwargs: dict[str, Any] = {}
+
+    class _FakeClient:
+        def __init__(self, **kwargs: Any) -> None:
+            captured_kwargs.update(kwargs)
+
+    monkeypatch.setattr(
+        "alma_connectors.adapters.bigquery._get_bigquery_module",
+        lambda: SimpleNamespace(Client=_FakeClient),
+    )
+
+    adapter = BigQueryAdapter(resolve_secret=lambda s: "")
+    adapter._get_client("acme-project", None, location="eu")  # noqa: SLF001
+
+    assert captured_kwargs["project"] == "acme-project"
+    assert captured_kwargs["location"] == "eu"
+
+
+def test_execute_query_dry_run_returns_bytes_processed() -> None:
+    client = _FakeBQClient(
+        query_total_bytes_processed=123456,
+        query_total_bytes_billed=654321,
+    )
+    bq = _make_bq_adapter(client)
+    persisted = _make_adapter(maximum_bytes_billed=999999, default_job_timeout_ms=12_345)
+
+    result = asyncio.run(bq.execute_query(persisted, "SELECT 1", dry_run=True))
+
+    assert result.success is True
+    assert result.bytes_processed == 123456
+    assert result.bytes_billed == 654321
+    assert client.job_configs[-1].maximum_bytes_billed == 999999
+    assert int(client.job_configs[-1].job_timeout_ms) == 12_345
 
 
 def test_quote_bq_identifier_adversarial() -> None:

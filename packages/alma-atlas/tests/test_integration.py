@@ -1,8 +1,9 @@
 """Integration tests for Atlas multi-source pipeline.
 
 These tests validate the full connect → scan → search → lineage pipeline
-against realistic data. They use the dbt adapter with a real manifest and
-optionally test against a live PostgreSQL database.
+against realistic data. They use the dbt adapter with a checked-in fixture
+manifest (override via ``ALMA_TEST_DBT_MANIFEST``) and optionally test
+against a live PostgreSQL database.
 
 Run with: uv run pytest packages/alma-atlas/tests/test_integration.py -v
 
@@ -25,8 +26,14 @@ from alma_atlas.config import AtlasConfig, SourceConfig
 # Fixtures
 # ---------------------------------------------------------------------------
 
-FINTUAL_MANIFEST = Path(
-    "/opt/velum/repos/velum-alma-extract/customers/fintual/dbt-bq-main/target/manifest.json"
+INTEGRATION_DBT_MANIFEST = Path(
+    os.environ.get("ALMA_TEST_DBT_MANIFEST")
+    or (
+        Path(__file__).resolve().parents[3]
+        / "testdata"
+        / "dbt"
+        / "integration_manifest.json"
+    )
 )
 
 
@@ -44,8 +51,8 @@ def atlas_config(atlas_dir: Path) -> AtlasConfig:
     return AtlasConfig(config_dir=atlas_dir)
 
 
-def _has_fintual_manifest() -> bool:
-    return FINTUAL_MANIFEST.exists()
+def _has_integration_manifest() -> bool:
+    return INTEGRATION_DBT_MANIFEST.exists()
 
 
 def _has_pg_test() -> bool:
@@ -57,16 +64,16 @@ def _has_pg_test() -> bool:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not _has_fintual_manifest(), reason="Fintual manifest not available")
+@pytest.mark.skipif(not _has_integration_manifest(), reason="Integration dbt manifest not available")
 class TestDbtIntegration:
-    """Integration tests using Fintual's dbt manifest."""
+    """Integration tests using the shared dbt integration manifest."""
 
     def _setup_dbt_source(self, config: AtlasConfig) -> None:
         config.add_source(
             SourceConfig(
                 id="dbt:fintual",
                 kind="dbt",
-                params={"manifest_path": str(FINTUAL_MANIFEST)},
+                params={"manifest_path": str(INTEGRATION_DBT_MANIFEST)},
             )
         )
 
@@ -83,8 +90,8 @@ class TestDbtIntegration:
         self._setup_dbt_source(atlas_config)
         sources = atlas_config.load_sources()
         result = run_scan(sources[0], atlas_config)
-        assert result.asset_count > 200, f"Expected >200 assets, got {result.asset_count}"
-        assert result.edge_count > 300, f"Expected >300 edges, got {result.edge_count}"
+        assert result.asset_count >= 6, f"Expected at least 6 assets, got {result.asset_count}"
+        assert result.edge_count >= 5, f"Expected at least 5 edges, got {result.edge_count}"
 
     def test_scan_creates_store(self, atlas_config: AtlasConfig) -> None:
         from alma_atlas.pipeline.scan import run_scan
@@ -98,13 +105,13 @@ class TestDbtIntegration:
 
         assets = db.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
         edges = db.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
-        assert assets > 200
-        assert edges > 300
+        assert assets >= 6
+        assert edges >= 5
 
         # Verify asset types
         kinds = dict(db.execute("SELECT kind, COUNT(*) FROM assets GROUP BY kind").fetchall())
         assert "table" in kinds
-        assert "view" in kinds
+        assert "view" in kinds or "external_table" in kinds
 
         db.close()
 
@@ -117,9 +124,9 @@ class TestDbtIntegration:
 
         db = sqlite3.connect(str(atlas_config.db_path))
         results = db.execute(
-            "SELECT id FROM assets WHERE id LIKE '%users%'"
+            "SELECT id FROM assets WHERE id LIKE '%customer%'"
         ).fetchall()
-        assert len(results) > 5, "Expected >5 'users' assets in Fintual manifest"
+        assert len(results) > 0, "Expected at least one customer-related asset in integration manifest"
         db.close()
 
     def test_lineage_edges(self, atlas_config: AtlasConfig) -> None:
@@ -135,13 +142,13 @@ class TestDbtIntegration:
             db.execute("SELECT kind, COUNT(*) FROM edges GROUP BY kind").fetchall()
         )
         assert "depends_on" in edge_types
-        assert edge_types["depends_on"] > 300
+        assert edge_types["depends_on"] >= 4
 
-        # Check specific known lineage: heroku_views.users should have downstream
+        # Check a known lineage path from the raw source to staged/marts models.
         downstream = db.execute(
-            "SELECT COUNT(*) FROM edges WHERE upstream_id LIKE '%heroku_views.users%'"
+            "SELECT COUNT(*) FROM edges WHERE upstream_id LIKE '%raw.orders%'"
         ).fetchone()[0]
-        assert downstream > 0, f"Expected downstream edges from users table, got {downstream}"
+        assert downstream > 0, f"Expected downstream edges from raw.orders, got {downstream}"
         db.close()
 
     def test_store_size_reasonable(self, atlas_config: AtlasConfig) -> None:
@@ -152,7 +159,7 @@ class TestDbtIntegration:
         run_scan(sources[0], atlas_config)
 
         size_kb = atlas_config.db_path.stat().st_size / 1024
-        assert size_kb < 10_000, f"Store too large: {size_kb:.0f} KB"
+        assert size_kb < 512, f"Store too large for the fixture manifest: {size_kb:.0f} KB"
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +202,7 @@ class TestPostgresIntegration:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not _has_fintual_manifest(), reason="Fintual manifest not available")
+@pytest.mark.skipif(not _has_integration_manifest(), reason="Integration dbt manifest not available")
 @pytest.mark.skipif(not _has_pg_test(), reason="PG_TEST_DSN not set")
 class TestMultiSourceIntegration:
     """Integration tests with multiple sources (dbt + Postgres)."""
@@ -207,7 +214,7 @@ class TestMultiSourceIntegration:
             SourceConfig(
                 id="dbt:fintual",
                 kind="dbt",
-                params={"manifest_path": str(FINTUAL_MANIFEST)},
+                params={"manifest_path": str(INTEGRATION_DBT_MANIFEST)},
             )
         )
         dsn = os.environ["PG_TEST_DSN"]

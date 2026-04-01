@@ -22,7 +22,11 @@ from alma_atlas.source_records import AtlasSourceDefinition, AtlasSourceRecord, 
 from alma_connectors.catalog import redact_source_params
 
 # Known top-level keys for atlas.yml. Unknown keys are rejected (fail-closed).
-_KNOWN_ATLAS_YML_KEYS = frozenset({"version", "sources", "team", "hooks", "learning"})
+_KNOWN_ATLAS_YML_KEYS = frozenset(
+    {"version", "sources", "team", "hooks", "learning", "privacy", "edge_discovery"}
+)
+_ALLOWED_HOOK_TYPES = frozenset({"webhook", "log"})
+_ALLOWED_PRIVACY_STORAGE_MODES = frozenset({"full_sql", "redacted_sql", "fingerprint_only"})
 
 SUPPORTED_LEARNING_PROVIDERS = frozenset({"acp", "mock"})
 DEFAULT_AGENT_PROVIDER = "mock"
@@ -45,6 +49,35 @@ def default_config_dir() -> Path:
     if env:
         return Path(env)
     return Path.home() / ".alma"
+
+
+def _parse_bool(value: object, *, context: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    raise ValueError(f"{context}: expected a boolean value, got {value!r}")
+
+
+def _parse_positive_int(
+    value: object,
+    *,
+    context: str,
+    allow_none: bool = False,
+) -> int | None:
+    if value is None and allow_none:
+        return None
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{context}: expected a positive integer, got {value!r}") from exc
+    if parsed < 1:
+        raise ValueError(f"{context}: expected a positive integer, got {parsed!r}")
+    return parsed
 
 
 def _validate_learning_provider(provider: str, *, context: str) -> str:
@@ -116,6 +149,71 @@ class LearningConfig:
 
 
 @dataclass
+class PrivacyConfig:
+    """Privacy and retention controls for Atlas query data surfaces."""
+
+    include_sql_previews: bool = False
+    query_storage_mode: str = "full_sql"
+    query_retention_days: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.query_storage_mode not in _ALLOWED_PRIVACY_STORAGE_MODES:
+            raise ValueError(
+                "query_storage_mode must be one of "
+                f"{sorted(_ALLOWED_PRIVACY_STORAGE_MODES)}"
+            )
+        if self.query_retention_days is not None and self.query_retention_days < 1:
+            raise ValueError("query_retention_days must be >= 1 when provided")
+
+
+def _normalize_source_pairs(value: object, *, context: str) -> tuple[tuple[str, str], ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ValueError(f"{context}: expected a list of [source_a, source_b] pairs")
+
+    pairs: list[tuple[str, str]] = []
+    for raw_pair in value:
+        if (
+            not isinstance(raw_pair, (list, tuple))
+            or len(raw_pair) != 2
+            or not isinstance(raw_pair[0], str)
+            or not isinstance(raw_pair[1], str)
+        ):
+            raise ValueError(f"{context}: each pair must be a two-item string sequence")
+        left = raw_pair[0].strip()
+        right = raw_pair[1].strip()
+        if not left or not right:
+            raise ValueError(f"{context}: source pair values must be non-empty strings")
+        normalized = tuple(sorted((left, right)))
+        pairs.append((normalized[0], normalized[1]))
+    return tuple(dict.fromkeys(pairs))
+
+
+@dataclass
+class EdgeDiscoverySettings:
+    """Runtime controls for the pairwise cross-system edge discovery pass."""
+
+    match_threshold: float | None = None
+    dest_dataset_scope: tuple[str, ...] = ()
+    allowed_source_pairs: tuple[tuple[str, str], ...] = ()
+    denied_source_pairs: tuple[tuple[str, str], ...] = ()
+    max_source_pairs: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.match_threshold is not None and not 0.0 <= self.match_threshold <= 1.0:
+            raise ValueError("match_threshold must be in [0.0, 1.0] when provided")
+        normalized_scope = tuple(
+            str(item).strip().lower()
+            for item in self.dest_dataset_scope
+            if str(item).strip()
+        )
+        object.__setattr__(self, "dest_dataset_scope", normalized_scope)
+        if self.max_source_pairs is not None and self.max_source_pairs < 1:
+            raise ValueError("max_source_pairs must be >= 1 when provided")
+
+
+@dataclass
 class PostScanHook:
     """Configuration for a post-scan hook."""
 
@@ -151,6 +249,8 @@ class AtlasConfig:
     team_api_key: str | None = None
     team_id: str | None = None
     learning: LearningConfig = field(default_factory=LearningConfig)
+    privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
+    edge_discovery: EdgeDiscoverySettings = field(default_factory=EdgeDiscoverySettings)
 
     def __post_init__(self) -> None:
         if self.db_path is None:
@@ -340,8 +440,11 @@ def load_atlas_yml(path: Path | str) -> AtlasConfig:
             "Install it with: pip install pyyaml"
         ) from exc
 
-    path = Path(path)
-    data: dict = yaml.safe_load(path.read_text()) or {}
+    path = Path(path).expanduser().resolve()
+    raw_data = yaml.safe_load(path.read_text()) or {}
+    if not isinstance(raw_data, dict):
+        raise ValueError(f"{path.name}: expected a top-level mapping, got {type(raw_data).__name__}")
+    data: dict[str, Any] = raw_data
 
     unknown = set(data) - _KNOWN_ATLAS_YML_KEYS
     if unknown:
@@ -350,41 +453,191 @@ def load_atlas_yml(path: Path | str) -> AtlasConfig:
             f"Allowed keys: {sorted(_KNOWN_ATLAS_YML_KEYS)}"
         )
 
-    cfg = AtlasConfig()
+    version = data.get("version")
+    if version is not None:
+        parsed_version = _parse_positive_int(version, context=f"{path.name}:version")
+        if parsed_version != 1:
+            raise ValueError(f"{path.name}: unsupported version {version!r}. Supported versions: [1]")
+
+    env_config_dir = os.environ.get("ALMA_CONFIG_DIR")
+    config_dir = default_config_dir() if env_config_dir else path.parent
+    if env_config_dir and path.parent != config_dir:
+        logger.warning(
+            "atlas.yml loaded from %s but ALMA_CONFIG_DIR points to %s; persisted Atlas state will use %s",
+            path.parent,
+            config_dir,
+            config_dir,
+        )
+    cfg = AtlasConfig(config_dir=config_dir)
 
     # Parse sources list.
-    for raw_source in data.get("sources", []):
+    raw_sources = data.get("sources", [])
+    if not isinstance(raw_sources, list):
+        raise ValueError("atlas.yml: 'sources' must be a list")
+    for raw_source in raw_sources:
+        if not isinstance(raw_source, dict):
+            raise ValueError("atlas.yml: each source must be a mapping")
+        source_id = raw_source.get("id")
+        source_kind = raw_source.get("kind")
+        if not isinstance(source_id, str) or not source_id.strip():
+            raise ValueError("atlas.yml: each source requires a non-empty string 'id'")
+        if not isinstance(source_kind, str) or not source_kind.strip():
+            raise ValueError(f"atlas.yml: source {source_id!r} requires a non-empty string 'kind'")
+        raw_params = raw_source.get("params", {})
+        if raw_params is None:
+            raw_params = {}
+        if not isinstance(raw_params, dict):
+            raise ValueError(f"atlas.yml: source {source_id!r} params must be a mapping")
         cfg.sources.append(
             SourceConfig(
-                id=raw_source["id"],
-                kind=raw_source["kind"],
-                params=raw_source.get("params", {}),
+                id=source_id.strip(),
+                kind=source_kind.strip(),
+                params=dict(raw_params),
             )
         )
 
     # Parse post-scan hooks.
-    for raw_hook in data.get("hooks", {}).get("post_scan", []):
+    hooks_raw = data.get("hooks")
+    if hooks_raw is not None:
+        if not isinstance(hooks_raw, dict):
+            raise ValueError("atlas.yml: 'hooks' must be a mapping")
+        post_scan_hooks = hooks_raw.get("post_scan", [])
+        if not isinstance(post_scan_hooks, list):
+            raise ValueError("atlas.yml: 'hooks.post_scan' must be a list")
+    else:
+        post_scan_hooks = []
+    for raw_hook in post_scan_hooks:
+        if not isinstance(raw_hook, dict):
+            raise ValueError("atlas.yml: each post_scan hook must be a mapping")
+        hook_name = raw_hook.get("name")
+        hook_type = raw_hook.get("type")
+        if not isinstance(hook_name, str) or not hook_name.strip():
+            raise ValueError("atlas.yml: each post_scan hook requires a non-empty string 'name'")
+        if not isinstance(hook_type, str) or hook_type not in _ALLOWED_HOOK_TYPES:
+            raise ValueError(
+                "atlas.yml: post_scan hook 'type' must be one of "
+                f"{sorted(_ALLOWED_HOOK_TYPES)}"
+            )
+        raw_events = raw_hook.get("events", [])
+        if not isinstance(raw_events, list) or any(not isinstance(event, str) for event in raw_events):
+            raise ValueError("atlas.yml: post_scan hook 'events' must be a list of strings")
+        raw_headers = raw_hook.get("headers", {})
+        if not isinstance(raw_headers, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in raw_headers.items()
+        ):
+            raise ValueError("atlas.yml: post_scan hook 'headers' must be a string-to-string mapping")
+        raw_url = raw_hook.get("url")
+        if hook_type == "webhook":
+            if not isinstance(raw_url, str) or not raw_url.strip():
+                raise ValueError("atlas.yml: webhook post_scan hooks require a non-empty string 'url'")
+            url = raw_url.strip()
+        else:
+            if raw_url is not None and not isinstance(raw_url, str):
+                raise ValueError("atlas.yml: post_scan hook 'url' must be a string when provided")
+            url = raw_url.strip() if isinstance(raw_url, str) and raw_url.strip() else None
         cfg.hooks.append(
             PostScanHook(
-                name=raw_hook["name"],
-                type=raw_hook["type"],
-                events=raw_hook.get("events", []),
-                url=raw_hook.get("url"),
-                headers=raw_hook.get("headers", {}),
+                name=hook_name.strip(),
+                type=hook_type,
+                events=[event.strip() for event in raw_events if event.strip()],
+                url=url,
+                headers=dict(raw_headers),
             )
         )
 
     # Parse team settings.
     team = data.get("team", {})
+    if team and not isinstance(team, dict):
+        raise ValueError("atlas.yml: 'team' must be a mapping")
     if team:
         cfg.team_server_url = team.get("server_url")
         cfg.team_id = team.get("team_id")
         # Support api_key directly or via env-var indirection.
         api_key_env = team.get("api_key_env")
         if api_key_env:
+            if not isinstance(api_key_env, str) or not api_key_env.strip():
+                raise ValueError("atlas.yml: 'team.api_key_env' must be a non-empty string")
             cfg.team_api_key = os.environ.get(api_key_env)
+            if cfg.team_api_key is None:
+                logger.warning("atlas.yml references team.api_key_env=%s but it is not set", api_key_env)
         else:
             cfg.team_api_key = team.get("api_key")
+
+    # Parse privacy settings.
+    privacy_raw = data.get("privacy", {})
+    if privacy_raw:
+        if not isinstance(privacy_raw, dict):
+            raise ValueError("atlas.yml: 'privacy' must be a mapping")
+        allowed_privacy_keys = frozenset(
+            {"include_sql_previews", "query_storage_mode", "query_retention_days"}
+        )
+        unknown_privacy_keys = set(privacy_raw) - allowed_privacy_keys
+        if unknown_privacy_keys:
+            raise ValueError(
+                f"atlas.yml: unknown privacy key(s): {sorted(unknown_privacy_keys)}. "
+                f"Allowed keys: {sorted(allowed_privacy_keys)}"
+            )
+        cfg.privacy = PrivacyConfig(
+            include_sql_previews=(
+                _parse_bool(
+                    privacy_raw.get("include_sql_previews"),
+                    context="atlas.yml:privacy.include_sql_previews",
+                )
+                if "include_sql_previews" in privacy_raw
+                else False
+            ),
+            query_storage_mode=str(privacy_raw.get("query_storage_mode", "full_sql")),
+            query_retention_days=_parse_positive_int(
+                privacy_raw.get("query_retention_days"),
+                context="atlas.yml:privacy.query_retention_days",
+                allow_none=True,
+            ),
+        )
+
+    edge_discovery_raw = data.get("edge_discovery", {})
+    if edge_discovery_raw:
+        if not isinstance(edge_discovery_raw, dict):
+            raise ValueError("atlas.yml: 'edge_discovery' must be a mapping")
+        allowed_edge_discovery_keys = frozenset(
+            {
+                "match_threshold",
+                "dest_dataset_scope",
+                "allowed_source_pairs",
+                "denied_source_pairs",
+                "max_source_pairs",
+            }
+        )
+        unknown_edge_keys = set(edge_discovery_raw) - allowed_edge_discovery_keys
+        if unknown_edge_keys:
+            raise ValueError(
+                f"atlas.yml: unknown edge_discovery key(s): {sorted(unknown_edge_keys)}. "
+                f"Allowed keys: {sorted(allowed_edge_discovery_keys)}"
+            )
+        raw_threshold = edge_discovery_raw.get("match_threshold")
+        match_threshold = None if raw_threshold is None else float(raw_threshold)
+        raw_scope = edge_discovery_raw.get("dest_dataset_scope", ())
+        if raw_scope is None:
+            raw_scope = ()
+        if not isinstance(raw_scope, (list, tuple)):
+            raise ValueError("atlas.yml: edge_discovery.dest_dataset_scope must be a list of strings")
+        cfg.edge_discovery = EdgeDiscoverySettings(
+            match_threshold=match_threshold,
+            dest_dataset_scope=tuple(str(item) for item in raw_scope),
+            allowed_source_pairs=_normalize_source_pairs(
+                edge_discovery_raw.get("allowed_source_pairs"),
+                context="atlas.yml:edge_discovery.allowed_source_pairs",
+            ),
+            denied_source_pairs=_normalize_source_pairs(
+                edge_discovery_raw.get("denied_source_pairs"),
+                context="atlas.yml:edge_discovery.denied_source_pairs",
+            ),
+            max_source_pairs=_parse_positive_int(
+                edge_discovery_raw.get("max_source_pairs"),
+                context="atlas.yml:edge_discovery.max_source_pairs",
+                allow_none=True,
+            ),
+        )
 
     # Parse learning settings.
     learning_raw = data.get("learning", {})
@@ -423,8 +676,18 @@ def load_atlas_yml(path: Path | str) -> AtlasConfig:
                 provider=provider,
                 model=sub.get("model", DEFAULT_AGENT_MODEL),
                 api_key_env=sub.get("api_key_env", DEFAULT_AGENT_API_KEY_ENV),
-                timeout=int(sub.get("timeout", DEFAULT_AGENT_TIMEOUT)),
-                max_tokens=int(sub.get("max_tokens", DEFAULT_AGENT_MAX_TOKENS)),
+                timeout=int(
+                    _parse_positive_int(
+                        sub.get("timeout", DEFAULT_AGENT_TIMEOUT),
+                        context=f"atlas.yml:{context}.timeout",
+                    )
+                ),
+                max_tokens=int(
+                    _parse_positive_int(
+                        sub.get("max_tokens", DEFAULT_AGENT_MAX_TOKENS),
+                        context=f"atlas.yml:{context}.max_tokens",
+                    )
+                ),
                 agent=_parse_agent_process_config(sub),
             )
 

@@ -28,6 +28,9 @@ def discover_cross_system_edges(
     *,
     configs: dict[tuple[str, str], EdgeDiscoveryConfig] | None = None,
     default_config: EdgeDiscoveryConfig | None = None,
+    allowed_pairs: set[tuple[str, str]] | None = None,
+    denied_pairs: set[tuple[str, str]] | None = None,
+    max_pairs: int | None = None,
 ) -> int:
     """Discover edges between all ordered pairs of scanned sources.
 
@@ -58,16 +61,37 @@ def discover_cross_system_edges(
 
     edge_repo = EdgeRepository(db)
     total = 0
+    attempted_pairs = 0
+
+    def _normalize_pair(source_id_a: str, source_id_b: str) -> tuple[str, str]:
+        left, right = sorted((source_id_a, source_id_b))
+        return left, right
 
     for i, source_id_a in enumerate(source_ids):
         for source_id_b in source_ids[i + 1 :]:
+            pair = _normalize_pair(source_id_a, source_id_b)
+            if allowed_pairs is not None and pair not in allowed_pairs:
+                continue
+            if denied_pairs is not None and pair in denied_pairs:
+                continue
+            if max_pairs is not None and attempted_pairs >= max_pairs:
+                logger.warning(
+                    "Cross-system edge discovery truncated after %d pair(s); configure edge_discovery.max_source_pairs to raise the cap.",
+                    max_pairs,
+                )
+                return total
+            attempted_pairs += 1
 
             # PersistedSourceAdapter.key must match ^[a-z0-9][a-z0-9_-]*$ —
             # sanitize colons the same way _build_adapter() does.
             adapter_key_a = source_id_a.replace(":", "-")
             adapter_key_b = source_id_b.replace(":", "-")
 
-            pair_config = (configs or {}).get((source_id_a, source_id_b), default_config)
+            pair_config = (
+                (configs or {}).get(pair)
+                or (configs or {}).get((source_id_a, source_id_b))
+                or default_config
+            )
             engine = EdgeDiscoveryEngine(
                 source_adapter_key=adapter_key_a,
                 dest_adapter_key=adapter_key_b,

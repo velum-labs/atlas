@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -23,9 +24,27 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: customer
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d customer"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     strategy:
       matrix:
         python-version: ["3.12", "3.13"]
+    env:
+      ALMA_TEST_DBT_MANIFEST: ${{ github.workspace }}/testdata/dbt/integration_manifest.json
+      PG_TEST_DSN: postgresql://postgres:test@localhost:5432/customer
+      PG_TEST_SCHEMA: public
 
     steps:
       - uses: actions/checkout@v4
@@ -40,6 +59,32 @@ jobs:
 
       - name: Install dependencies
         run: uv sync --frozen --all-packages
+
+      - name: Seed Postgres integration database
+        run: |
+          uv run python - <<'PY'
+          import psycopg
+
+          dsn = "postgresql://postgres:test@localhost:5432/customer"
+          with psycopg.connect(dsn, autocommit=True) as conn:
+              with conn.cursor() as cur:
+                  cur.execute(
+                      """
+                      CREATE TABLE IF NOT EXISTS public.orders (
+                          id INTEGER PRIMARY KEY,
+                          customer_id INTEGER NOT NULL,
+                          total NUMERIC NOT NULL
+                      )
+                      """
+                  )
+                  cur.execute(
+                      """
+                      INSERT INTO public.orders (id, customer_id, total)
+                      VALUES (1, 10, 42.50), (2, 11, 18.00)
+                      ON CONFLICT (id) DO NOTHING
+                      """
+                  )
+          PY
 
       - name: Lint
         run: uv run ruff check packages/ scripts/
@@ -144,6 +189,60 @@ jobs:
           SQLParser().parse('SELECT 1 FROM t')
           print('all imports + smoke OK')
           "
+
+  emulate-github-smoke:
+    runs-on: ubuntu-latest
+    needs: test
+    env:
+      EMULATE_GITHUB_BASE_URL: http://127.0.0.1:4001
+      EMULATE_GITHUB_TOKEN: gho_test_token_admin
+      EMULATE_GITHUB_OWNER: octocat
+      EMULATE_GITHUB_REPO: atlas-ci-smoke
+      EMULATE_GITHUB_BRANCH: main
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "10"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.8.14"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --frozen --all-packages
+
+      - name: Run emulate GitHub smoke test
+        run: |
+          pnpm dlx emulate --service vercel,github,google --port 4000 --seed testdata/emulate/github-default.yaml > emulate.log 2>&1 &
+          EMULATE_PID=$!
+          trap 'kill ${EMULATE_PID}' EXIT
+          uv run python - <<'PY'
+          import socket
+          import time
+
+          deadline = time.time() + 30
+          while time.time() < deadline:
+              try:
+                  with socket.create_connection(("127.0.0.1", 4001), timeout=1):
+                      break
+              except OSError:
+                  time.sleep(1)
+          else:
+              raise SystemExit("emulate GitHub fixture did not start on port 4001")
+          PY
+          uv run pytest packages/alma-atlas/tests/test_github_emulate.py -q --tb=short
 
   publish-dry-run:
     runs-on: ubuntu-latest

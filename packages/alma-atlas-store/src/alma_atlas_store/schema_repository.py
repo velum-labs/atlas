@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Sequence
 
 from alma_atlas_store.db import Database
 from alma_ports.schema import ColumnInfo, SchemaSnapshot
@@ -46,6 +47,32 @@ class SchemaRepository:
             (asset_id,),
         ).fetchall()
         return [self._row_to_snapshot(r) for r in rows]
+
+    def get_latest_many(self, asset_ids: Sequence[str]) -> dict[str, SchemaSnapshot]:
+        """Return the latest schema snapshot for each requested asset."""
+        normalized_ids = [asset_id for asset_id in asset_ids if asset_id]
+        if not normalized_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in normalized_ids)
+        rows = self._db.conn.execute(
+            f"""
+            SELECT s.*
+            FROM schema_snapshots s
+            JOIN (
+                SELECT asset_id, MAX(captured_at) AS captured_at
+                FROM schema_snapshots
+                WHERE asset_id IN ({placeholders})
+                GROUP BY asset_id
+            ) latest
+              ON latest.asset_id = s.asset_id
+             AND latest.captured_at = s.captured_at
+            """,
+            tuple(normalized_ids),
+        ).fetchall()
+        return {
+            str(row["asset_id"]): self._row_to_snapshot(row)
+            for row in rows
+        }
 
     def _row_to_snapshot(self, row: sqlite3.Row) -> SchemaSnapshot:
         columns = [ColumnInfo(**c) for c in json.loads(row["columns"])]

@@ -42,6 +42,7 @@ DEFAULT_BIGQUERY_SERVICE_ACCOUNT_ENV = "BQ_SERVICE_ACCOUNT_JSON"
 DEFAULT_BIGQUERY_LOOKBACK_HOURS = 24
 DEFAULT_BIGQUERY_MAX_JOB_ROWS = 10_000
 DEFAULT_BIGQUERY_MAX_COLUMN_ROWS = 20_000
+DEFAULT_BIGQUERY_DEFAULT_JOB_TIMEOUT_MS = 300_000
 
 DEFAULT_POSTGRES_SCHEMA = "public"
 DEFAULT_POSTGRES_INCLUDE_SCHEMAS = (DEFAULT_POSTGRES_SCHEMA,)
@@ -134,6 +135,20 @@ def _normalize_schema_tuple(value: object, *, default: tuple[str, ...]) -> tuple
     return (str(value),)
 
 
+def _coerce_bool(value: object, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    raise ValueError(f"expected a boolean-compatible value, got {value!r}")
+
+
 def _require_config_type[T](definition: SourceAdapterDefinition, config_type: type[T], *, kind: str) -> T:
     config = definition.config
     if not isinstance(config, config_type):
@@ -170,6 +185,18 @@ def _build_bigquery_config(params: dict[str, Any]) -> BigQueryAdapterConfig:
         lookback_hours=int(params.get("lookback_hours", DEFAULT_BIGQUERY_LOOKBACK_HOURS)),
         max_job_rows=int(params.get("max_job_rows", DEFAULT_BIGQUERY_MAX_JOB_ROWS)),
         max_column_rows=int(params.get("max_column_rows", DEFAULT_BIGQUERY_MAX_COLUMN_ROWS)),
+        maximum_bytes_billed=(
+            int(params["maximum_bytes_billed"])
+            if params.get("maximum_bytes_billed") is not None
+            else None
+        ),
+        default_job_timeout_ms=int(
+            params.get("default_job_timeout_ms", DEFAULT_BIGQUERY_DEFAULT_JOB_TIMEOUT_MS)
+        ),
+        include_job_cost_stats=_coerce_bool(
+            params.get("include_job_cost_stats"),
+            default=True,
+        ),
         probe_target=params.get("probe_target"),
     )
 
@@ -422,6 +449,9 @@ def _encode_bigquery_definition(
         "lookback_hours": config.lookback_hours,
         "max_job_rows": config.max_job_rows,
         "max_column_rows": config.max_column_rows,
+        "maximum_bytes_billed": config.maximum_bytes_billed,
+        "default_job_timeout_ms": config.default_job_timeout_ms,
+        "include_job_cost_stats": config.include_job_cost_stats,
         "probe_target": config.probe_target,
     }
     secrets = (
@@ -608,6 +638,15 @@ def _decode_bigquery_config(
         lookback_hours=int(config.get("lookback_hours") or DEFAULT_BIGQUERY_LOOKBACK_HOURS),
         max_job_rows=int(config.get("max_job_rows") or DEFAULT_BIGQUERY_MAX_JOB_ROWS),
         max_column_rows=int(config.get("max_column_rows") or DEFAULT_BIGQUERY_MAX_COLUMN_ROWS),
+        maximum_bytes_billed=(
+            int(config["maximum_bytes_billed"])
+            if config.get("maximum_bytes_billed") is not None
+            else None
+        ),
+        default_job_timeout_ms=int(
+            config.get("default_job_timeout_ms") or DEFAULT_BIGQUERY_DEFAULT_JOB_TIMEOUT_MS
+        ),
+        include_job_cost_stats=_coerce_bool(config.get("include_job_cost_stats"), default=True),
         probe_target=(str(config["probe_target"]) if config.get("probe_target") is not None else None),
     )
 
@@ -755,6 +794,9 @@ CONNECTOR_SPECS: dict[str, ConnectorSpec] = {
                 "location",
                 "max_column_rows",
                 "max_job_rows",
+                "maximum_bytes_billed",
+                "default_job_timeout_ms",
+                "include_job_cost_stats",
                 "observation_cursor",
                 "probe_target",
                 "project",

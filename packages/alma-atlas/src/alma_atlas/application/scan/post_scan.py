@@ -40,6 +40,7 @@ async def run_multi_source_post_scan(
     no_learn: bool,
 ) -> int:
     """Run cross-system edge discovery and optional learning after scans finish."""
+    from alma_analysis.edge_discovery import EdgeDiscoveryConfig
     from alma_atlas.pipeline.cross_system_edges import (
         discover_cross_system_edges,
         resolve_dbt_source_edges,
@@ -74,8 +75,34 @@ async def run_multi_source_post_scan(
 
     cross_system_edge_count = 0
     if len(snapshots) >= 2:
+        edge_settings = cfg.edge_discovery
+        default_edge_config = None
+        if edge_settings.match_threshold is not None or edge_settings.dest_dataset_scope:
+            default_edge_config = EdgeDiscoveryConfig(
+                match_threshold=(
+                    edge_settings.match_threshold
+                    if edge_settings.match_threshold is not None
+                    else EdgeDiscoveryConfig().match_threshold
+                ),
+                dest_dataset_scope=edge_settings.dest_dataset_scope,
+            )
         with Database(cfg.db_path) as db, db.transaction():
-            cross_system_edge_count = discover_cross_system_edges(snapshots, db)
+            cross_system_edge_count = discover_cross_system_edges(
+                snapshots,
+                db,
+                default_config=default_edge_config,
+                allowed_pairs=(
+                    set(edge_settings.allowed_source_pairs)
+                    if edge_settings.allowed_source_pairs
+                    else None
+                ),
+                denied_pairs=(
+                    set(edge_settings.denied_source_pairs)
+                    if edge_settings.denied_source_pairs
+                    else None
+                ),
+                max_pairs=edge_settings.max_source_pairs,
+            )
             cross_system_edge_count += resolve_dbt_source_edges(dbt_snapshots, warehouse_snapshots, db)
 
     if repo_path is not None and not no_learn:

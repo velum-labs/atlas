@@ -246,6 +246,9 @@ class BigQueryAdapterConfig:
     lookback_hours: int = 24
     max_job_rows: int = 10_000
     max_column_rows: int = 20_000
+    maximum_bytes_billed: int | None = None
+    default_job_timeout_ms: int = 300_000
+    include_job_cost_stats: bool = True
     probe_target: str | None = None
 
     def __post_init__(self) -> None:
@@ -259,10 +262,12 @@ class BigQueryAdapterConfig:
             "location",
             _normalize_required_string(self.location, field_name="location").lower(),
         )
-        for field_name in ("lookback_hours", "max_job_rows", "max_column_rows"):
+        for field_name in ("lookback_hours", "max_job_rows", "max_column_rows", "default_job_timeout_ms"):
             raw_value = getattr(self, field_name)
             if raw_value < 1:
                 raise ValueError(f"{field_name} must be >= 1")
+        if self.maximum_bytes_billed is not None and self.maximum_bytes_billed < 1:
+            raise ValueError("maximum_bytes_billed must be >= 1 when provided")
         object.__setattr__(
             self,
             "probe_target",
@@ -777,12 +782,18 @@ class QueryResult:
     error_message: str | None = None
     content_hash: str | None = None
     truncated: bool = False
+    bytes_processed: int | None = None
+    bytes_billed: int | None = None
 
     def __post_init__(self) -> None:
         if self.row_count < 0:
             raise ValueError("row_count must be >= 0")
         if self.duration_ms < 0:
             raise ValueError("duration_ms must be >= 0")
+        if self.bytes_processed is not None and self.bytes_processed < 0:
+            raise ValueError("bytes_processed must be >= 0 when provided")
+        if self.bytes_billed is not None and self.bytes_billed < 0:
+            raise ValueError("bytes_billed must be >= 0 when provided")
         object.__setattr__(
             self,
             "error_message",

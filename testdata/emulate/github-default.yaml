@@ -1,0 +1,27 @@
+tokens:
+  gho_test_token_admin:
+    login: octocat
+    scopes:
+      - repo
+      - user
+      - admin:org
+      - admin:repo_hook
+
+github:
+  users:
+    - login: octocat
+      name: The Octocat
+      email: octocat@example.com
+      bio: Shared Atlas/Alma emulate fixture user
+
+  repos:
+    - owner: octocat
+      name: atlas-ci-smoke
+      description: Seeded repo for Atlas alma-ci smoke tests
+      language: Python
+      auto_init: true
+    - owner: octocat
+      name: alma-pr-engine-smoke
+      description: Seeded repo for Alma GitHub App integration tests
+      language: Python
+      auto_init: true

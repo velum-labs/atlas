@@ -371,6 +371,7 @@ def _store_lineage_projection(
 def _store_scan_results(
     *,
     db: Any,
+    cfg: AtlasConfig,
     source: SourceConfig,
     persisted: Any,
     results: dict[Any, Any],
@@ -431,6 +432,8 @@ def _store_scan_results(
             db,
             source_id=source.id,
             source_kind=source.kind,
+            query_storage_mode=cfg.privacy.query_storage_mode,
+            query_retention_days=cfg.privacy.query_retention_days,
         )
         if traffic_result.observation_cursor is not None:
             source.params["observation_cursor"] = dict(traffic_result.observation_cursor)
@@ -580,6 +583,7 @@ async def _run_scan_impl(
             logger.info("[scan/%s] Phase: projection + persistence", source.id)
             asset_count, edge_count, snapshot = _store_scan_results(
                 db=db,
+                cfg=cfg,
                 source=source,
                 persisted=persisted,
                 results=results,

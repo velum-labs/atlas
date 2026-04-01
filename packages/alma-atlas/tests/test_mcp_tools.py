@@ -341,6 +341,31 @@ def test_get_query_patterns_shows_tables(tmp_path: Path) -> None:
     assert "pg::public.orders" in result[0].text
 
 
+def test_get_query_patterns_hides_sql_preview_by_default(tmp_path: Path) -> None:
+    cfg = _make_cfg(tmp_path)
+    with Database(cfg.db_path) as db:
+        QueryRepository(db).upsert(
+            QueryObservation(fingerprint="fp1", sql_text="SELECT * FROM orders", tables=["pg::public.orders"], source="pg:test")
+        )
+
+    result = _handle_get_query_patterns(cfg, {})
+
+    assert "sql:" not in result[0].text
+
+
+def test_get_query_patterns_includes_sql_preview_when_enabled(tmp_path: Path) -> None:
+    cfg = _make_cfg(tmp_path)
+    cfg.privacy.include_sql_previews = True
+    with Database(cfg.db_path) as db:
+        QueryRepository(db).upsert(
+            QueryObservation(fingerprint="fp1", sql_text="SELECT * FROM orders", tables=["pg::public.orders"], source="pg:test")
+        )
+
+    result = _handle_get_query_patterns(cfg, {})
+
+    assert "sql: SELECT * FROM orders" in result[0].text
+
+
 # ---------------------------------------------------------------------------
 # _handle_suggest_tables
 # ---------------------------------------------------------------------------

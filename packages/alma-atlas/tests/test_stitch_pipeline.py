@@ -8,7 +8,7 @@ from alma_atlas.pipeline.stitch import stitch
 from alma_atlas_store.asset_repository import Asset, AssetRepository
 from alma_atlas_store.db import Database
 from alma_atlas_store.edge_repository import EdgeRepository
-from alma_atlas_store.query_repository import QueryRepository
+from alma_atlas_store.query_repository import QueryObservation, QueryRepository
 from alma_connectors.source_adapter import ObservedQueryEvent, TrafficObservationResult
 
 # ---------------------------------------------------------------------------
@@ -140,3 +140,72 @@ def test_stitch_bigquery_dialect(db: Database) -> None:
     traffic = _traffic("SELECT id FROM `myproject.dataset.orders`")
     result = stitch(traffic, db, source_id="bq-proj", source_kind="bigquery")
     assert isinstance(result, int)
+
+
+def test_stitch_redacted_sql_storage_mode(db: Database) -> None:
+    _seed_assets(db, "pg:test::public.orders", "pg:test::query::analyst")
+    traffic = _traffic("SELECT * FROM public.orders WHERE id = 42 AND email = 'alice@example.com'")
+
+    stitch(
+        traffic,
+        db,
+        source_id="pg:test",
+        source_kind="postgres",
+        query_storage_mode="redacted_sql",
+    )
+
+    observations = QueryRepository(db).list_all()
+    assert len(observations) == 1
+    assert "42" not in observations[0].sql_text
+    assert "alice@example.com" not in observations[0].sql_text
+    assert "?" in observations[0].sql_text
+
+
+def test_stitch_fingerprint_only_storage_mode(db: Database) -> None:
+    _seed_assets(db, "pg:test::public.orders", "pg:test::query::analyst")
+    traffic = _traffic("SELECT * FROM public.orders")
+
+    stitch(
+        traffic,
+        db,
+        source_id="pg:test",
+        source_kind="postgres",
+        query_storage_mode="fingerprint_only",
+    )
+
+    observations = QueryRepository(db).list_all()
+    assert len(observations) == 1
+    assert observations[0].sql_text == ""
+
+
+def test_stitch_query_retention_prunes_old_queries(db: Database) -> None:
+    _seed_assets(
+        db,
+        "pg:test::public.orders",
+        "pg:test::public.customers",
+        "pg:test::query::analyst",
+    )
+    repo = QueryRepository(db)
+    repo.upsert(
+        QueryObservation(
+            fingerprint="stale",
+            sql_text="SELECT * FROM public.customers",
+            tables=["pg:test::public.customers"],
+            source="pg:test",
+        )
+    )
+    repo._db.conn.execute(  # noqa: SLF001
+        "UPDATE queries SET last_seen = '2000-01-01 00:00:00' WHERE fingerprint = 'stale'"
+    )
+    repo._db.conn.commit()  # noqa: SLF001
+
+    stitch(
+        _traffic("SELECT id FROM public.orders"),
+        db,
+        source_id="pg:test",
+        source_kind="postgres",
+        query_retention_days=30,
+    )
+
+    fingerprints = {query.fingerprint for query in QueryRepository(db).list_all()}
+    assert "stale" not in fingerprints

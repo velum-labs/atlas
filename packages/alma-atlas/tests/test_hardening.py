@@ -11,6 +11,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -629,3 +630,121 @@ bad_key_2: y
         cfg = load_atlas_yml(yml)
         assert cfg.sources == []
         assert cfg.team_server_url is None
+
+    def test_load_atlas_yml_uses_file_directory_when_env_is_unset(self, tmp_path: Path, monkeypatch) -> None:
+        yml = tmp_path / "atlas.yml"
+        yml.write_text("version: 1\nsources: []\n", encoding="utf-8")
+        monkeypatch.delenv("ALMA_CONFIG_DIR", raising=False)
+        pytest.importorskip("yaml")
+
+        cfg = load_atlas_yml(yml)
+
+        assert cfg.config_dir == tmp_path.resolve()
+
+    def test_load_atlas_yml_warns_when_env_config_dir_differs(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        runtime_dir = tmp_path / "runtime"
+        runtime_dir.mkdir()
+        yml_dir = tmp_path / "configs"
+        yml_dir.mkdir()
+        yml = yml_dir / "atlas.yml"
+        yml.write_text("version: 1\nsources: []\n", encoding="utf-8")
+        monkeypatch.setenv("ALMA_CONFIG_DIR", str(runtime_dir))
+        pytest.importorskip("yaml")
+
+        with caplog.at_level(logging.WARNING):
+            cfg = load_atlas_yml(yml)
+
+        assert cfg.config_dir == runtime_dir
+        assert "ALMA_CONFIG_DIR" in caplog.text
+
+    def test_sources_must_be_a_list(self, tmp_path: Path) -> None:
+        yml = tmp_path / "atlas.yml"
+        yml.write_text("version: 1\nsources: {}\n", encoding="utf-8")
+        pytest.importorskip("yaml")
+
+        with pytest.raises(ValueError, match="'sources' must be a list"):
+            load_atlas_yml(yml)
+
+    def test_hooks_must_be_a_mapping(self, tmp_path: Path) -> None:
+        yml = tmp_path / "atlas.yml"
+        yml.write_text("version: 1\nsources: []\nhooks: []\n", encoding="utf-8")
+        pytest.importorskip("yaml")
+
+        with pytest.raises(ValueError, match="'hooks' must be a mapping"):
+            load_atlas_yml(yml)
+
+    def test_missing_team_api_key_env_logs_warning(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        yml = tmp_path / "atlas.yml"
+        yml.write_text(
+            """
+version: 1
+sources: []
+team:
+  api_key_env: MISSING_TEAM_KEY
+""".strip(),
+            encoding="utf-8",
+        )
+        pytest.importorskip("yaml")
+
+        with caplog.at_level(logging.WARNING):
+            cfg = load_atlas_yml(yml)
+
+        assert cfg.team_api_key is None
+        assert "MISSING_TEAM_KEY" in caplog.text
+
+    def test_privacy_settings_parse(self, tmp_path: Path) -> None:
+        yml = tmp_path / "atlas.yml"
+        yml.write_text(
+            """
+version: 1
+sources: []
+privacy:
+  include_sql_previews: true
+  query_storage_mode: redacted_sql
+  query_retention_days: 14
+""".strip(),
+            encoding="utf-8",
+        )
+        pytest.importorskip("yaml")
+
+        cfg = load_atlas_yml(yml)
+
+        assert cfg.privacy.include_sql_previews is True
+        assert cfg.privacy.query_storage_mode == "redacted_sql"
+        assert cfg.privacy.query_retention_days == 14
+
+    def test_edge_discovery_settings_parse(self, tmp_path: Path) -> None:
+        yml = tmp_path / "atlas.yml"
+        yml.write_text(
+            """
+version: 1
+sources: []
+edge_discovery:
+  match_threshold: 0.75
+  dest_dataset_scope: [analytics]
+  allowed_source_pairs:
+    - [postgres:prod, bigquery:warehouse]
+  denied_source_pairs:
+    - [dbt:core, postgres:prod]
+  max_source_pairs: 5
+""".strip(),
+            encoding="utf-8",
+        )
+        pytest.importorskip("yaml")
+
+        cfg = load_atlas_yml(yml)
+
+        assert cfg.edge_discovery.match_threshold == 0.75
+        assert cfg.edge_discovery.dest_dataset_scope == ("analytics",)
+        assert cfg.edge_discovery.allowed_source_pairs == (("bigquery:warehouse", "postgres:prod"),)
+        assert cfg.edge_discovery.denied_source_pairs == (("dbt:core", "postgres:prod"),)
+        assert cfg.edge_discovery.max_source_pairs == 5

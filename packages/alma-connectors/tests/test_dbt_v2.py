@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -531,73 +532,78 @@ def test_extract_orchestration_raises_not_implemented(tmp_path: Path) -> None:
 
 
 # ===========================================================================
-# Tests — Fintual manifest integration (realistic data)
+# Tests — checked-in integration manifest (realistic data)
 # ===========================================================================
 
-FINTUAL_MANIFEST = "/opt/velum/repos/velum-alma-extract/customers/fintual/dbt-bq-main/target/manifest.json"
+INTEGRATION_MANIFEST = Path(
+    os.environ.get("ALMA_TEST_DBT_MANIFEST")
+    or (
+        Path(__file__).resolve().parents[3]
+        / "testdata"
+        / "dbt"
+        / "integration_manifest.json"
+    )
+)
 
 
 @pytest.mark.skipif(
-    not __import__("pathlib").Path(FINTUAL_MANIFEST).exists(),
-    reason="Fintual manifest not available",
+    not INTEGRATION_MANIFEST.exists(),
+    reason="Integration manifest not available",
 )
-def test_fintual_discover(tmp_path: Path) -> None:
-    adapter = DbtAdapter(manifest_path=FINTUAL_MANIFEST)
+def test_integration_manifest_discover(tmp_path: Path) -> None:
+    adapter = DbtAdapter(manifest_path=str(INTEGRATION_MANIFEST))
     result = run(adapter.discover(_fake_adapter()))
-    # Should find the dbtbq project container.
+    # Should find the fixture project container.
     project_containers = [c for c in result.containers if c.container_type == "project"]
     assert len(project_containers) == 1
-    assert "dbtbq" in project_containers[0].display_name
+    assert "atlas_fixture" in project_containers[0].display_name
     # Should find multiple schema containers.
     schema_containers = [c for c in result.containers if c.container_type == "schema"]
-    assert len(schema_containers) > 10
+    assert len(schema_containers) >= 3
 
 
 @pytest.mark.skipif(
-    not __import__("pathlib").Path(FINTUAL_MANIFEST).exists(),
-    reason="Fintual manifest not available",
+    not INTEGRATION_MANIFEST.exists(),
+    reason="Integration manifest not available",
 )
-def test_fintual_extract_schema(tmp_path: Path) -> None:
-    adapter = DbtAdapter(manifest_path=FINTUAL_MANIFEST)
+def test_integration_manifest_extract_schema(tmp_path: Path) -> None:
+    adapter = DbtAdapter(manifest_path=str(INTEGRATION_MANIFEST))
     result = run(adapter.extract_schema(_fake_adapter()))
-    # 137 model nodes (filtered from 330 total) + 152 sources = 289
-    assert len(result.objects) > 200
+    assert len(result.objects) >= 6
     # Sources should be EXTERNAL_TABLE.
     external = [o for o in result.objects if o.kind == SchemaObjectKindV2.EXTERNAL_TABLE]
-    assert len(external) > 100
+    assert len(external) == 2
 
 
 @pytest.mark.skipif(
-    not __import__("pathlib").Path(FINTUAL_MANIFEST).exists(),
-    reason="Fintual manifest not available",
+    not INTEGRATION_MANIFEST.exists(),
+    reason="Integration manifest not available",
 )
-def test_fintual_extract_definitions_empty_since_no_compiled_sql(tmp_path: Path) -> None:
-    """The Fintual manifest has no compiled_code (compile was not run), so definitions are empty."""
-    adapter = DbtAdapter(manifest_path=FINTUAL_MANIFEST)
+def test_integration_manifest_extract_definitions_returns_compiled_sql(tmp_path: Path) -> None:
+    adapter = DbtAdapter(manifest_path=str(INTEGRATION_MANIFEST))
     result = run(adapter.extract_definitions(_fake_adapter()))
-    # Graceful — returns empty tuple rather than crashing.
     assert isinstance(result.definitions, tuple)
+    assert len(result.definitions) >= 4
 
 
 @pytest.mark.skipif(
-    not __import__("pathlib").Path(FINTUAL_MANIFEST).exists(),
-    reason="Fintual manifest not available",
+    not INTEGRATION_MANIFEST.exists(),
+    reason="Integration manifest not available",
 )
-def test_fintual_extract_lineage(tmp_path: Path) -> None:
-    adapter = DbtAdapter(manifest_path=FINTUAL_MANIFEST)
+def test_integration_manifest_extract_lineage(tmp_path: Path) -> None:
+    adapter = DbtAdapter(manifest_path=str(INTEGRATION_MANIFEST))
     result = run(adapter.extract_lineage(_fake_adapter()))
-    # 132 models with depends_on, producing many edges.
-    assert len(result.edges) > 100
+    assert len(result.edges) >= 4
     # All edges are DECLARED with confidence 1.0.
     assert all(e.edge_kind == LineageEdgeKind.DECLARED for e in result.edges)
     assert all(e.confidence == 1.0 for e in result.edges)
 
 
 @pytest.mark.skipif(
-    not __import__("pathlib").Path(FINTUAL_MANIFEST).exists(),
-    reason="Fintual manifest not available",
+    not INTEGRATION_MANIFEST.exists(),
+    reason="Integration manifest not available",
 )
-def test_fintual_probe_all_available(tmp_path: Path) -> None:
-    adapter = DbtAdapter(manifest_path=FINTUAL_MANIFEST)
+def test_integration_manifest_probe_all_available(tmp_path: Path) -> None:
+    adapter = DbtAdapter(manifest_path=str(INTEGRATION_MANIFEST))
     results = run(adapter.probe(_fake_adapter()))
     assert all(r.available for r in results)

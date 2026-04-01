@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from alma_atlas_store.asset_repository import Asset, AssetRepository
 from alma_atlas_store.query_repository import QueryObservation
 
 
@@ -34,12 +35,18 @@ def test_get_by_fingerprint_returns_none_for_missing(query_repo):
 
 
 def test_list_for_asset_returns_matching(query_repo, sample_query):
+    AssetRepository(query_repo._db).upsert(  # noqa: SLF001
+        Asset(id="project.dataset.table_a", source="bigquery", kind="table", name="table_a")
+    )
     query_repo.upsert(sample_query)
     results = query_repo.list_for_asset("project.dataset.table_a")
     assert any(q.fingerprint == sample_query.fingerprint for q in results)
 
 
 def test_list_for_asset_excludes_non_matching(query_repo, sample_query):
+    AssetRepository(query_repo._db).upsert(  # noqa: SLF001
+        Asset(id="project.dataset.table_a", source="bigquery", kind="table", name="table_a")
+    )
     query_repo.upsert(sample_query)
     results = query_repo.list_for_asset("project.other.table_z")
     assert results == []
@@ -75,6 +82,34 @@ def test_tables_json_roundtrip(query_repo):
     query_repo.upsert(q)
     result = query_repo.get_by_fingerprint("fp_rt")
     assert result.tables == ["schema.table_x", "schema.table_y"]
+
+
+def test_list_top_returns_most_frequent_queries(query_repo):
+    q1 = QueryObservation(fingerprint="fp1", sql_text="SELECT 1", tables=[], source="pg")
+    q2 = QueryObservation(fingerprint="fp2", sql_text="SELECT 2", tables=[], source="pg")
+    query_repo.upsert(q1)
+    query_repo.upsert(q1)
+    query_repo.upsert(q2)
+
+    results = query_repo.list_top(1)
+
+    assert [query.fingerprint for query in results] == ["fp1"]
+
+
+def test_prune_before_deletes_old_queries(query_repo):
+    q1 = QueryObservation(fingerprint="fp1", sql_text="SELECT 1", tables=[], source="pg")
+    q2 = QueryObservation(fingerprint="fp2", sql_text="SELECT 2", tables=[], source="pg")
+    query_repo.upsert(q1)
+    query_repo.upsert(q2)
+    query_repo._db.conn.execute(  # noqa: SLF001
+        "UPDATE queries SET last_seen = '2000-01-01 00:00:00' WHERE fingerprint = 'fp1'"
+    )
+    query_repo._db.conn.commit()  # noqa: SLF001
+
+    query_repo.prune_before("2001-01-01 00:00:00")
+
+    assert query_repo.get_by_fingerprint("fp1") is None
+    assert query_repo.get_by_fingerprint("fp2") is not None
 
 
 def test_timestamps_set(query_repo, sample_query):

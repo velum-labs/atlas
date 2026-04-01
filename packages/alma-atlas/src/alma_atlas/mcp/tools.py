@@ -421,11 +421,12 @@ def _handle_get_query_patterns(cfg: AtlasConfig, arguments: dict[str, Any]) -> l
     lines = [f"Top {len(queries)} query pattern(s) by execution count:\n"]
     for i, q in enumerate(queries, 1):
         tables_str = ", ".join(q.tables) if q.tables else "(none)"
-        sql_preview = q.sql_text[:120].replace("\n", " ") + ("..." if len(q.sql_text) > 120 else "")
         lines.append(f"  {i}. fingerprint={q.fingerprint}  executions={q.execution_count}")
         lines.append(f"     tables: {tables_str}")
         lines.append(f"     source: {q.source}")
-        lines.append(f"     sql: {sql_preview}")
+        if cfg.privacy.include_sql_previews and q.sql_text:
+            sql_preview = q.sql_text[:120].replace("\n", " ") + ("..." if len(q.sql_text) > 120 else "")
+            lines.append(f"     sql: {sql_preview}")
         lines.append("")
 
     return [TextContent(type="text", text="\n".join(lines))]
