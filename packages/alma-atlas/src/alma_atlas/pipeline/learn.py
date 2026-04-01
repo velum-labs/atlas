@@ -6,24 +6,6 @@ repository by the :mod:`alma_atlas.agents.pipeline_analyzer` workflow.
 
 Learning is idempotent: edges that already carry ``learning_status=learned``
 in their metadata are skipped.
-
-Lead/Specialist workflow pattern
---------------------------------
-When a :class:`~alma_atlas.config.LearningConfig` is provided the orchestrator
-uses a *lead/specialist* workflow pattern:
-
-1. The **explorer** workflow performs a two-pass file selection to
-   find repository files relevant to the batch of edges or assets.
-2. The **specialist** workflows receive only the pre-filtered files, reducing
-   token usage and improving signal.
-
-When the ACP runtime exposes direct repository access, Atlas skips the custom
-explorer workflow and lets the external ACP agent inspect the repository from
-the session working directory instead.
-
-Both :func:`run_edge_learning` and :func:`run_asset_annotation` accept either a
-single ``provider`` argument (legacy path) **or** a ``config`` keyword argument
-(new path).  Both calling conventions are supported simultaneously.
 """
 
 from __future__ import annotations
@@ -32,15 +14,34 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from alma_atlas_store.asset_repository import AssetRepository
-from alma_atlas_store.edge_repository import EdgeRepository
+from alma_atlas.application.learning.runtime import (
+    asset_annotation_is_enabled,
+    edge_learning_is_enabled,
+)
+from alma_atlas.application.learning.runtime import (
+    close_owned_learning_runtime as _close_owned_learning_runtime,
+)
+from alma_atlas.application.learning.runtime import (
+    effective_provider_name as _effective_provider_name,
+)
+from alma_atlas.application.learning.runtime import (
+    provider_from_agent_config as _provider_from_agent_config,
+)
+from alma_atlas.application.learning.runtime import (
+    shared_runtime_for_configs as _shared_runtime_for_configs,
+)
+from alma_atlas.application.learning.runtime import (
+    supports_direct_repo_exploration as _supports_direct_repo_exploration,
+)
+from alma_atlas.application.learning.store_updates import (
+    build_asset_annotation_contexts,
+    persist_annotations,
+    persist_edge_learning,
+)
 from alma_ports.edge import Edge
 
 if TYPE_CHECKING:
-    from alma_atlas.agents.acp_provider import ACPSessionRuntime
-    from alma_atlas.agents.provider import LLMProvider
-    from alma_atlas.agents.schemas import EdgeEnrichment
-    from alma_atlas.config import AgentConfig, LearningConfig
+    from alma_atlas.config import LearningConfig
     from alma_atlas_store.db import Database
 
 logger = logging.getLogger(__name__)
@@ -50,126 +51,6 @@ logger = logging.getLogger(__name__)
 # We include `depends_on` because dbt/SQL lineage edges are often the ones that have
 # meaningful transport metadata (schedule, strategy, owner) in the surrounding pipeline code.
 _LEARNABLE_KINDS: frozenset[str] = frozenset({"schema_match", "dbt_source_ref", "depends_on"})
-
-
-def _is_real_provider(provider_name: str) -> bool:
-    """Return True if the provider is a real (non-mock) LLM provider."""
-    return provider_name != "mock"
-
-
-def _effective_provider_name(agent_cfg: AgentConfig) -> str:
-    """Return the runtime provider name for one agent config."""
-    return "acp" if agent_cfg.agent is not None else agent_cfg.provider
-
-
-def _agent_runtime_fingerprint(
-    agent_cfg: AgentConfig,
-    *,
-    repo_path: Path,
-) -> tuple[str, tuple[str, ...], tuple[tuple[str, str], ...], str] | None:
-    """Return a fingerprint for the ACP subprocess/session config.
-
-    The runtime fingerprint intentionally ignores ``model`` and other Atlas
-    metadata fields because ACP execution is controlled by the subprocess
-    command, args, env, and working directory.
-    """
-    if _effective_provider_name(agent_cfg) != "acp":
-        return None
-
-    process_cfg = agent_cfg.agent
-    command = process_cfg.command if process_cfg is not None else "claude-agent-acp"
-    args = tuple(process_cfg.args) if process_cfg is not None else ()
-    env = tuple(sorted((process_cfg.env if process_cfg is not None else {}).items()))
-    return (command, args, env, str(repo_path))
-
-
-def _shared_runtime_for_configs(
-    agent_cfgs: list[AgentConfig],
-    *,
-    repo_path: Path,
-) -> ACPSessionRuntime | None:
-    """Return one shared ACP runtime when all configs resolve identically."""
-    fingerprints = [
-        fingerprint
-        for cfg in agent_cfgs
-        if (fingerprint := _agent_runtime_fingerprint(cfg, repo_path=repo_path)) is not None
-    ]
-    if not fingerprints:
-        return None
-    if any(fingerprint != fingerprints[0] for fingerprint in fingerprints[1:]):
-        return None
-
-    from alma_atlas.agents.acp_provider import ACPSessionRuntime
-
-    command, args, env_items, cwd = fingerprints[0]
-    return ACPSessionRuntime(
-        command=command,
-        args=list(args),
-        env=dict(env_items),
-        cwd=cwd,
-    )
-
-
-def _supports_direct_repo_exploration(provider: LLMProvider) -> bool:
-    return bool(getattr(provider, "supports_direct_repo_exploration", False))
-
-
-def agent_config_is_enabled(agent_cfg: AgentConfig) -> bool:
-    """Return True when one agent config is configured for non-mock execution."""
-    return _is_real_provider(_effective_provider_name(agent_cfg))
-
-
-def edge_learning_is_enabled(config: LearningConfig) -> bool:
-    """Return True when edge learning has the required non-mock agents."""
-    return agent_config_is_enabled(config.explorer) and agent_config_is_enabled(config.pipeline_analyzer)
-
-
-def asset_annotation_is_enabled(config: LearningConfig) -> bool:
-    """Return True when asset annotation has the required non-mock agents."""
-    return agent_config_is_enabled(config.explorer) and agent_config_is_enabled(config.annotator)
-
-
-def _provider_from_agent_config(
-    agent_cfg: AgentConfig,
-    *,
-    repo_path: Path | None = None,
-    runtime: ACPSessionRuntime | None = None,
-) -> LLMProvider:
-    """Instantiate an LLMProvider from an :class:`~alma_atlas.config.AgentConfig`.
-
-    When an :class:`~alma_atlas.config.AgentProcessConfig` is attached
-    (``agent_cfg.agent is not None``), the ACP provider is used automatically
-    regardless of the ``provider`` field value.
-    """
-    from alma_atlas.agents.provider import make_provider
-
-    apc = agent_cfg.agent  # AgentProcessConfig or None
-
-    # If an agent process config is present, default to ACP automatically.
-    effective_provider = _effective_provider_name(agent_cfg)
-
-    return make_provider(
-        effective_provider,
-        model=agent_cfg.model,
-        agent_command=apc.command if apc else "claude-agent-acp",
-        agent_args=list(apc.args) if apc else None,
-        agent_env=dict(apc.env) if apc else None,
-        agent_cwd=str(repo_path) if repo_path is not None else None,
-        runtime=runtime,
-    )
-
-
-async def _close_owned_learning_runtime(
-    *,
-    runtime: ACPSessionRuntime | None,
-    providers: list[LLMProvider],
-) -> None:
-    """Close one shared runtime or the individually owned providers."""
-    if runtime is not None:
-        await runtime.aclose()
-        return
-    for provider in providers:
-        await provider.aclose()
 
 
 def get_unlearned_edges(db: Database) -> list[Edge]:
@@ -185,6 +66,8 @@ def get_unlearned_edges(db: Database) -> list[Edge]:
     Returns:
         List of unlearned :class:`~alma_atlas_store.edge_repository.Edge` objects.
     """
+    from alma_atlas_store.edge_repository import EdgeRepository
+
     repo = EdgeRepository(db)
     return [
         e
@@ -210,9 +93,8 @@ def _object_part(asset_id: str) -> str:
 async def run_edge_learning(
     db: Database,
     repo_path: Path,
-    provider: LLMProvider | None = None,
     *,
-    config: LearningConfig | None = None,
+    config: LearningConfig,
 ) -> int:
     """Learn unlearned cross-system edges with pipeline transport metadata.
 
@@ -230,10 +112,7 @@ async def run_edge_learning(
     Args:
         db:        Open :class:`~alma_atlas_store.db.Database` connection.
         repo_path: Filesystem path to the code repository to scan.
-        provider:  Configured :class:`~alma_atlas.agents.provider.LLMProvider`
-                   (legacy path, used when *config* is ``None``).
-        config:    Per-agent :class:`~alma_atlas.config.LearningConfig`
-                   (new path; takes precedence over *provider*).
+        config: Per-agent :class:`~alma_atlas.config.LearningConfig`.
 
     Returns:
         Number of edges successfully learned and persisted.
@@ -251,158 +130,87 @@ async def run_edge_learning(
         repo_path,
     )
 
-    if config is not None:
-        if not edge_learning_is_enabled(config):
-            raise ValueError(
-                "run_edge_learning requires non-mock explorer and pipeline_analyzer agent configs"
+    if not edge_learning_is_enabled(config):
+        raise ValueError(
+            "run_edge_learning requires non-mock explorer and pipeline_analyzer agent configs"
+        )
+    from alma_atlas.agents.codebase_explorer import explore_for_edges
+
+    shared_runtime = _shared_runtime_for_configs(
+        [config.explorer, config.pipeline_analyzer],
+        repo_path=repo_path,
+    )
+    explorer_provider = _provider_from_agent_config(
+        config.explorer,
+        repo_path=repo_path,
+        runtime=shared_runtime,
+    )
+    analyzer_provider = _provider_from_agent_config(
+        config.pipeline_analyzer,
+        repo_path=repo_path,
+        runtime=shared_runtime,
+    )
+    if shared_runtime is not None:
+        logger.debug("run_edge_learning: using shared ACP runtime for explorer and analyzer")
+
+    try:
+        seen_pairs: set[tuple[str, str]] = set()
+        deduped: list[Edge] = []
+        for edge in unlearned:
+            pair = (_object_part(edge.upstream_id), _object_part(edge.downstream_id))
+            if pair not in seen_pairs:
+                seen_pairs.add(pair)
+                deduped.append(edge)
+
+        if len(deduped) < len(unlearned):
+            logger.info(
+                "run_edge_learning: deduplicated %d → %d edges for agent",
+                len(unlearned),
+                len(deduped),
             )
-        # Lead/specialist workflow path.
-        from alma_atlas.agents.codebase_explorer import explore_for_edges
 
-        shared_runtime = _shared_runtime_for_configs(
-            [config.explorer, config.pipeline_analyzer],
-            repo_path=repo_path,
-        )
-        explorer_provider = _provider_from_agent_config(
-            config.explorer,
-            repo_path=repo_path,
-            runtime=shared_runtime,
-        )
-        analyzer_provider = _provider_from_agent_config(
-            config.pipeline_analyzer,
-            repo_path=repo_path,
-            runtime=shared_runtime,
-        )
-        if shared_runtime is not None:
-            logger.debug("run_edge_learning: using shared ACP runtime for explorer and analyzer")
+        edge_batch_size = 10
+        enrichments = []
+        use_direct_repo = _supports_direct_repo_exploration(analyzer_provider)
+        if use_direct_repo:
+            logger.debug("run_edge_learning: analyzer will inspect repository directly via ACP")
+        for batch_start in range(0, len(deduped), edge_batch_size):
+            batch = deduped[batch_start : batch_start + edge_batch_size]
+            logger.info(
+                "run_edge_learning: batch %d/%d (%d edges)",
+                batch_start // edge_batch_size + 1,
+                (len(deduped) + edge_batch_size - 1) // edge_batch_size,
+                len(batch),
+            )
 
-        try:
-            # Deduplicate edges by (upstream_table, downstream_table) — schema_match and
-            # dbt_source_ref for the same pair are redundant for learning purposes.
-            seen_pairs: set[tuple[str, str]] = set()
-            deduped: list[Edge] = []
-            for e in unlearned:
-                pair = (_object_part(e.upstream_id), _object_part(e.downstream_id))
-                if pair not in seen_pairs:
-                    seen_pairs.add(pair)
-                    deduped.append(e)
-
-            if len(deduped) < len(unlearned):
-                logger.info(
-                    "run_edge_learning: deduplicated %d → %d edges for agent",
-                    len(unlearned),
-                    len(deduped),
-                )
-
-            # Batch edges to avoid overwhelming the LLM.  Large batches (>10 edges)
-            # cause Opus to return empty results or malformed responses.
-            _EDGE_BATCH_SIZE = 10
-            enrichments = []
-            use_direct_repo = _supports_direct_repo_exploration(analyzer_provider)
             if use_direct_repo:
-                logger.debug("run_edge_learning: analyzer will inspect repository directly via ACP")
-            for batch_start in range(0, len(deduped), _EDGE_BATCH_SIZE):
-                batch = deduped[batch_start : batch_start + _EDGE_BATCH_SIZE]
-                logger.info(
-                    "run_edge_learning: batch %d/%d (%d edges)",
-                    batch_start // _EDGE_BATCH_SIZE + 1,
-                    (len(deduped) + _EDGE_BATCH_SIZE - 1) // _EDGE_BATCH_SIZE,
-                    len(batch),
+                pre_filtered = None
+            else:
+                pre_filtered = await explore_for_edges(batch, repo_path, explorer_provider)
+                logger.debug(
+                    "run_edge_learning: explorer pre-filtered %d file(s)",
+                    len(pre_filtered),
                 )
 
-                if use_direct_repo:
-                    pre_filtered = None
-                else:
-                    pre_filtered = await explore_for_edges(batch, repo_path, explorer_provider)
-                    logger.debug(
-                        "run_edge_learning: explorer pre-filtered %d file(s)",
-                        len(pre_filtered),
-                    )
-
-                batch_enrichments = await analyze_edges(
-                    batch,
-                    repo_path,
-                    analyzer_provider,
-                    pre_filtered_files=pre_filtered,
-                    allow_repo_exploration=use_direct_repo,
-                )
-                enrichments.extend(batch_enrichments)
-        finally:
-            await _close_owned_learning_runtime(
-                runtime=shared_runtime,
-                providers=[explorer_provider, analyzer_provider],
+            batch_enrichments = await analyze_edges(
+                batch,
+                repo_path,
+                analyzer_provider,
+                pre_filtered_files=pre_filtered,
+                allow_repo_exploration=use_direct_repo,
             )
-    elif provider is not None:
-        # Legacy single-provider path.
-        enrichments = await analyze_edges(
-            unlearned,
-            repo_path,
-            provider,
-            allow_repo_exploration=_supports_direct_repo_exploration(provider),
+            enrichments.extend(batch_enrichments)
+    finally:
+        await _close_owned_learning_runtime(
+            runtime=shared_runtime,
+            providers=[explorer_provider, analyzer_provider],
         )
-    else:
-        raise ValueError("run_edge_learning requires either 'provider' or 'config'")
 
     if not enrichments:
         logger.info("run_edge_learning: agent returned no results")
         return 0
 
-    # Index enrichments by (schema.table, schema.table) for O(1) lookup.
-    # Be forgiving: some models include system prefixes (e.g. "pg::raw.users").
-    enrichment_index: dict[tuple[str, str], EdgeEnrichment] = {
-        (_object_part(e.source_table), _object_part(e.dest_table)): e
-        for e in enrichments
-    }
-
-    repo = EdgeRepository(db)
-    learned_count = 0
-
-    for edge in unlearned:
-        src_obj = _object_part(edge.upstream_id)
-        dst_obj = _object_part(edge.downstream_id)
-        enrichment = enrichment_index.get((src_obj, dst_obj))
-        if enrichment is None:
-            logger.debug(
-                "run_edge_learning: no match for %s → %s",
-                edge.upstream_id,
-                edge.downstream_id,
-            )
-            continue
-
-        updated_metadata: dict = {
-            **edge.metadata,
-            "transport_kind": enrichment.transport_kind,
-            "schedule": enrichment.schedule,
-            "strategy": enrichment.strategy,
-            "write_disposition": enrichment.write_disposition,
-            "watermark_column": enrichment.watermark_column,
-            "owner": enrichment.owner,
-            "confidence_note": enrichment.confidence_note,
-            "learning_status": "learned",
-        }
-        try:
-            repo.upsert(
-                Edge(
-                    upstream_id=edge.upstream_id,
-                    downstream_id=edge.downstream_id,
-                    kind=edge.kind,
-                    metadata=updated_metadata,
-                )
-            )
-            learned_count += 1
-            logger.debug(
-                "run_edge_learning: persisted learning for %s → %s",
-                edge.upstream_id,
-                edge.downstream_id,
-            )
-        except Exception as exc:
-            logger.warning(
-                "run_edge_learning: failed to persist learning for %s → %s: %s",
-                edge.upstream_id,
-                edge.downstream_id,
-                exc,
-            )
-
+    learned_count = persist_edge_learning(db, unlearned, enrichments)
     logger.info("run_edge_learning: %d edge(s) learned", learned_count)
     return learned_count
 
@@ -417,11 +225,8 @@ def get_unannotated_assets(db: Database, *, limit: int = 100) -> list[str]:
 async def run_asset_annotation(
     db: Database,
     repo_path: Path,
-    provider: LLMProvider | None = None,
     *,
-    config: LearningConfig | None = None,
-    provider_name: str | None = None,
-    model: str | None = None,
+    config: LearningConfig,
     limit: int = 100,
     batch_size: int = 20,
 ) -> int:
@@ -431,91 +236,47 @@ async def run_asset_annotation(
     been annotated, builds a context payload per asset (schema + basic lineage),
     calls the annotator workflow, and persists results to the store.
 
-    When *config* is provided the lead/specialist pattern is used:
-    - The explorer agent (``config.explorer``) pre-filters repository files.
-    - The annotator (``config.annotator``) receives only relevant files.
-
     Args:
-        db:            Open Atlas database.
-        repo_path:      Filesystem path to the code repository.
-        provider:       Configured LLM provider (legacy path).
-        config:         Per-agent LearningConfig (new path; takes precedence).
-        provider_name:  Provider identifier used for provenance (legacy path).
-        model:          Model identifier used for provenance (legacy path).
-        limit:          Max assets to annotate in this run.
-        batch_size:     Max assets per LLM call.
+        db: Open Atlas database.
+        repo_path: Filesystem path to the code repository.
+        config: Per-agent LearningConfig.
+        limit: Max assets to annotate in this run.
+        batch_size: Max assets per LLM call.
 
     Returns:
         Number of assets successfully annotated.
     """
     from alma_atlas.agents.annotator import analyze_assets
-    from alma_atlas_store.annotation_repository import AnnotationRecord, AnnotationRepository
-    from alma_atlas_store.edge_repository import EdgeRepository
-    from alma_atlas_store.schema_repository import SchemaRepository
-
     asset_ids = get_unannotated_assets(db, limit=limit)
     if not asset_ids:
         logger.info("run_asset_annotation: no unannotated assets found")
         return 0
 
-    # Resolve provider and provenance from config or legacy args.
-    if config is not None:
-        if not asset_annotation_is_enabled(config):
-            raise ValueError(
-                "run_asset_annotation requires non-mock explorer and annotator agent configs"
-            )
-        _provider_name = _effective_provider_name(config.annotator)
-        _model = config.annotator.model
-    elif provider is not None:
-        enricher_provider = provider
-        _provider_name = provider_name or "unknown"
-        _model = model or "unknown"
-    else:
-        raise ValueError("run_asset_annotation requires either 'provider' or 'config'")
+    if not asset_annotation_is_enabled(config):
+        raise ValueError(
+            "run_asset_annotation requires non-mock explorer and annotator agent configs"
+        )
 
-    asset_repo = AssetRepository(db)
-    edge_repo = EdgeRepository(db)
-    schema_repo = SchemaRepository(db)
-    ann_repo = AnnotationRepository(db)
-
-    # Preload edges once; we only need immediate neighbors.
-    edges = edge_repo.list_all()
-    upstream_by_asset: dict[str, list[str]] = {}
-    downstream_by_asset: dict[str, list[str]] = {}
-    for e in edges:
-        downstream_by_asset.setdefault(e.upstream_id, []).append(e.downstream_id)
-        upstream_by_asset.setdefault(e.downstream_id, []).append(e.upstream_id)
-
-    annotated_by = f"agent:{_provider_name}:{_model}"
+    provider_name = _effective_provider_name(config.annotator)
+    model_name = config.annotator.model
+    annotated_by = f"agent:{provider_name}:{model_name}"
     annotated_count = 0
 
-    shared_runtime = (
-        _shared_runtime_for_configs(
-            [config.explorer, config.annotator],
-            repo_path=repo_path,
-        )
-        if config is not None
-        else None
+    shared_runtime = _shared_runtime_for_configs(
+        [config.explorer, config.annotator],
+        repo_path=repo_path,
     )
-    enricher_provider = (
-        _provider_from_agent_config(
-            config.annotator,
-            repo_path=repo_path,
-            runtime=shared_runtime,
-        )
-        if config is not None
-        else enricher_provider
+    enricher_provider = _provider_from_agent_config(
+        config.annotator,
+        repo_path=repo_path,
+        runtime=shared_runtime,
     )
-    explorer_provider = (
-        _provider_from_agent_config(
-            config.explorer,
-            repo_path=repo_path,
-            runtime=shared_runtime,
-        )
-        if config is not None
-        else None
+    explorer_provider = _provider_from_agent_config(
+        config.explorer,
+        repo_path=repo_path,
+        runtime=shared_runtime,
     )
-    if config is not None and shared_runtime is not None:
+    if shared_runtime is not None:
         logger.debug("run_asset_annotation: using shared ACP runtime for explorer and annotator")
 
     try:
@@ -525,115 +286,42 @@ async def run_asset_annotation(
             logger.debug("run_asset_annotation: annotator will inspect repository directly via ACP")
         for i in range(0, len(asset_ids), batch_size):
             batch_ids = asset_ids[i : i + batch_size]
-            contexts: list[dict] = []
-            for asset_id in batch_ids:
-                asset = asset_repo.get(asset_id)
-                if asset is None:
-                    continue
-                schema = schema_repo.get_latest(asset_id)
-                contexts.append(
-                    {
-                        "asset_id": asset.id,
-                        "source": asset.source,
-                        "kind": asset.kind,
-                        "name": asset.name,
-                        "description": asset.description,
-                        "tags": asset.tags,
-                        "schema": (
-                            {
-                                "fingerprint": schema.fingerprint,
-                                "columns": [
-                                    {"name": c.name, "type": c.type, "nullable": c.nullable}
-                                    for c in (schema.columns[:50] if schema else [])
-                                ],
-                            }
-                            if schema
-                            else None
-                        ),
-                        "lineage": {
-                            "upstream": upstream_by_asset.get(asset_id, [])[:25],
-                            "downstream": downstream_by_asset.get(asset_id, [])[:25],
-                        },
-                    }
-                )
-
+            contexts = build_asset_annotation_contexts(db, batch_ids)
             if not contexts:
                 continue
 
-            # Run explorer once per batch when using the lead/specialist pattern.
-            if config is not None:
-                from alma_atlas.agents.codebase_explorer import explore_for_assets
+            from alma_atlas.agents.codebase_explorer import explore_for_assets
 
-                assert explorer_provider is not None
-                if use_direct_repo:
-                    pre_filtered = None
-                else:
-                    pre_filtered = await explore_for_assets(contexts, repo_path, explorer_provider)
-                    logger.debug(
-                        "run_asset_annotation: explorer pre-filtered %d file(s) for batch %d",
-                        len(pre_filtered),
-                        i // batch_size,
-                    )
-                annotations = await analyze_assets(
-                    contexts,
-                    repo_path,
-                    enricher_provider,
-                    pre_filtered_files=pre_filtered,
-                    allow_repo_exploration=use_direct_repo,
-                )
+            if use_direct_repo:
+                pre_filtered = None
             else:
-                annotations = await analyze_assets(
-                    contexts,
-                    repo_path,
-                    enricher_provider,
-                    allow_repo_exploration=use_direct_repo,
+                pre_filtered = await explore_for_assets(contexts, repo_path, explorer_provider)
+                logger.debug(
+                    "run_asset_annotation: explorer pre-filtered %d file(s) for batch %d",
+                    len(pre_filtered),
+                    i // batch_size,
                 )
+            annotations = await analyze_assets(
+                contexts,
+                repo_path,
+                enricher_provider,
+                pre_filtered_files=pre_filtered,
+                allow_repo_exploration=use_direct_repo,
+            )
 
             if not annotations:
                 continue
 
-            for ann in annotations:
-                # Persist with provenance.
-                try:
-                    ann_repo.upsert(
-                        AnnotationRecord(
-                            asset_id=ann.asset_id,
-                            ownership=ann.ownership,
-                            granularity=ann.granularity,
-                            join_keys=ann.join_keys,
-                            freshness_guarantee=ann.freshness_guarantee,
-                            business_logic_summary=ann.business_logic_summary,
-                            sensitivity=ann.sensitivity,
-                            annotated_by=annotated_by,
-                        )
-                    )
-                    annotated_count += 1
-                except Exception as exc:
-                    logger.warning(
-                        "run_asset_annotation: failed to persist annotation for %s: %s",
-                        ann.asset_id,
-                        exc,
-                    )
-    finally:
-        if config is not None:
-            await _close_owned_learning_runtime(
-                runtime=shared_runtime,
-                providers=[provider for provider in [explorer_provider, enricher_provider] if provider is not None],
+            annotated_count += persist_annotations(
+                db,
+                annotations=annotations,
+                annotated_by=annotated_by,
             )
+    finally:
+        await _close_owned_learning_runtime(
+            runtime=shared_runtime,
+            providers=[explorer_provider, enricher_provider],
+        )
 
     logger.info("run_asset_annotation: %d asset(s) annotated", annotated_count)
     return annotated_count
-
-
-# ---------------------------------------------------------------------------
-# Backward compatibility aliases
-# ---------------------------------------------------------------------------
-
-#: Alias for :func:`get_unlearned_edges` (deprecated).
-get_unenriched_edges = get_unlearned_edges
-
-#: Alias for :func:`run_edge_learning` (deprecated).
-run_enrichment = run_edge_learning
-
-#: Alias for :func:`run_asset_annotation` (deprecated).
-run_asset_enrichment = run_asset_annotation

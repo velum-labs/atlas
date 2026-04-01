@@ -7,30 +7,24 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
+from alma_connectors.catalog import get_setup_instructions as get_connector_setup_instructions
 from alma_connectors.credentials import decrypt_credential, encrypt_credential
-from alma_connectors.registry import (
+from alma_connectors.definition_codec import (
     deserialize_config as deserialize_connector_config,
 )
-from alma_connectors.registry import (
-    get_setup_instructions as get_connector_setup_instructions,
-)
-from alma_connectors.registry import (
+from alma_connectors.definition_codec import (
     serialize_definition as serialize_connector_definition,
 )
 from alma_connectors.source_adapter import (
-    ConnectionTestResult,
     ExternalSecretRef,
     ManagedSecret,
     PersistedSourceAdapter,
     QueryResult,
-    SchemaSnapshot,
     SetupInstructions,
-    SourceAdapter,
     SourceAdapterCapabilities,
     SourceAdapterDefinition,
     SourceAdapterKind,
     SourceAdapterStatus,
-    TrafficObservationResult,
 )
 from alma_connectors.source_adapter_runtime import instantiate_runtime_adapter
 from alma_connectors.source_adapter_v2 import (
@@ -86,12 +80,6 @@ class SourceAdapterService:
         runtime = self._get_adapter(adapter)
         if not isinstance(runtime, SourceAdapterV2):
             raise ValueError(f"{type(runtime).__name__} does not implement SourceAdapterV2")
-        return runtime
-
-    def _get_v1_adapter(self, adapter: PersistedSourceAdapter) -> SourceAdapter:
-        runtime = self._get_adapter(adapter)
-        if not isinstance(runtime, SourceAdapter):
-            raise ValueError(f"{type(runtime).__name__} does not implement the legacy SourceAdapter protocol")
         return runtime
 
     def encrypt_secret(self, secret: str) -> bytes:
@@ -181,26 +169,6 @@ class SourceAdapterService:
             created_at=_normalize_datetime(row.get("created_at")),
             updated_at=_normalize_datetime(row.get("updated_at")),
         )
-
-    async def test_connection(
-        self,
-        adapter: PersistedSourceAdapter,
-    ) -> ConnectionTestResult:
-        return await self._get_adapter(adapter).test_connection(adapter)
-
-    async def introspect_schema(
-        self,
-        adapter: PersistedSourceAdapter,
-    ) -> SchemaSnapshot:
-        return await self._get_v1_adapter(adapter).introspect_schema(adapter)
-
-    async def observe_traffic(
-        self,
-        adapter: PersistedSourceAdapter,
-        *,
-        since: datetime | None = None,
-    ) -> TrafficObservationResult:
-        return await self._get_v1_adapter(adapter).observe_traffic(adapter, since=since)
 
     async def execute_query(
         self,

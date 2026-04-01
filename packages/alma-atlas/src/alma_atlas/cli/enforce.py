@@ -15,9 +15,9 @@ from rich import print as rprint
 from rich.console import Console
 from rich.table import Table
 
+from alma_atlas.bootstrap import load_config as get_config
 from alma_atlas.ci_support import ContractMode, split_contract_patterns, validate_contracts, write_payload
 from alma_atlas.cli.common import require_db_path_or_exit
-from alma_atlas.config import get_config
 
 app = typer.Typer(help="Manage enforcement modes and inspect drift violations.")
 console = Console()

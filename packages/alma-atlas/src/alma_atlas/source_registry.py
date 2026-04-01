@@ -12,7 +12,16 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
-from alma_connectors.registry import CONNECTOR_SPECS, SUPPORTED_SOURCE_KINDS
+from alma_connectors.catalog import (
+    CONNECTOR_SPECS,
+    get_connector_spec,
+)
+from alma_connectors.catalog import (
+    allowed_source_params as _allowed_source_params,
+)
+from alma_connectors.catalog import (
+    source_secret_paths as _source_secret_paths,
+)
 
 
 @dataclass(frozen=True)
@@ -35,19 +44,20 @@ SOURCE_DEFINITIONS: dict[str, SourceDefinition] = {
 
 
 def get_source_definition(kind: str) -> SourceDefinition:
-    try:
-        return SOURCE_DEFINITIONS[kind]
-    except KeyError as exc:
-        supported = ", ".join(sorted(SUPPORTED_SOURCE_KINDS))
-        raise ValueError(f"Unknown source kind: {kind!r}. Supported: {supported}") from exc
+    spec = get_connector_spec(kind)
+    return SourceDefinition(
+        kind=spec.kind,
+        allowed_params=spec.allowed_params,
+        secret_paths=spec.secret_paths,
+    )
 
 
 def allowed_source_params(kind: str) -> frozenset[str]:
-    return get_source_definition(kind).allowed_params
+    return _allowed_source_params(kind)
 
 
 def source_secret_paths(kind: str) -> tuple[tuple[str, ...], ...]:
-    return get_source_definition(kind).secret_paths
+    return _source_secret_paths(kind)
 
 
 def ensure_source_params_allowed(kind: str, params: dict[str, Any]) -> None:

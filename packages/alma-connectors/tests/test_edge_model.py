@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from alma_connectors import (
+from alma_connectors.edge_model import (
     ColumnParity,
     CopyStrategy,
     DataEdge,

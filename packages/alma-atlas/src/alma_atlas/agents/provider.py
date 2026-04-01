@@ -4,7 +4,7 @@ Providers implement the :class:`LLMProvider` interface and can be selected
 via Atlas configuration.
 
 Supported providers: ``acp`` (any ACP-compatible agent), ``mock`` (tests).
-The legacy ``anthropic`` and ``openai`` raw-HTTP providers have been removed.
+The removed ``anthropic`` and ``openai`` raw-HTTP providers are rejected.
 Use ``agent.command: claude-agent-acp`` in atlas.yml instead.
 """
 
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T", bound=BaseModel)
 
 if TYPE_CHECKING:
-    from alma_atlas.agents.acp_provider import ACPSessionRuntime
+    from alma_atlas.agents.acp.session_runtime import ACPSessionRuntime
 
 
 class LLMProvider(abc.ABC):
@@ -68,7 +68,7 @@ class MockProvider(LLMProvider):
     ) -> T:
         if self._fixed_result is not None and isinstance(self._fixed_result, response_schema):
             return self._fixed_result  # type: ignore[return-value]
-        from alma_atlas.agents.schemas import AssetEnrichmentResult, ExplorerResult, PipelineAnalysisResult
+        from alma_atlas.agents.schemas import AnnotationResult, ExplorerResult, PipelineAnalysisResult
 
         # Return a minimal valid instance for known result schemas.
         if issubclass(response_schema, PipelineAnalysisResult):
@@ -79,7 +79,7 @@ class MockProvider(LLMProvider):
                 }
             )
 
-        if issubclass(response_schema, AssetEnrichmentResult):
+        if issubclass(response_schema, AnnotationResult):
             return response_schema.model_validate(  # type: ignore[return-value]
                 {
                     "annotations": [],

@@ -50,10 +50,6 @@ class AnnotationResult(BaseModel):
     repo_summary: str | None = None
 
 
-# Backward compatibility alias.
-AssetEnrichmentResult = AnnotationResult
-
-
 class FileRelevance(BaseModel):
     """Relevance score for a single repository file, as returned by the codebase explorer."""
 

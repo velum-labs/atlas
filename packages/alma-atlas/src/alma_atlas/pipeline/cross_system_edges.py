@@ -17,7 +17,7 @@ from alma_ports.edge import Edge
 
 if TYPE_CHECKING:
     from alma_atlas_store.db import Database
-    from alma_connectors.source_adapter import SchemaSnapshot
+    from alma_connectors.source_adapter_v2 import SchemaSnapshotV2 as SchemaSnapshot
 
 logger = logging.getLogger(__name__)
 

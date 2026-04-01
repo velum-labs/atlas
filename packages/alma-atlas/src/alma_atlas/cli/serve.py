@@ -27,7 +27,7 @@ def serve(
     if ctx.invoked_subcommand is not None:
         return
 
-    from alma_atlas.config import get_config
+    from alma_atlas.bootstrap import load_config as get_config
     from alma_atlas.mcp.server import create_server
 
     cfg = get_config()

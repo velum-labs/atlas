@@ -30,8 +30,6 @@ app.add_typer(lineage.app, name="lineage")
 app.add_typer(export.app, name="export")
 app.add_typer(enforce.app, name="enforce")
 app.add_typer(learn.app, name="learn")
-# Backward compatibility: `atlas enrich` is an alias for `atlas learn`
-app.add_typer(learn.app, name="enrich")
 app.add_typer(team.app, name="team")
 app.add_typer(hooks.app, name="hooks")
 

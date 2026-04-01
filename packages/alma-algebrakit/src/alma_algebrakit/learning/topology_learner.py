@@ -482,7 +482,7 @@ def learn_topology_views(
         weights: Optional weights for each expression
         config: Optional clustering configuration
         normalization: Normalization configuration (preferred)
-        default_schema: Schema for unqualified names (deprecated, use normalization)
+        default_schema: Optional shorthand for normalization.default_schema
 
     Returns:
         TopologyLearningResult with learned views
@@ -506,7 +506,7 @@ def extract_all_topologies(
     Args:
         expressions: List of RA expressions
         normalization: Normalization configuration (preferred)
-        default_schema: Schema for unqualified names (deprecated, use normalization)
+        default_schema: Optional shorthand for normalization.default_schema
 
     Returns:
         List of topologies
@@ -532,7 +532,7 @@ def find_common_topology(
     Args:
         expressions: List of RA expressions
         normalization: Normalization configuration (preferred)
-        default_schema: Schema for unqualified names (deprecated, use normalization)
+        default_schema: Optional shorthand for normalization.default_schema
 
     Returns:
         TopologyResult with common topology

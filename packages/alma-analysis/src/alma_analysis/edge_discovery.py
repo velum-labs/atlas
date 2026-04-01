@@ -7,12 +7,8 @@ from dataclasses import dataclass
 from uuid import NAMESPACE_URL, uuid5
 
 from alma_connectors.edge_model import DataEdge, EdgeDiscoveryMethod, EdgeStatus, EdgeTransport
-from alma_connectors.source_adapter import (
-    SchemaSnapshot,
-    SourceColumnSchema,
-    SourceTableSchema,
-    normalize_source_adapter_key,
-)
+from alma_connectors.source_adapter import normalize_source_adapter_key
+from alma_connectors.source_adapter_v2 import ColumnSchema, SchemaObject, SchemaSnapshotV2
 
 
 def _normalize_name(value: str) -> str:
@@ -31,23 +27,23 @@ def _normalize_scope(values: Sequence[str]) -> tuple[str, ...]:
     return tuple(normalized)
 
 
-def _object_identifier(table: SourceTableSchema) -> str:
+def _object_identifier(table: SchemaObject) -> str:
     return f"{table.schema_name}.{table.object_name}"
 
 
-def _object_sort_key(table: SourceTableSchema) -> tuple[str, str]:
+def _object_sort_key(table: SchemaObject) -> tuple[str, str]:
     return (_normalize_name(table.schema_name), _normalize_name(table.object_name))
 
 
-def _column_name_set(table: SourceTableSchema) -> set[str]:
+def _column_name_set(table: SchemaObject) -> set[str]:
     return {_normalize_name(column.name) for column in table.columns}
 
 
 def _shared_columns(
-    source_table: SourceTableSchema, dest_table: SourceTableSchema
-) -> tuple[tuple[SourceColumnSchema, SourceColumnSchema], ...]:
+    source_table: SchemaObject, dest_table: SchemaObject
+) -> tuple[tuple[ColumnSchema, ColumnSchema], ...]:
     dest_lookup = {_normalize_name(column.name): column for column in dest_table.columns}
-    pairs: list[tuple[SourceColumnSchema, SourceColumnSchema]] = []
+    pairs: list[tuple[ColumnSchema, ColumnSchema]] = []
     for source_column in source_table.columns:
         dest_column = dest_lookup.get(_normalize_name(source_column.name))
         if dest_column is None:
@@ -161,8 +157,8 @@ class MatchScoreBreakdown:
 
 @dataclass(frozen=True)
 class _ScoredMatch:
-    source_table: SourceTableSchema
-    dest_table: SourceTableSchema
+    source_table: SchemaObject
+    dest_table: SchemaObject
     breakdown: MatchScoreBreakdown
 
 
@@ -180,15 +176,20 @@ class EdgeDiscoveryEngine:
         self._dest_adapter_key = normalize_source_adapter_key(dest_adapter_key)
         self._config = config or EdgeDiscoveryConfig()
 
-    def discover_edges(self, source: SchemaSnapshot, dest: SchemaSnapshot) -> tuple[DataEdge, ...]:
+    def discover_edges(
+        self,
+        source: SchemaSnapshotV2,
+        dest: SchemaSnapshotV2,
+    ) -> tuple[DataEdge, ...]:
         """Return discovered edges for one source/destination schema-snapshot pair."""
 
+        source_objects = self._filter_queryable_objects(source.objects)
         scoped_dest_objects = self._filter_dest_objects(dest.objects)
-        if not source.objects or not scoped_dest_objects:
+        if not source_objects or not scoped_dest_objects:
             return ()
 
         edges: list[DataEdge] = []
-        for source_table in sorted(source.objects, key=_object_sort_key):
+        for source_table in sorted(source_objects, key=_object_sort_key):
             ranked_matches = self._rank_matches(source_table, scoped_dest_objects)
             if not ranked_matches:
                 continue
@@ -207,22 +208,32 @@ class EdgeDiscoveryEngine:
         return tuple(edges)
 
     def _filter_dest_objects(
-        self, dest_objects: Sequence[SourceTableSchema]
-    ) -> tuple[SourceTableSchema, ...]:
+        self, dest_objects: Sequence[SchemaObject]
+    ) -> tuple[SchemaObject, ...]:
+        queryable_objects = self._filter_queryable_objects(dest_objects)
         if not self._config.dest_dataset_scope:
-            return tuple(sorted(dest_objects, key=_object_sort_key))
+            return tuple(sorted(queryable_objects, key=_object_sort_key))
 
         scope = set(self._config.dest_dataset_scope)
         return tuple(
             table
-            for table in sorted(dest_objects, key=_object_sort_key)
+            for table in sorted(queryable_objects, key=_object_sort_key)
             if _normalize_name(table.schema_name) in scope
+        )
+
+    def _filter_queryable_objects(
+        self, objects: Sequence[SchemaObject]
+    ) -> tuple[SchemaObject, ...]:
+        return tuple(
+            obj
+            for obj in objects
+            if obj.columns
         )
 
     def _rank_matches(
         self,
-        source_table: SourceTableSchema,
-        dest_objects: Sequence[SourceTableSchema],
+        source_table: SchemaObject,
+        dest_objects: Sequence[SchemaObject],
     ) -> tuple[_ScoredMatch, ...]:
         matches = [
             _ScoredMatch(
@@ -244,8 +255,8 @@ class EdgeDiscoveryEngine:
 
     def _score_match(
         self,
-        source_table: SourceTableSchema,
-        dest_table: SourceTableSchema,
+        source_table: SchemaObject,
+        dest_table: SchemaObject,
     ) -> MatchScoreBreakdown:
         table_name_match = float(
             _normalize_name(source_table.object_name) == _normalize_name(dest_table.object_name)
@@ -337,7 +348,7 @@ class EdgeDiscoveryEngine:
             status=EdgeStatus.DISCOVERED,
         )
 
-    def _edge_id(self, source_table: SourceTableSchema, dest_table: SourceTableSchema) -> str:
+    def _edge_id(self, source_table: SchemaObject, dest_table: SchemaObject) -> str:
         seed = ":".join(
             (
                 "edge-discovery",

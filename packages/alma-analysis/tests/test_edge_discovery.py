@@ -6,11 +6,16 @@ from datetime import UTC, datetime
 
 import pytest
 from alma_connectors.edge_model import EdgeTransport
-from alma_connectors.source_adapter import (
+from alma_connectors.source_adapter_v2 import (
+    AdapterCapability,
+    ColumnSchema,
+    ExtractionMeta,
+    ExtractionScope,
+    SchemaObject,
     SchemaObjectKind,
-    SchemaSnapshot,
-    SourceColumnSchema,
-    SourceTableSchema,
+    SchemaSnapshotV2,
+    ScopeContext,
+    SourceAdapterKindV2,
 )
 
 from alma_analysis.edge_discovery import (
@@ -25,22 +30,30 @@ def _table(
     *,
     columns: tuple[tuple[str, str], ...],
     row_count: int | None = None,
-) -> SourceTableSchema:
-    return SourceTableSchema(
+) -> SchemaObject:
+    return SchemaObject(
         schema_name=schema_name,
         object_name=object_name,
-        object_kind=SchemaObjectKind.TABLE,
+        kind=SchemaObjectKind.TABLE,
         columns=tuple(
-            SourceColumnSchema(name=name, data_type=data_type, is_nullable=False)
+            ColumnSchema(name=name, data_type=data_type, is_nullable=False)
             for name, data_type in columns
         ),
         row_count=row_count,
     )
 
 
-def _snapshot(*objects: SourceTableSchema) -> SchemaSnapshot:
-    return SchemaSnapshot(
-        captured_at=datetime(2026, 3, 18, tzinfo=UTC),
+def _snapshot(*objects: SchemaObject) -> SchemaSnapshotV2:
+    return SchemaSnapshotV2(
+        meta=ExtractionMeta(
+            adapter_key="test-adapter",
+            adapter_kind=SourceAdapterKindV2.POSTGRES,
+            capability=AdapterCapability.SCHEMA,
+            scope_context=ScopeContext(scope=ExtractionScope.DATABASE),
+            captured_at=datetime(2026, 3, 18, tzinfo=UTC),
+            duration_ms=10.0,
+            row_count=len(objects),
+        ),
         objects=objects,
     )
 

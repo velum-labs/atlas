@@ -196,7 +196,7 @@ class MetabaseAdapter(BaseAdapterV2):
     # v2 protocol — lifecycle
     # ------------------------------------------------------------------
 
-    async def test_connection(
+    async def _validate_connection(
         self,
         adapter: PersistedSourceAdapter,
     ) -> ConnectionTestResult:

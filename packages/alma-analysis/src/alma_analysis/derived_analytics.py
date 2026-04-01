@@ -395,11 +395,6 @@ async def compute_analytics_server_side(
     persisted: PersistedSourceAdapter,
     events: list[ObservedQueryEvent],
 ) -> DerivedAnalytics:
-    """Compatibility wrapper around client-side analytics computation.
-
-    The analysis package is intentionally pure and does not perform adapter I/O.
-    This async wrapper preserves the historical public API while delegating
-    directly to :func:`compute_analytics`.
-    """
+    """Async wrapper around client-side analytics computation."""
     del adapter, persisted
     return compute_analytics(events)

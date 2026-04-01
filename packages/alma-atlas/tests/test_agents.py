@@ -1,12 +1,12 @@
 """Tests for the P1 pipeline analysis agent system.
 
-Covers:
-- Schema validation (EdgeEnrichment, PipelineAnalysisResult)
-- MockProvider behaviour
-- Pipeline analyzer prompt construction
-- Enrichment orchestrator (get_unlearned_edges, run_edge_learning)
-- CLI dry-run
-- Config parsing for the enrichment section
+ Covers:
+ - Schema validation (EdgeEnrichment, PipelineAnalysisResult)
+ - MockProvider behaviour
+ - Pipeline analyzer prompt construction
+ - Learning orchestrator (get_unlearned_edges, run_edge_learning)
+ - CLI dry-run
+ - Config parsing for the learning section
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from alma_atlas.agents.pipeline_analyzer import (
 )
 from alma_atlas.agents.provider import MockProvider, make_provider
 from alma_atlas.agents.schemas import AnnotationResult, AssetAnnotation, EdgeEnrichment, PipelineAnalysisResult
-from alma_atlas.config import AtlasConfig, LearningConfig, load_atlas_yml
+from alma_atlas.config import AgentConfig, AtlasConfig, LearningConfig, load_atlas_yml
 from alma_atlas.pipeline.learn import (
     get_unannotated_assets,
     get_unlearned_edges,
@@ -425,7 +425,12 @@ async def test_run_edge_learning_persists_enrichment(db: Database, tmp_path: Pat
         ]
     )
     provider = MockProvider(fixed_result=fixed)
-    count = await run_edge_learning(db, tmp_path, provider)
+    learning_cfg = LearningConfig(
+        explorer=AgentConfig(provider="acp"),
+        pipeline_analyzer=AgentConfig(provider="acp"),
+    )
+    with patch("alma_atlas.pipeline.learn._provider_from_agent_config", return_value=provider):
+        count = await run_edge_learning(db, tmp_path, config=learning_cfg)
 
     assert count == 1
     edges = EdgeRepository(db).list_all()
@@ -437,8 +442,12 @@ async def test_run_edge_learning_persists_enrichment(db: Database, tmp_path: Pat
 
 
 async def test_run_edge_learning_no_edges_returns_zero(db: Database, tmp_path: Path) -> None:
-    provider = MockProvider()
-    count = await run_edge_learning(db, tmp_path, provider)
+    learning_cfg = LearningConfig(
+        explorer=AgentConfig(provider="acp"),
+        pipeline_analyzer=AgentConfig(provider="acp"),
+    )
+    with patch("alma_atlas.pipeline.learn._provider_from_agent_config", return_value=MockProvider()):
+        count = await run_edge_learning(db, tmp_path, config=learning_cfg)
     assert count == 0
 
 
@@ -452,8 +461,12 @@ async def test_run_edge_learning_already_enriched_skipped(db: Database, tmp_path
             metadata={"learning_status": "learned"},
         ),
     )
-    provider = MockProvider()
-    count = await run_edge_learning(db, tmp_path, provider)
+    learning_cfg = LearningConfig(
+        explorer=AgentConfig(provider="acp"),
+        pipeline_analyzer=AgentConfig(provider="acp"),
+    )
+    with patch("alma_atlas.pipeline.learn._provider_from_agent_config", return_value=MockProvider()):
+        count = await run_edge_learning(db, tmp_path, config=learning_cfg)
     assert count == 0
 
 
@@ -461,8 +474,12 @@ async def test_run_edge_learning_unmatched_edge_not_updated(db: Database, tmp_pa
     """If agent returns no match for an edge, it remains unenriched."""
     _seed_edge(db, _make_edge("src::raw.orders", "dst::staging.stg_orders", kind="schema_match"))
     # MockProvider returns empty edges list — no match
-    provider = MockProvider()
-    count = await run_edge_learning(db, tmp_path, provider)
+    learning_cfg = LearningConfig(
+        explorer=AgentConfig(provider="acp"),
+        pipeline_analyzer=AgentConfig(provider="acp"),
+    )
+    with patch("alma_atlas.pipeline.learn._provider_from_agent_config", return_value=MockProvider()):
+        count = await run_edge_learning(db, tmp_path, config=learning_cfg)
     assert count == 0
     edges = EdgeRepository(db).list_all()
     assert edges[0].metadata.get("learning_status") != "learned"
@@ -518,23 +535,25 @@ async def test_run_asset_annotation_persists_annotations(db: Database, tmp_path:
         repo_summary="ok",
     )
     provider = MockProvider(fixed_result=fixed)
-
-    count = await run_asset_annotation(
-        db,
-        tmp_path,
-        provider,
-        provider_name="mock",
-        model="test",
-        limit=10,
-        batch_size=20,
+    learning_cfg = LearningConfig(
+        explorer=AgentConfig(provider="acp"),
+        annotator=AgentConfig(provider="acp"),
     )
+    with patch("alma_atlas.pipeline.learn._provider_from_agent_config", return_value=provider):
+        count = await run_asset_annotation(
+            db,
+            tmp_path,
+            config=learning_cfg,
+            limit=10,
+            batch_size=20,
+        )
     assert count == 1
 
     record = AnnotationRepository(db).get(asset_id)
     assert record is not None
     assert record.ownership == "data"
     assert record.join_keys == ["order_id"]
-    assert record.annotated_by == "agent:mock:test"
+    assert record.annotated_by == f"agent:{learning_cfg.annotator.provider}:{learning_cfg.annotator.model}"
 
 
 # ---------------------------------------------------------------------------
@@ -650,64 +669,65 @@ def test_cli_enrich_no_repo_exits_nonzero(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Config parsing — enrichment section
+# Config parsing — learning section
 # ---------------------------------------------------------------------------
 
 
-def test_enrichment_config_defaults() -> None:
+def test_learning_config_defaults() -> None:
     cfg = LearningConfig()
-    assert cfg.provider == "mock"
-    assert cfg.model == "claude-opus-4-6"
-    assert cfg.api_key_env == "ANTHROPIC_API_KEY"
-    assert cfg.timeout == 120
-    assert cfg.max_tokens == 4096
+    assert cfg.agent is None
+    assert cfg.explorer.provider == "mock"
+    assert cfg.pipeline_analyzer.provider == "mock"
+    assert cfg.annotator.provider == "mock"
 
 
-def test_atlas_config_has_default_enrichment() -> None:
+def test_atlas_config_has_default_learning() -> None:
     cfg = AtlasConfig()
     assert isinstance(cfg.learning, LearningConfig)
-    assert cfg.learning.provider == "mock"
+    assert cfg.learning.explorer.provider == "mock"
 
 
-def test_load_atlas_yml_enrichment_section(tmp_path: Path) -> None:
+def test_load_atlas_yml_learning_section(tmp_path: Path) -> None:
     yml = tmp_path / "atlas.yml"
     yml.write_text(
         textwrap.dedent("""\
         version: 1
         learning:
-          provider: acp
-          model: claude-opus-4-6
-          api_key_env: MY_ANTHROPIC_KEY
-          timeout: 60
-          max_tokens: 2048
+          explorer:
+            provider: acp
+            model: claude-opus-4-6
+            api_key_env: MY_ANTHROPIC_KEY
+            timeout: 60
+            max_tokens: 2048
+          pipeline_analyzer:
+            provider: acp
+          annotator:
+            provider: mock
         """)
     )
     cfg = load_atlas_yml(yml)
-    assert cfg.learning.provider == "acp"
-    assert cfg.learning.model == "claude-opus-4-6"
-    assert cfg.learning.api_key_env == "MY_ANTHROPIC_KEY"
-    assert cfg.learning.timeout == 60
-    assert cfg.learning.max_tokens == 2048
+    assert cfg.learning.explorer.provider == "acp"
+    assert cfg.learning.explorer.model == "claude-opus-4-6"
+    assert cfg.learning.explorer.api_key_env == "MY_ANTHROPIC_KEY"
+    assert cfg.learning.explorer.timeout == 60
+    assert cfg.learning.explorer.max_tokens == 2048
 
 
-def test_load_atlas_yml_enrichment_defaults_when_absent(tmp_path: Path) -> None:
+def test_load_atlas_yml_learning_defaults_when_absent(tmp_path: Path) -> None:
     yml = tmp_path / "atlas.yml"
     yml.write_text("version: 1\n")
     cfg = load_atlas_yml(yml)
-    assert cfg.learning.provider == "mock"
+    assert cfg.learning.explorer.provider == "mock"
 
 
-def test_load_atlas_yml_unknown_enrichment_key_not_rejected(tmp_path: Path) -> None:
-    """Unknown keys inside enrichment sub-dict are silently ignored (only top-level is strict)."""
+def test_load_atlas_yml_unknown_learning_key_rejected(tmp_path: Path) -> None:
     yml = tmp_path / "atlas.yml"
     yml.write_text(
         textwrap.dedent("""\
         version: 1
         learning:
-          provider: mock
           unknown_future_key: value
         """)
     )
-    # Should not raise
-    cfg = load_atlas_yml(yml)
-    assert cfg.learning.provider == "mock"
+    with pytest.raises(ValueError, match="unknown learning key"):
+        load_atlas_yml(yml)

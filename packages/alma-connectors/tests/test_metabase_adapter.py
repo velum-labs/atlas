@@ -184,39 +184,6 @@ def test_api_get_raises_on_http_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# test_connection
-# ---------------------------------------------------------------------------
-
-
-def test_test_connection_success() -> None:
-    persisted = _make_persisted()
-    adapter = _make_adapter_apikey()
-    mock_client = _make_mock_client(
-        get_return=_mock_response({"id": 1, "email": "admin@example.com"})
-    )
-    adapter._client = mock_client
-
-    result = asyncio.run(adapter.test_connection(persisted))
-
-    assert result.success is True
-    assert "admin@example.com" in result.message
-
-
-def test_test_connection_failure() -> None:
-    persisted = _make_persisted()
-    adapter = _make_adapter_apikey()
-    resp = _mock_response({}, status_code=401)
-    resp.raise_for_status.side_effect = Exception("Unauthorized")
-    mock_client = _make_mock_client(get_return=resp)
-    adapter._client = mock_client
-
-    result = asyncio.run(adapter.test_connection(persisted))
-
-    assert result.success is False
-    assert "Unauthorized" in result.message
-
-
-# ---------------------------------------------------------------------------
 # probe
 # ---------------------------------------------------------------------------
 

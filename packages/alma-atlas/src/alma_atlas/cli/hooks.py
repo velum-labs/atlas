@@ -15,7 +15,7 @@ from rich import print as rprint
 from rich.console import Console
 from rich.table import Table
 
-from alma_atlas.config import get_config
+from alma_atlas.bootstrap import load_config as get_config
 
 app = typer.Typer(help="Manage post-scan hooks.")
 console = Console()
@@ -24,9 +24,7 @@ console = Console()
 def _load_hooks_cfg(config_file: str | None):
     """Return AtlasConfig with hooks loaded from atlas.yml or default config."""
     if config_file:
-        from alma_atlas.config import load_atlas_yml
-
-        return load_atlas_yml(config_file)
+        return get_config(config_file=config_file)
     return get_config()
 
 

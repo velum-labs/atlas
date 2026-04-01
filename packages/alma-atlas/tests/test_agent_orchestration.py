@@ -13,8 +13,6 @@ import textwrap
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from alma_atlas.agents.provider import MockProvider
 from alma_atlas.agents.schemas import (
     AnnotationResult,
@@ -96,16 +94,6 @@ def test_learning_config_per_agent_defaults() -> None:
     assert cfg.annotator.provider == "mock"
 
 
-def test_learning_config_flat_fields_still_work() -> None:
-    cfg = LearningConfig()
-    # Flat (legacy) fields are preserved.
-    assert cfg.provider == "mock"
-    assert cfg.model == "claude-opus-4-6"
-    assert cfg.api_key_env == "ANTHROPIC_API_KEY"
-    assert cfg.timeout == 120
-    assert cfg.max_tokens == 4096
-
-
 def test_learning_config_per_agent_fields_are_independent() -> None:
     explorer_cfg = AgentConfig(provider="acp", model="gpt-4o-mini")
     analyzer_cfg = AgentConfig(provider="acp", model="claude-haiku-4-5-20251001")
@@ -113,37 +101,6 @@ def test_learning_config_per_agent_fields_are_independent() -> None:
     assert cfg.explorer.provider == "acp"
     assert cfg.pipeline_analyzer.provider == "acp"
     assert cfg.annotator.provider == "mock"  # default
-
-
-# ---------------------------------------------------------------------------
-# load_atlas_yml — flat (legacy) format
-# ---------------------------------------------------------------------------
-
-
-def test_load_atlas_yml_flat_format_sets_per_agent_configs(tmp_path: Path) -> None:
-    yml = tmp_path / "atlas.yml"
-    yml.write_text(
-        textwrap.dedent("""\
-        version: 1
-        enrichment:
-          provider: acp
-          model: claude-opus-4-6
-          api_key_env: MY_KEY
-          timeout: 60
-          max_tokens: 2048
-        """)
-    )
-    cfg = load_atlas_yml(yml)
-    # Flat fields preserved.
-    assert cfg.learning.provider == "acp"
-    assert cfg.learning.model == "claude-opus-4-6"
-    # Flat format propagates to all per-agent configs.
-    assert cfg.learning.explorer.provider == "acp"
-    assert cfg.learning.explorer.model == "claude-opus-4-6"
-    assert cfg.learning.pipeline_analyzer.provider == "acp"
-    assert cfg.learning.pipeline_analyzer.model == "claude-opus-4-6"
-    assert cfg.learning.annotator.provider == "acp"
-    assert cfg.learning.annotator.model == "claude-opus-4-6"
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +113,7 @@ def test_load_atlas_yml_nested_per_agent_format(tmp_path: Path) -> None:
     yml.write_text(
         textwrap.dedent("""\
         version: 1
-        enrichment:
+        learning:
           explorer:
             provider: acp
             model: claude-haiku-4-20250514
@@ -185,7 +142,7 @@ def test_load_atlas_yml_nested_partial_uses_defaults(tmp_path: Path) -> None:
     yml.write_text(
         textwrap.dedent("""\
         version: 1
-        enrichment:
+        learning:
           explorer:
             provider: mock
         """)
@@ -411,31 +368,6 @@ async def test_run_edge_learning_direct_repo_skips_explorer(db: Database, tmp_pa
     assert "current working directory is the repository root" in provider.prompts[0]
 
 
-async def test_run_edge_learning_no_provider_no_config_raises(db: Database, tmp_path: Path) -> None:
-    _seed_edge(db, _make_edge("src::raw.x", "dst::stg.x"))
-    with pytest.raises(ValueError, match="requires either"):
-        await run_edge_learning(db, tmp_path)
-
-
-async def test_run_edge_learning_legacy_provider_still_works(db: Database, tmp_path: Path) -> None:
-    """Old calling convention: run_edge_learning(db, path, provider) still works."""
-    _seed_edge(db, _make_edge("src::raw.orders", "dst::stg.orders", kind="schema_match"))
-
-    fixed = PipelineAnalysisResult(
-        edges=[
-            EdgeEnrichment(
-                source_table="raw.orders",
-                dest_table="stg.orders",
-                transport_kind="DBT_SEED",
-                confidence_note="dbt seed",
-            )
-        ]
-    )
-    provider = MockProvider(fixed_result=fixed)
-    count = await run_edge_learning(db, tmp_path, provider)
-    assert count == 1
-
-
 # ---------------------------------------------------------------------------
 # run_asset_annotation — new config-based path
 # ---------------------------------------------------------------------------
@@ -531,32 +463,3 @@ async def test_run_asset_annotation_direct_repo_skips_explorer(db: Database, tmp
     assert "current working directory is the repository root" in provider.prompts[0]
 
 
-async def test_run_asset_annotation_no_provider_no_config_raises(db: Database, tmp_path: Path) -> None:
-    AssetRepository(db).upsert(Asset(id="pg::public.x", source="pg:test", kind="table", name="public.x"))
-    with pytest.raises(ValueError, match="requires either"):
-        await run_asset_annotation(db, tmp_path)
-
-
-async def test_run_asset_annotation_legacy_provider_still_works(db: Database, tmp_path: Path) -> None:
-    """Old calling convention still works."""
-    asset_id = "pg::public.orders"
-    AssetRepository(db).upsert(Asset(id=asset_id, source="pg:test", kind="table", name="public.orders"))
-
-    fixed = AnnotationResult(
-        annotations=[
-            AssetAnnotation(
-                asset_id=asset_id,
-                ownership="data-team",
-                join_keys=["order_id"],
-            )
-        ]
-    )
-    provider = MockProvider(fixed_result=fixed)
-    count = await run_asset_annotation(
-        db,
-        tmp_path,
-        provider,
-        provider_name="mock",
-        model="test",
-    )
-    assert count == 1

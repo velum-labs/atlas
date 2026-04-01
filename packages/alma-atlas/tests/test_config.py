@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from alma_atlas.config import (
-    DEFAULT_AGENT_PROVIDER,
     AtlasConfig,
     SourceConfig,
     default_config_dir,
@@ -239,21 +238,19 @@ def test_resolved_sources_prefers_runtime_sources(tmp_path: Path) -> None:
     assert [source.id for source in sources] == ["runtime"]
 
 
-def test_load_atlas_yml_empty_learning_takes_precedence_over_enrichment(tmp_path: Path) -> None:
+def test_load_atlas_yml_enrichment_key_rejected(tmp_path: Path) -> None:
     atlas_yml = tmp_path / "atlas.yml"
     atlas_yml.write_text(
         """
 version: 1
-learning: {}
 enrichment:
   provider: acp
 """.strip(),
         encoding="utf-8",
     )
 
-    cfg = load_atlas_yml(atlas_yml)
-
-    assert cfg.learning.provider == DEFAULT_AGENT_PROVIDER
+    with pytest.raises(ValueError, match="Unknown top-level key"):
+        load_atlas_yml(atlas_yml)
 
 
 # ---------------------------------------------------------------------------

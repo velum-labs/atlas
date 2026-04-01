@@ -38,8 +38,8 @@ def downstream(
 
 
 def _show_lineage(asset_id: str, direction: Literal["upstream", "downstream"], depth: int | None) -> None:
+    from alma_atlas.application.query.service import get_lineage_summary
     from alma_atlas.cli.common import require_db_path_or_exit
-    from alma_atlas.graph_service import get_lineage_summary
 
     summary = get_lineage_summary(require_db_path_or_exit(), asset_id, direction=direction, depth=depth)
 

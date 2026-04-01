@@ -531,43 +531,6 @@ def test_extract_orchestration_raises_not_implemented(tmp_path: Path) -> None:
 
 
 # ===========================================================================
-# Tests — v1 backward compatibility
-# ===========================================================================
-
-
-def test_v1_introspect_schema_still_works(tmp_path: Path) -> None:
-    """v1 introspect_schema must remain fully functional after v2 additions."""
-    nodes = {
-        "model.p.orders": _model_node(uid="model.p.orders", name="orders", schema="public"),
-    }
-    manifest_path = _write_json(tmp_path / "manifest.json", _manifest(nodes=nodes))
-    adapter = DbtAdapter(manifest_path=manifest_path)
-    from alma_connectors.source_adapter import SchemaObjectKind as SchemaObjectKindV1
-
-    snapshot = run(adapter.introspect_schema(_fake_adapter()))
-    assert len(snapshot.objects) == 1
-    obj = snapshot.objects[0]
-    assert obj.schema_name == "public"
-    assert obj.object_name == "orders"
-    assert obj.object_kind == SchemaObjectKindV1.TABLE
-
-
-def test_v1_and_v2_schema_both_return_same_model(tmp_path: Path) -> None:
-    """v1 and v2 schema extraction see the same models."""
-    nodes = {
-        "model.p.users": _model_node(uid="model.p.users", name="users", schema="analytics"),
-    }
-    manifest_path = _write_json(tmp_path / "manifest.json", _manifest(nodes=nodes))
-    adapter = DbtAdapter(manifest_path=manifest_path)
-
-    v1_snap = run(adapter.introspect_schema(_fake_adapter()))
-    v2_snap = run(adapter.extract_schema(_fake_adapter()))
-
-    assert len(v1_snap.objects) == len(v2_snap.objects) == 1
-    assert v1_snap.objects[0].object_name == v2_snap.objects[0].object_name == "users"
-
-
-# ===========================================================================
 # Tests — Fintual manifest integration (realistic data)
 # ===========================================================================
 

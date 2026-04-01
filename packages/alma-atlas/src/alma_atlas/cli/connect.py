@@ -20,7 +20,7 @@ from rich import print as rprint
 from rich.console import Console
 from rich.table import Table
 
-from alma_atlas.config import get_config
+from alma_atlas.bootstrap import load_config as get_config
 from alma_atlas.source_specs import (
     DEFAULT_AIRFLOW_AUTH_TOKEN_ENV,
     DEFAULT_BIGQUERY_LOCATION,

@@ -56,10 +56,8 @@ def stitch(
     """Derive and persist lineage edges from a set of query observations.
 
     Args:
-        traffic:     Query observations returned by a source adapter. Accepts
-                     both the legacy v1 `TrafficObservationResult` and the v2
-                     `TrafficExtractionResult` wrapper as long as `.events`
-                     is available.
+        traffic:     Query observations returned by a source adapter as long as
+                     an `.events` sequence is available.
         db:          Open Atlas database connection.
         source_id:   Identifier for the source (used as consumer fallback).
         source_kind: Dialect hint for SQL parsing (e.g. "bigquery", "postgres").

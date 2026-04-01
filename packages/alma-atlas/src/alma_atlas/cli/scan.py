@@ -15,13 +15,13 @@ from rich import print as rprint
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
+from alma_atlas.bootstrap import load_config as get_config
+from alma_atlas.bootstrap import resolve_runtime_sources
 from alma_atlas.ci_support import (
-    resolve_runtime_sources,
     serialize_dry_run_sources,
     serialize_scan_result,
     write_payload,
 )
-from alma_atlas.config import get_config
 
 app = typer.Typer(help="Scan registered data sources to discover assets and lineage.")
 console = Console()
@@ -127,7 +127,7 @@ def scan(
                 rprint(f"  Would scan: [cyan]{s.id}[/cyan] ([magenta]{s.kind}[/magenta])")
         return
 
-    from alma_atlas.pipeline.scan import run_scan_all
+    from alma_atlas.application.scan.use_cases import run_scan_all
 
     cfg.ensure_dir()
     failed_sources: list[str] = []
@@ -208,7 +208,7 @@ def scan(
         if cfg.team_server_url and cfg.team_api_key and cfg.db_path is not None:
             import asyncio
 
-            from alma_atlas.graph_service import run_team_sync
+            from alma_atlas.application.sync.use_cases import run_team_sync
 
             try:
                 asyncio.run(run_team_sync(cfg))

@@ -288,7 +288,7 @@ class TestViolationStorage:
 
 
 def test_runtime_enforcement_validates_contract_spec(db):
-    from alma_atlas.enforcement.runtime import run_enforcement_for_snapshot
+    from alma_atlas.application.enforcement.use_cases import run_enforcement_for_snapshot
     from alma_atlas_store.asset_repository import Asset, AssetRepository
     from alma_atlas_store.contract_repository import Contract, ContractRepository
     from alma_atlas_store.violation_repository import ViolationRepository

@@ -6,7 +6,8 @@ import os
 
 from alma_atlas.config import SourceConfig
 from alma_atlas.source_specs import ensure_source_params_allowed
-from alma_connectors.registry import build_persisted_adapter, instantiate_runtime_adapter
+from alma_connectors.definition_codec import build_persisted_adapter
+from alma_connectors.runtime_factory import instantiate_runtime_adapter
 from alma_connectors.source_adapter import PersistedSourceAdapter
 
 type RuntimeSourceAdapter = object

@@ -406,33 +406,6 @@ def _introspect_conn(rows: list[dict], dep_rows: list[dict], stats_rows: list[di
     return conn
 
 
-def test_v1_introspect_schema_still_works(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("APP_DB_DSN", "postgresql://localhost/test")
-    pg = _make_pg_adapter()
-    adapter = _make_persisted()
-    rows = [
-        {
-            "schema_name": "public",
-            "table_name": "users",
-            "column_name": "id",
-            "data_type": "integer",
-            "is_nullable": "NO",
-            "table_type": "BASE TABLE",
-        }
-    ]
-    conn = _introspect_conn(rows, [], [])
-
-    with patch(_PSYCOPG_CONNECT, return_value=conn):
-        snapshot = asyncio.run(pg.introspect_schema(adapter))
-
-    assert len(snapshot.objects) == 1
-    obj = snapshot.objects[0]
-    assert obj.schema_name == "public"
-    assert obj.object_name == "users"
-    assert len(obj.columns) == 1
-    assert obj.columns[0].name == "id"
-
-
 # ---------------------------------------------------------------------------
 # Hardening tests: input validation
 # ---------------------------------------------------------------------------

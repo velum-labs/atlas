@@ -274,7 +274,7 @@ async def test_acp_provider_analyze_returns_validated_model(tmp_path: Path) -> N
     conn.prompt = AsyncMock(side_effect=_prompt_side_effect)
 
     provider = ACPProvider(cwd=str(tmp_path))
-    with patch("alma_atlas.agents.acp_provider.spawn_agent_process", _make_spawn_cm(conn)):
+    with patch("alma_atlas.agents.acp.session_runtime.spawn_agent_process", _make_spawn_cm(conn)):
         result = await provider.analyze("system", "user", PipelineAnalysisResult)
 
     assert isinstance(result, PipelineAnalysisResult)
@@ -308,7 +308,7 @@ async def test_acp_provider_analyze_session_reuse(tmp_path: Path) -> None:
         yield conn, MagicMock()
 
     provider = ACPProvider(cwd=str(tmp_path))
-    with patch("alma_atlas.agents.acp_provider.spawn_agent_process", _counting_cm):
+    with patch("alma_atlas.agents.acp.session_runtime.spawn_agent_process", _counting_cm):
         await provider.analyze("sys", "usr", PipelineAnalysisResult)
         await provider.analyze("sys", "usr", PipelineAnalysisResult)
 
@@ -333,7 +333,7 @@ async def test_acp_provider_initialize_passes_capabilities_and_client_info(tmp_p
     conn.prompt = AsyncMock(side_effect=_prompt_side_effect)
 
     provider = ACPProvider(cwd=str(tmp_path))
-    with patch("alma_atlas.agents.acp_provider.spawn_agent_process", _make_spawn_cm(conn)):
+    with patch("alma_atlas.agents.acp.session_runtime.spawn_agent_process", _make_spawn_cm(conn)):
         await provider.analyze("sys", "usr", PipelineAnalysisResult)
 
     initialize_kwargs = conn.initialize.call_args.kwargs
@@ -383,7 +383,7 @@ async def test_acp_provider_stores_initialize_and_session_metadata(tmp_path: Pat
     conn.prompt = AsyncMock(side_effect=_prompt_side_effect)
 
     provider = ACPProvider(cwd=str(tmp_path))
-    with patch("alma_atlas.agents.acp_provider.spawn_agent_process", _make_spawn_cm(conn)):
+    with patch("alma_atlas.agents.acp.session_runtime.spawn_agent_process", _make_spawn_cm(conn)):
         await provider.analyze("sys", "usr", PipelineAnalysisResult)
 
     assert provider.initialize_response is not None
@@ -412,7 +412,7 @@ async def test_acp_provider_forwards_mcp_servers_to_new_session(tmp_path: Path) 
     conn.prompt = AsyncMock(side_effect=_prompt_side_effect)
 
     provider = ACPProvider(cwd=str(tmp_path), mcp_servers=[fake_mcp])
-    with patch("alma_atlas.agents.acp_provider.spawn_agent_process", _make_spawn_cm(conn)):
+    with patch("alma_atlas.agents.acp.session_runtime.spawn_agent_process", _make_spawn_cm(conn)):
         await provider.analyze("sys", "usr", PipelineAnalysisResult)
 
     assert conn.new_session.call_args.kwargs["mcp_servers"] == [fake_mcp]
@@ -438,7 +438,7 @@ async def test_acp_provider_analyze_cleans_up_temp_file(tmp_path: Path) -> None:
     conn.prompt = AsyncMock(side_effect=_prompt_side_effect)
 
     provider = ACPProvider(cwd=str(tmp_path))
-    with patch("alma_atlas.agents.acp_provider.spawn_agent_process", _make_spawn_cm(conn)):
+    with patch("alma_atlas.agents.acp.session_runtime.spawn_agent_process", _make_spawn_cm(conn)):
         await provider.analyze("sys", "usr", PipelineAnalysisResult)
 
     assert written_path, "Prompt must have included a file path"
@@ -483,7 +483,7 @@ async def test_acp_provider_analyze_self_healing_succeeds_on_retry(tmp_path: Pat
     conn.prompt = AsyncMock(side_effect=_prompt_side_effect)
 
     provider = ACPProvider(cwd=str(tmp_path))
-    with patch("alma_atlas.agents.acp_provider.spawn_agent_process", _make_spawn_cm(conn)):
+    with patch("alma_atlas.agents.acp.session_runtime.spawn_agent_process", _make_spawn_cm(conn)):
         result = await provider.analyze("sys", "usr", PipelineAnalysisResult)
 
     assert isinstance(result, PipelineAnalysisResult)
@@ -515,7 +515,7 @@ async def test_acp_provider_analyze_healing_prompt_contains_errors(tmp_path: Pat
     conn.prompt = AsyncMock(side_effect=_prompt_side_effect)
 
     provider = ACPProvider(cwd=str(tmp_path))
-    with patch("alma_atlas.agents.acp_provider.spawn_agent_process", _make_spawn_cm(conn)):
+    with patch("alma_atlas.agents.acp.session_runtime.spawn_agent_process", _make_spawn_cm(conn)):
         await provider.analyze("sys", "usr", PipelineAnalysisResult)
 
     assert len(prompts_received) == 2
@@ -540,7 +540,7 @@ async def test_acp_provider_analyze_raises_after_max_retries(tmp_path: Path) -> 
 
     provider = ACPProvider(cwd=str(tmp_path))
     with (
-        patch("alma_atlas.agents.acp_provider.spawn_agent_process", _make_spawn_cm(conn)),
+        patch("alma_atlas.agents.acp.session_runtime.spawn_agent_process", _make_spawn_cm(conn)),
         pytest.raises(ValueError, match="failed to get valid response"),
     ):
         await provider.analyze("sys", "usr", PipelineAnalysisResult)
@@ -556,7 +556,7 @@ async def test_acp_provider_analyze_raises_when_file_not_written(tmp_path: Path)
 
     provider = ACPProvider(cwd=str(tmp_path))
     with (
-        patch("alma_atlas.agents.acp_provider.spawn_agent_process", _make_spawn_cm(conn)),
+        patch("alma_atlas.agents.acp.session_runtime.spawn_agent_process", _make_spawn_cm(conn)),
         pytest.raises(ValueError, match="failed to get valid response"),
     ):
         await provider.analyze("sys", "usr", PipelineAnalysisResult)
@@ -600,7 +600,7 @@ async def test_acp_provider_aclose_resets_state(tmp_path: Path) -> None:
     conn.prompt = AsyncMock(side_effect=_prompt_side_effect)
 
     provider = ACPProvider(cwd=str(tmp_path))
-    with patch("alma_atlas.agents.acp_provider.spawn_agent_process", _cm):
+    with patch("alma_atlas.agents.acp.session_runtime.spawn_agent_process", _cm):
         await provider.analyze("sys", "usr", PipelineAnalysisResult)
         await provider.aclose()
         assert provider._conn is None
@@ -686,7 +686,7 @@ def test_load_atlas_yml_parses_agent_command(tmp_path: Path) -> None:
 
 def test_load_atlas_yml_no_agent_key_leaves_none(tmp_path: Path) -> None:
     yml = tmp_path / "atlas.yml"
-    yml.write_text("version: 1\nlearning:\n  provider: mock\n")
+    yml.write_text("version: 1\nlearning:\n  explorer:\n    provider: mock\n")
     cfg = load_atlas_yml(yml)
     assert cfg.learning.agent is None
 
@@ -778,49 +778,6 @@ def test_load_atlas_yml_agent_command_produces_acp_provider(tmp_path: Path) -> N
     assert provider._command == "claude-agent-acp"
 
 
-def test_load_atlas_yml_flat_unsupported_provider_raises(tmp_path: Path) -> None:
-    """Flat atlas.yml with unsupported provider must fail closed."""
-    yml = tmp_path / "atlas.yml"
-    yml.write_text(
-        textwrap.dedent("""\
-        version: 1
-        learning:
-          provider: anthropic
-          model: claude-opus-4-6
-          api_key_env: ANTHROPIC_API_KEY
-        """)
-    )
-    with pytest.raises(ValueError, match="unsupported learning.provider"):
-        load_atlas_yml(yml)
-
-
-def test_load_atlas_yml_flat_openai_raises(tmp_path: Path) -> None:
-    """Flat atlas.yml with unsupported provider must fail closed."""
-    yml = tmp_path / "atlas.yml"
-    yml.write_text(
-        textwrap.dedent("""\
-        version: 1
-        learning:
-          provider: openai
-          model: gpt-4o
-        """)
-    )
-    with pytest.raises(ValueError, match="unsupported learning.provider"):
-        load_atlas_yml(yml)
-
-
-def test_load_atlas_yml_flat_mock_no_deprecation_warning(tmp_path: Path) -> None:
-    """Flat atlas.yml with provider: mock must NOT emit a DeprecationWarning."""
-    yml = tmp_path / "atlas.yml"
-    yml.write_text("version: 1\nlearning:\n  provider: mock\n")
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        load_atlas_yml(yml)
-
-    dep_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]
-    assert not dep_warnings
-
-
 def test_load_atlas_yml_nested_unsupported_provider_raises(tmp_path: Path) -> None:
     """Nested atlas.yml with unsupported provider must fail closed."""
     yml = tmp_path / "atlas.yml"
@@ -857,3 +814,16 @@ def test_load_atlas_yml_agent_command_no_deprecation_warning(tmp_path: Path) -> 
 
     dep_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]
     assert not dep_warnings
+
+
+def test_load_atlas_yml_unknown_learning_key_raises(tmp_path: Path) -> None:
+    yml = tmp_path / "atlas.yml"
+    yml.write_text(
+        textwrap.dedent("""\
+        version: 1
+        learning:
+          provider: mock
+        """)
+    )
+    with pytest.raises(ValueError, match="unknown learning key"):
+        load_atlas_yml(yml)

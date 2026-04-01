@@ -771,8 +771,7 @@ class RANormalizer:
     def extract_predicates(self, expr: RAExpression) -> list[Predicate]:
         """Extract ALL predicates including JOIN ON conditions.
 
-        .. deprecated:: Use ``extract_all_predicates()`` instead for clarity.
-            This method is kept for backward compatibility.
+        This is a convenience alias for ``extract_all_predicates()``.
         """
         return self.extract_all_predicates(expr)
 

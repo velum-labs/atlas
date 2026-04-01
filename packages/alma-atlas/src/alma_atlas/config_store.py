@@ -14,7 +14,7 @@ from typing import Any, cast
 
 from alma_atlas.local_secrets import LocalSecretStore
 from alma_atlas.source_records import AtlasSourceRecord
-from alma_atlas.source_registry import source_secret_paths
+from alma_connectors.catalog import source_secret_paths
 
 
 @dataclass(frozen=True)

@@ -8,7 +8,8 @@ from glob import glob
 from pathlib import Path
 from typing import Any, Literal
 
-from alma_atlas.config import AtlasConfig, SourceConfig, get_config, load_atlas_yml
+from alma_atlas.bootstrap import resolve_runtime_sources as bootstrap_resolve_runtime_sources
+from alma_atlas.config import AtlasConfig, SourceConfig
 from alma_atlas.contract_service import validate_contract_document
 from alma_atlas.contract_validation import (
     resolve_contract_columns as _resolve_contract_columns,
@@ -107,18 +108,10 @@ def resolve_runtime_sources(
     connections: str | None = None,
 ) -> tuple[AtlasConfig, list[SourceConfig]]:
     """Resolve the runtime Atlas config plus the sources to scan."""
-
-    if config_file is not None:
-        cfg = load_atlas_yml(Path(config_file))
-        sources = list(cfg.sources)
-    else:
-        cfg = get_config()
-        sources = cfg.resolved_sources()
-
-    if connections is not None and connections.strip():
-        sources = _coerce_source_configs(_read_structured_input(connections))
-
-    return cfg, sources
+    return bootstrap_resolve_runtime_sources(
+        config_file=config_file,
+        connections=connections,
+    )
 
 
 def write_payload(payload: dict[str, Any], *, output: str | None) -> None:

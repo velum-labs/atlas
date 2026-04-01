@@ -7,7 +7,6 @@ import logging
 import os
 import re
 import time
-import warnings
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -31,7 +30,6 @@ from alma_connectors.source_adapter import (
     SchemaObjectKind,
     SchemaSnapshot,
     SetupInstructions,
-    SourceAdapter,
     SourceAdapterCapabilities,
     SourceAdapterKind,
     SourceColumnSchema,
@@ -227,7 +225,7 @@ def _parse_postgres_log_timestamp(raw_value: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
-class PostgresAdapter(SourceAdapter):
+class PostgresAdapter:
     """Runtime PostgreSQL source adapter."""
 
     kind = SourceAdapterKind.POSTGRES
@@ -297,21 +295,11 @@ class PostgresAdapter(SourceAdapter):
             conninfo["port"] = str(replica.port)
         return make_conninfo(**conninfo)
 
-    async def test_connection(
+    async def _validate_connection(
         self,
         adapter: PersistedSourceAdapter,
     ) -> ConnectionTestResult:
-        """Validate credentials and connectivity for the PostgreSQL adapter.
-
-        .. deprecated:: 0.2.0
-            Use :meth:`~alma_connectors.source_adapter_v2.SourceAdapterV2.probe` instead.
-        """
-        warnings.warn(
-            "PostgresAdapter.test_connection() is deprecated since 0.2.0 and will be removed in 1.0.0. "
-            "Use probe() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
+        """Validate credentials and connectivity for the PostgreSQL adapter."""
         config = self._get_config(adapter)
         include_schemas = list(config.include_schemas)
         exclude_schemas = list(config.exclude_schemas)
@@ -358,21 +346,11 @@ class PostgresAdapter(SourceAdapter):
             resource_label="tables",
         )
 
-    async def introspect_schema(
+    async def _build_schema_snapshot_data(
         self,
         adapter: PersistedSourceAdapter,
     ) -> SchemaSnapshot:
-        """Return a typed snapshot of source objects and dependencies.
-
-        .. deprecated:: 0.2.0
-            Use :meth:`~alma_connectors.source_adapter_v2.SourceAdapterV2.extract_schema` instead.
-        """
-        warnings.warn(
-            "PostgresAdapter.introspect_schema() is deprecated since 0.2.0 and will be removed in 1.0.0. "
-            "Use extract_schema() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
+        """Build schema object data from PostgreSQL metadata."""
         config = self._get_config(adapter)
         dsn = self._get_dsn(adapter)
         include_schemas = list(config.include_schemas)
@@ -527,23 +505,13 @@ class PostgresAdapter(SourceAdapter):
             dependencies=dependencies,
         )
 
-    async def observe_traffic(
+    async def _observe_traffic(
         self,
         adapter: PersistedSourceAdapter,
         *,
         since: datetime | None = None,
     ) -> TrafficObservationResult:
-        """Observe traffic and return canonical query events.
-
-        .. deprecated:: 0.2.0
-            Use :meth:`~alma_connectors.source_adapter_v2.SourceAdapterV2.extract_traffic` instead.
-        """
-        warnings.warn(
-            "PostgresAdapter.observe_traffic() is deprecated since 0.2.0 and will be removed in 1.0.0. "
-            "Use extract_traffic() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
+        """Observe traffic and return canonical query events."""
         config = self._get_config(adapter)
         if config.log_capture is not None:
             return self._observe_from_logs(adapter, config.log_capture, since=since)
@@ -1013,9 +981,7 @@ class PostgresAdapter(SourceAdapter):
     ) -> SchemaSnapshotV2:
         """SCHEMA: tables/views from v1 introspect_schema + routines from pg_proc + freshness."""
         started_at = time.perf_counter()
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            v1_snapshot = await self.introspect_schema(adapter)
+        v1_snapshot = await self._build_schema_snapshot_data(adapter)
 
         config = self._get_config(adapter)
         dsn = self._get_dsn(adapter)
@@ -1280,9 +1246,7 @@ class PostgresAdapter(SourceAdapter):
     ) -> TrafficExtractionResult:
         """TRAFFIC: wraps v1 observe_traffic() with ExtractionMeta."""
         started_at = time.perf_counter()
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            v1_result = await self.observe_traffic(adapter, since=since)
+        v1_result = await self._observe_traffic(adapter, since=since)
         duration_ms = (time.perf_counter() - started_at) * 1000.0
         now = datetime.now(tz=UTC)
 

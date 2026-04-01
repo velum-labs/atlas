@@ -628,12 +628,12 @@ def extract_topology(
     Args:
         expr: The RA expression to analyze
         normalization: Normalization configuration (preferred)
-        default_schema: Schema for unqualified names (deprecated, use normalization)
+        default_schema: Optional shorthand for normalization.default_schema
 
     Returns:
         Topology with relations and join edges
     """
-    # Resolve normalization config with backwards compatibility
+    # Resolve normalization config with a default schema fallback.
     if normalization is None:
         normalization = TopologyNormalization(
             default_schema=default_schema or "public",
@@ -679,12 +679,12 @@ def topology_gcs(
     Args:
         expressions: List of RA expressions
         normalization: Normalization configuration (preferred)
-        default_schema: Schema for unqualified names (deprecated, use normalization)
+        default_schema: Optional shorthand for normalization.default_schema
 
     Returns:
         TopologyResult with the common topology
     """
-    # Resolve normalization config with backwards compatibility
+    # Resolve normalization config with a default schema fallback.
     if normalization is None:
         normalization = TopologyNormalization(
             default_schema=default_schema or "public",

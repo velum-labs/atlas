@@ -19,11 +19,10 @@ from typing import Any
 
 from alma_atlas.config_store import AtlasConfigStore
 from alma_atlas.source_records import AtlasSourceDefinition, AtlasSourceRecord, AtlasSourceState
-from alma_atlas.source_registry import redact_source_params
+from alma_connectors.catalog import redact_source_params
 
-# Known top-level keys for atlas.yml.  Unknown keys are rejected (fail-closed).
-# `enrichment` is kept as a deprecated alias for `learning`.
-_KNOWN_ATLAS_YML_KEYS = frozenset({"version", "sources", "team", "hooks", "learning", "enrichment"})
+# Known top-level keys for atlas.yml. Unknown keys are rejected (fail-closed).
+_KNOWN_ATLAS_YML_KEYS = frozenset({"version", "sources", "team", "hooks", "learning"})
 
 SUPPORTED_LEARNING_PROVIDERS = frozenset({"acp", "mock"})
 DEFAULT_AGENT_PROVIDER = "mock"
@@ -76,13 +75,9 @@ class AgentConfig:
     """Configuration for one learning workflow role.
 
     Atlas only supports ``mock`` and ACP-backed agents at runtime.
-    ``model``, ``api_key_env``, ``timeout``, and ``max_tokens`` are preserved
-    as compatibility metadata for existing configs and tests; ACP execution is
-    controlled by ``agent`` / ``provider`` rather than these fields.
-
-    Despite the historical name, these configs describe workflow roles such as
-    ``explorer`` or ``annotator``; Atlas may reuse one ACP runtime/session
-    across multiple roles when they resolve to the same subprocess settings.
+    These configs describe workflow roles such as ``explorer`` or
+    ``annotator``; Atlas may reuse one ACP runtime/session across multiple roles
+    when they resolve to the same subprocess settings.
     """
 
     provider: str = DEFAULT_AGENT_PROVIDER  # mock | acp
@@ -100,28 +95,12 @@ class AgentConfig:
 
 @dataclass
 class LearningConfig:
-    """Configuration for ACP-backed learning workflows.
+    """Configuration for ACP-backed learning workflows."""
 
-    Supports two formats in ``atlas.yml``:
-
-    *Flat (legacy)*: top-level ``provider``, ``model``, etc. fields are applied
-    to all three workflow roles for backward compatibility.
-
-    *Nested (per-role)*: ``explorer``, ``pipeline_analyzer``, and
-    ``annotator`` sub-sections each carry their own :class:`AgentConfig`.
-    """
-
-    # Flat fields — preserved for backward compatibility with older atlas.yml.
-    provider: str = DEFAULT_AGENT_PROVIDER  # mock | acp
-    model: str = DEFAULT_AGENT_MODEL
-    api_key_env: str = DEFAULT_AGENT_API_KEY_ENV
-    timeout: int = DEFAULT_AGENT_TIMEOUT
-    max_tokens: int = DEFAULT_AGENT_MAX_TOKENS
-    # ACP agent subprocess config. Set when provider == "acp" or via agent: key.
+    # Optional shared ACP agent subprocess config applied to roles
+    # that do not define their own `agent` block.
     agent: AgentProcessConfig | None = None
 
-    # Per-role configs.  When the flat YAML format is used these are
-    # populated from the flat fields by ``load_atlas_yml``.
     explorer: AgentConfig = field(
         default_factory=lambda: AgentConfig(
             provider=DEFAULT_AGENT_PROVIDER,
@@ -134,10 +113,6 @@ class LearningConfig:
     annotator: AgentConfig = field(
         default_factory=lambda: AgentConfig(provider=DEFAULT_AGENT_PROVIDER)
     )
-
-
-# Backward compatibility alias.
-EnrichmentConfig = LearningConfig
 
 
 @dataclass
@@ -191,11 +166,6 @@ class AtlasConfig:
             f"team_api_key={api_key_repr!r}, "
             f"team_id={self.team_id!r})"
         )
-
-    @property
-    def enrichment(self) -> LearningConfig:
-        """Backward compatibility alias for ``learning``."""
-        return self.learning
 
     @property
     def sources_file(self) -> Path:
@@ -352,9 +322,6 @@ def load_atlas_yml(path: Path | str) -> AtlasConfig:
     Unknown top-level keys are rejected (fail-closed) to prevent silent
     misconfiguration caused by typos or unsupported options.
 
-    Supports both ``learning:`` (current) and ``enrichment:`` (deprecated alias).
-    When both are present, ``learning:`` takes precedence.
-
     Args:
         path: Path to the ``atlas.yml`` file.
 
@@ -419,101 +386,69 @@ def load_atlas_yml(path: Path | str) -> AtlasConfig:
         else:
             cfg.team_api_key = team.get("api_key")
 
-    # Parse learning/enrichment settings.
-    # `learning:` takes precedence even when it is explicitly empty.
-    learning_raw = data.get("learning") or {} if "learning" in data else data.get("enrichment", {})
-    if "enrichment" in data and "learning" not in data:
-        logger.warning(
-            "atlas.yml: 'enrichment:' key is deprecated. Rename it to 'learning:' to silence this warning."
-        )
+    # Parse learning settings.
+    learning_raw = data.get("learning", {})
     if learning_raw:
-        _per_agent_keys = frozenset({"explorer", "pipeline_analyzer", "annotator", "asset_enricher"})
-        has_nested = bool(set(learning_raw) & _per_agent_keys)
+        if not isinstance(learning_raw, dict):
+            raise ValueError("atlas.yml: 'learning' must be a mapping")
 
         def _parse_agent_process_config(sub: dict) -> AgentProcessConfig | None:
             """Parse an optional ``agent:`` sub-key into an AgentProcessConfig."""
             agent_raw = sub.get("agent")
             if not agent_raw:
                 return None
+            if not isinstance(agent_raw, dict):
+                raise ValueError("atlas.yml: 'agent' must be a mapping")
             return AgentProcessConfig(
                 command=agent_raw.get("command", "claude-agent-acp"),
                 args=list(agent_raw.get("args", [])),
                 env=dict(agent_raw.get("env", {})),
             )
-
-        if has_nested:
-            # Nested per-agent format: each sub-key is an AgentConfig.
-            def _parse_agent(sub: dict) -> AgentConfig:
-                provider = _validate_learning_provider(
-                    sub.get("provider", DEFAULT_AGENT_PROVIDER),
-                    context="atlas.yml",
-                )
-                return AgentConfig(
-                    provider=provider,
-                    model=sub.get("model", DEFAULT_AGENT_MODEL),
-                    api_key_env=sub.get("api_key_env", DEFAULT_AGENT_API_KEY_ENV),
-                    timeout=int(sub.get("timeout", DEFAULT_AGENT_TIMEOUT)),
-                    max_tokens=int(sub.get("max_tokens", DEFAULT_AGENT_MAX_TOKENS)),
-                    agent=_parse_agent_process_config(sub),
-                )
-
-            # Support both `annotator` and legacy `asset_enricher` keys in YAML.
-            annotator_raw = learning_raw.get("annotator") or learning_raw.get("asset_enricher", {})
-
-            top_agent = _parse_agent_process_config(learning_raw)
-
-            # Parse per-agent configs, inheriting top-level agent if not overridden.
-            explorer = _parse_agent(learning_raw.get("explorer", {}))
-            pipeline_analyzer = _parse_agent(learning_raw.get("pipeline_analyzer", {}))
-            annotator = _parse_agent(annotator_raw)
-
-            # Propagate top-level agent config to sub-agents that lack their own.
-            if top_agent is not None:
-                if explorer.agent is None:
-                    explorer = explorer.with_agent_process(top_agent)
-                if pipeline_analyzer.agent is None:
-                    pipeline_analyzer = pipeline_analyzer.with_agent_process(top_agent)
-                if annotator.agent is None:
-                    annotator = annotator.with_agent_process(top_agent)
-
-            cfg.learning = LearningConfig(
-                agent=top_agent,
-                explorer=explorer,
-                pipeline_analyzer=pipeline_analyzer,
-                annotator=annotator,
+        allowed_learning_keys = frozenset({"agent", "explorer", "pipeline_analyzer", "annotator"})
+        unknown_learning_keys = set(learning_raw) - allowed_learning_keys
+        if unknown_learning_keys:
+            raise ValueError(
+                f"atlas.yml: unknown learning key(s): {sorted(unknown_learning_keys)}. "
+                f"Allowed keys: {sorted(allowed_learning_keys)}"
             )
-        else:
-            # Flat (legacy) format: apply the same values to all agents.
-            flat_provider = _validate_learning_provider(
-                learning_raw.get("provider", DEFAULT_AGENT_PROVIDER),
-                context="atlas.yml",
-            )
-            flat_model = learning_raw.get("model", DEFAULT_AGENT_MODEL)
-            flat_api_key_env = learning_raw.get("api_key_env", DEFAULT_AGENT_API_KEY_ENV)
-            flat_timeout = int(learning_raw.get("timeout", DEFAULT_AGENT_TIMEOUT))
-            flat_max_tokens = int(learning_raw.get("max_tokens", DEFAULT_AGENT_MAX_TOKENS))
-            flat_agent = _parse_agent_process_config(learning_raw)
 
-            def _flat_agent() -> AgentConfig:
-                return AgentConfig(
-                    provider=flat_provider,
-                    model=flat_model,
-                    api_key_env=flat_api_key_env,
-                    timeout=flat_timeout,
-                    max_tokens=flat_max_tokens,
-                    agent=flat_agent,
-                )
-
-            cfg.learning = LearningConfig(
-                provider=flat_provider,
-                model=flat_model,
-                api_key_env=flat_api_key_env,
-                timeout=flat_timeout,
-                max_tokens=flat_max_tokens,
-                agent=flat_agent,
-                explorer=_flat_agent(),
-                pipeline_analyzer=_flat_agent(),
-                annotator=_flat_agent(),
+        def _parse_agent(sub: dict, *, context: str) -> AgentConfig:
+            if not isinstance(sub, dict):
+                raise ValueError(f"atlas.yml: '{context}' must be a mapping")
+            provider = _validate_learning_provider(
+                sub.get("provider", DEFAULT_AGENT_PROVIDER),
+                context=f"atlas.yml:{context}",
             )
+            return AgentConfig(
+                provider=provider,
+                model=sub.get("model", DEFAULT_AGENT_MODEL),
+                api_key_env=sub.get("api_key_env", DEFAULT_AGENT_API_KEY_ENV),
+                timeout=int(sub.get("timeout", DEFAULT_AGENT_TIMEOUT)),
+                max_tokens=int(sub.get("max_tokens", DEFAULT_AGENT_MAX_TOKENS)),
+                agent=_parse_agent_process_config(sub),
+            )
+
+        top_agent = _parse_agent_process_config(learning_raw)
+        explorer = _parse_agent(learning_raw.get("explorer", {}), context="explorer")
+        pipeline_analyzer = _parse_agent(
+            learning_raw.get("pipeline_analyzer", {}),
+            context="pipeline_analyzer",
+        )
+        annotator = _parse_agent(learning_raw.get("annotator", {}), context="annotator")
+
+        if top_agent is not None:
+            if explorer.agent is None:
+                explorer = explorer.with_agent_process(top_agent)
+            if pipeline_analyzer.agent is None:
+                pipeline_analyzer = pipeline_analyzer.with_agent_process(top_agent)
+            if annotator.agent is None:
+                annotator = annotator.with_agent_process(top_agent)
+
+        cfg.learning = LearningConfig(
+            agent=top_agent,
+            explorer=explorer,
+            pipeline_analyzer=pipeline_analyzer,
+            annotator=annotator,
+        )
 
     return cfg

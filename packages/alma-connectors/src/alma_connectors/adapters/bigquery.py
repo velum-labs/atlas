@@ -9,7 +9,6 @@ import json
 import logging
 import re
 import time
-import warnings
 from collections import defaultdict
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -27,7 +26,6 @@ from alma_connectors.source_adapter import (
     SchemaObjectKind,
     SchemaSnapshot,
     SetupInstructions,
-    SourceAdapter,
     SourceAdapterCapabilities,
     SourceAdapterKind,
     SourceColumnSchema,
@@ -422,28 +420,8 @@ def _missing_permissions_from_exc(exc: Exception) -> tuple[str, ...]:
     return ("bigquery.dataViewer",)
 
 
-class BigQueryAdapter(SourceAdapter):
-    """Runtime BigQuery source adapter.
-
-    Implements the SourceAdapter protocol for Google BigQuery.
-    Credentials are resolved from the persisted service account secret (JSON key).
-
-    Data flow:
-        PersistedSourceAdapter (config + secret ref)
-              │
-              ▼
-        _resolve_secret → service account JSON
-              │
-              ▼
-        google.cloud.bigquery.Client (per-project, per-call)
-              │
-        ┌─────┴──────────────────────────┐
-        │                                │
-        ▼                                ▼
-    INFORMATION_SCHEMA            INFORMATION_SCHEMA
-    JOBS_BY_PROJECT               COLUMNS
-    (observe_traffic)             (introspect_schema)
-    """
+class BigQueryAdapter:
+    """Runtime BigQuery source adapter."""
 
     kind = SourceAdapterKind.BIGQUERY
     capabilities = SourceAdapterCapabilities(
@@ -517,18 +495,8 @@ class BigQueryAdapter(SourceAdapter):
     # Protocol methods
     # ------------------------------------------------------------------
 
-    async def test_connection(self, adapter: PersistedSourceAdapter) -> ConnectionTestResult:
-        """Verify connectivity and that the service account can list datasets and run queries.
-
-        .. deprecated:: 0.2.0
-            Use :meth:`~alma_connectors.source_adapter_v2.SourceAdapterV2.probe` instead.
-        """
-        warnings.warn(
-            "BigQueryAdapter.test_connection() is deprecated since 0.2.0 and will be removed in 1.0.0. "
-            "Use probe() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
+    async def _validate_connection(self, adapter: PersistedSourceAdapter) -> ConnectionTestResult:
+        """Verify connectivity and that the service account can list datasets and run queries."""
         config = self._get_config(adapter)  # raises ValueError for wrong kind — intentional
         self._validate_config(config)
         try:
@@ -571,25 +539,8 @@ class BigQueryAdapter(SourceAdapter):
                 message=f"Connection failed for adapter '{adapter.key}': {exc}.",
             )
 
-    async def introspect_schema(self, adapter: PersistedSourceAdapter) -> SchemaSnapshot:
-        """Return a SchemaSnapshot from INFORMATION_SCHEMA.COLUMNS + TABLE_STORAGE.
-
-        Each BigQuery dataset maps to schema_name; tables map to object_name.
-        BQ-specific extensions on INFORMATION_SCHEMA.COLUMNS (is_partitioning_column,
-        clustering_ordinal_position) are used to populate partition_column and
-        clustering_columns on each SourceTableSchema. Row counts and storage sizes
-        come from a secondary TABLE_STORAGE query; if that query fails (e.g. missing
-        permission), those fields are omitted without raising.
-
-        .. deprecated:: 0.2.0
-            Use :meth:`~alma_connectors.source_adapter_v2.SourceAdapterV2.extract_schema` instead.
-        """
-        warnings.warn(
-            "BigQueryAdapter.introspect_schema() is deprecated since 0.2.0 and will be removed in 1.0.0. "
-            "Use extract_schema() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
+    async def _build_schema_snapshot_data(self, adapter: PersistedSourceAdapter) -> SchemaSnapshot:
+        """Build schema object data from INFORMATION_SCHEMA."""
         config = self._get_config(adapter)
         self._validate_config(config)
         project_id, sa_json = self._credentials(adapter)
@@ -688,7 +639,7 @@ class BigQueryAdapter(SourceAdapter):
                 }
         except Exception as exc:
             logger.debug(
-                "BigQueryAdapter.introspect_schema: TABLE_STORAGE query failed, "
+                "BigQueryAdapter._build_schema_snapshot_data: TABLE_STORAGE query failed, "
                 "row_count/size_bytes will be omitted. adapter=%s error=%s",
                 adapter.key,
                 exc,
@@ -711,27 +662,13 @@ class BigQueryAdapter(SourceAdapter):
         )
         return SchemaSnapshot(captured_at=datetime.now(tz=UTC), objects=objects)
 
-    async def observe_traffic(
+    async def _observe_traffic(
         self,
         adapter: PersistedSourceAdapter,
         *,
         since: datetime | None = None,
     ) -> TrafficObservationResult:
-        """Observe query traffic from INFORMATION_SCHEMA.JOBS_BY_PROJECT.
-
-        When a stored observation cursor is present, it takes precedence over the
-        caller-supplied ``since`` watermark so repeated runs can resume exactly from
-        the newest creation_time seen in the previous batch.
-
-        .. deprecated:: 0.2.0
-            Use :meth:`~alma_connectors.source_adapter_v2.SourceAdapterV2.extract_traffic` instead.
-        """
-        warnings.warn(
-            "BigQueryAdapter.observe_traffic() is deprecated since 0.2.0 and will be removed in 1.0.0. "
-            "Use extract_traffic() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
+        """Observe query traffic from INFORMATION_SCHEMA.JOBS_BY_PROJECT."""
         config = self._get_config(adapter)
         self._validate_config(config)
         project_id, sa_json = self._credentials(adapter)
@@ -1531,9 +1468,7 @@ class BigQueryAdapter(SourceAdapter):
         started_at = time.perf_counter()
         captured_at = datetime.now(tz=UTC)
 
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            v1_result = await self.observe_traffic(adapter, since=since)
+        v1_result = await self._observe_traffic(adapter, since=since)
 
         config = self._get_config(adapter)
         project_id, _ = self._credentials(adapter)

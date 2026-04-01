@@ -11,7 +11,6 @@ from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
 from alma_connectors.source_adapter import (
-    ConnectionTestResult,
     ObservedQueryEvent,
     PersistedSourceAdapter,
     QueryResult,
@@ -574,15 +573,6 @@ class SourceAdapterV2(Protocol):
     @property
     def declared_capabilities(self) -> frozenset[AdapterCapability]:
         """Capabilities this adapter implementation claims to support."""
-        ...
-
-    # --- lifecycle ---
-
-    async def test_connection(
-        self,
-        adapter: PersistedSourceAdapter,
-    ) -> ConnectionTestResult:
-        """Validate credentials and connectivity."""
         ...
 
     async def probe(

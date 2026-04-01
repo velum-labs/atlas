@@ -20,8 +20,8 @@ def status(ctx: typer.Context) -> None:
     if ctx.invoked_subcommand is not None:
         return
 
+    from alma_atlas.application.query.service import get_graph_status
     from alma_atlas.cli.common import require_db_path_or_exit
-    from alma_atlas.graph_service import get_graph_status
 
     summary = get_graph_status(require_db_path_or_exit())
 

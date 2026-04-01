@@ -282,7 +282,7 @@ class SnowflakeAdapter:
     # v1 protocol methods (backward-compatible)
     # ------------------------------------------------------------------
 
-    async def test_connection(
+    async def _validate_connection(
         self,
         adapter: PersistedSourceAdapter,
     ) -> ConnectionTestResult:
@@ -317,7 +317,7 @@ class SnowflakeAdapter:
             resource_label="tables",
         )
 
-    async def introspect_schema(
+    async def _build_schema_snapshot_data(
         self,
         adapter: PersistedSourceAdapter,
     ) -> SchemaSnapshot:
@@ -428,7 +428,7 @@ WHERE TABLE_SCHEMA NOT IN ('INFORMATION_SCHEMA')
             objects=tuple(objects),
         )
 
-    async def observe_traffic(
+    async def _observe_traffic(
         self,
         adapter: PersistedSourceAdapter,
         *,
@@ -1211,7 +1211,7 @@ WHERE FUNCTION_SCHEMA NOT IN ('INFORMATION_SCHEMA')
         started_at = time.monotonic()
         captured_at = datetime.now(UTC)
 
-        v1_result = await self.observe_traffic(adapter, since=since)
+        v1_result = await self._observe_traffic(adapter, since=since)
 
         duration_ms = (time.monotonic() - started_at) * 1000.0
         scope_ctx = ScopeContext(

@@ -13,11 +13,16 @@ from alma_atlas.pipeline.cross_system_edges import (
 from alma_atlas_store.asset_repository import Asset, AssetRepository
 from alma_atlas_store.db import Database
 from alma_atlas_store.edge_repository import EdgeRepository
-from alma_connectors.source_adapter import (
+from alma_connectors.source_adapter_v2 import (
+    AdapterCapability,
+    ColumnSchema,
+    ExtractionMeta,
+    ExtractionScope,
+    SchemaObject,
     SchemaObjectKind,
-    SchemaSnapshot,
-    SourceColumnSchema,
-    SourceTableSchema,
+    SchemaSnapshotV2,
+    ScopeContext,
+    SourceAdapterKindV2,
 )
 
 # ---------------------------------------------------------------------------
@@ -25,8 +30,20 @@ from alma_connectors.source_adapter import (
 # ---------------------------------------------------------------------------
 
 
-def _col(name: str, data_type: str = "text") -> SourceColumnSchema:
-    return SourceColumnSchema(name=name, data_type=data_type, is_nullable=False)
+def _meta(row_count: int) -> ExtractionMeta:
+    return ExtractionMeta(
+        adapter_key="test-adapter",
+        adapter_kind=SourceAdapterKindV2.POSTGRES,
+        capability=AdapterCapability.SCHEMA,
+        scope_context=ScopeContext(scope=ExtractionScope.DATABASE),
+        captured_at=datetime(2026, 3, 23, tzinfo=UTC),
+        duration_ms=10.0,
+        row_count=row_count,
+    )
+
+
+def _col(name: str, data_type: str = "text") -> ColumnSchema:
+    return ColumnSchema(name=name, data_type=data_type, is_nullable=False)
 
 
 def _table(
@@ -35,19 +52,19 @@ def _table(
     *,
     columns: tuple[tuple[str, str], ...] = (),
     row_count: int | None = None,
-) -> SourceTableSchema:
-    return SourceTableSchema(
+) -> SchemaObject:
+    return SchemaObject(
         schema_name=schema_name,
         object_name=object_name,
-        object_kind=SchemaObjectKind.TABLE,
+        kind=SchemaObjectKind.TABLE,
         columns=tuple(_col(name, dtype) for name, dtype in columns),
         row_count=row_count,
     )
 
 
-def _snapshot(*objects: SourceTableSchema) -> SchemaSnapshot:
-    return SchemaSnapshot(
-        captured_at=datetime(2026, 3, 23, tzinfo=UTC),
+def _snapshot(*objects: SchemaObject) -> SchemaSnapshotV2:
+    return SchemaSnapshotV2(
+        meta=_meta(len(objects)),
         objects=objects,
     )
 
@@ -59,7 +76,7 @@ def db():
         yield database
 
 
-def _seed_assets(db: Database, snapshots: dict[str, SchemaSnapshot]) -> None:
+def _seed_assets(db: Database, snapshots: dict[str, SchemaSnapshotV2]) -> None:
     """Pre-insert assets for all objects in ``snapshots`` so FK constraints pass.
 
     Mirrors the asset_id format used by ``run_scan``:
@@ -73,7 +90,7 @@ def _seed_assets(db: Database, snapshots: dict[str, SchemaSnapshot]) -> None:
                 Asset(
                     id=asset_id,
                     source=source_id,
-                    kind=obj.object_kind.value,
+                    kind=obj.kind.value,
                     name=f"{obj.schema_name}.{obj.object_name}",
                 )
             )

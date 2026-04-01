@@ -7,7 +7,6 @@ from datetime import UTC, datetime
 import pytest
 
 from alma_connectors.source_adapter import (
-    ConnectionTestResult,
     ObservedQueryEvent,
     PersistedSourceAdapter,
     QueryResult,
@@ -506,11 +505,6 @@ class _MockAdapter:
     @property
     def declared_capabilities(self) -> frozenset[AdapterCapability]:
         return frozenset({AdapterCapability.DISCOVER, AdapterCapability.SCHEMA})
-
-    async def test_connection(
-        self, adapter: PersistedSourceAdapter
-    ) -> ConnectionTestResult:
-        return ConnectionTestResult(success=True, message="ok")
 
     async def probe(
         self,

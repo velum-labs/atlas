@@ -1,4 +1,4 @@
-"""Runtime helpers for enforcing contracts during scan execution."""
+"""Application-layer enforcement use cases."""
 
 from __future__ import annotations
 

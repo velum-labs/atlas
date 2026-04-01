@@ -203,40 +203,6 @@ def test_api_get_refreshes_token_on_401() -> None:
 
 
 # ---------------------------------------------------------------------------
-# test_connection
-# ---------------------------------------------------------------------------
-
-
-def test_test_connection_success() -> None:
-    adapter = _make_adapter()
-    persisted = _make_persisted()
-
-    mock_client = _make_mock_client(
-        post_return=_mock_response(_TOKEN_RESP),
-        get_return=_mock_response({"email": "svc@company.com"}),
-    )
-    adapter._client = mock_client
-
-    result = asyncio.run(adapter.test_connection(persisted))
-
-    assert result.success is True
-    assert "svc@company.com" in result.message
-
-
-def test_test_connection_failure() -> None:
-    adapter = _make_adapter()
-    persisted = _make_persisted()
-
-    mock_client = _make_mock_client(post_side_effect=httpx.ConnectError("unreachable"))
-    adapter._client = mock_client
-
-    result = asyncio.run(adapter.test_connection(persisted))
-
-    assert result.success is False
-    assert "unreachable" in result.message
-
-
-# ---------------------------------------------------------------------------
 # probe
 # ---------------------------------------------------------------------------
 

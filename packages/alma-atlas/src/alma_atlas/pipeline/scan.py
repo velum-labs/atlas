@@ -16,55 +16,19 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from alma_atlas.application.scan.runtime_config import DEFAULT_SCAN_RUNTIME_CONFIG
 from alma_atlas.config import AtlasConfig, SourceConfig
 from alma_ports.errors import ConfigurationError, ExtractionError
 
 if TYPE_CHECKING:
-    from alma_connectors.source_adapter import SchemaSnapshot
+    from alma_connectors.source_adapter_v2 import SchemaSnapshotV2 as SchemaSnapshot
 
 logger = logging.getLogger(__name__)
-
-
-def _env_float(name: str, default: float) -> float:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    try:
-        value = float(raw)
-    except ValueError as exc:
-        raise ValueError(f"{name} must be a float, got {raw!r}") from exc
-    if value <= 0:
-        raise ValueError(f"{name} must be > 0, got {raw!r}")
-    return value
-
-
-def _env_int(name: str, default: int) -> int:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    try:
-        value = int(raw)
-    except ValueError as exc:
-        raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
-    if value <= 0:
-        raise ValueError(f"{name} must be > 0, got {raw!r}")
-    return value
-
-@dataclass(frozen=True)
-class ScanRuntimeConfig:
-    """Operational defaults for Atlas scan execution."""
-
-    timeout_seconds: float = field(default_factory=lambda: _env_float("ALMA_SCAN_TIMEOUT_SECONDS", 300.0))
-    max_concurrent: int = field(default_factory=lambda: _env_int("ALMA_SCAN_MAX_CONCURRENT", 4))
-
-
-DEFAULT_SCAN_RUNTIME_CONFIG = ScanRuntimeConfig()
 
 # Backward-compatible defaults for callers that still import the module constants.
 _DEFAULT_SCAN_TIMEOUT = DEFAULT_SCAN_RUNTIME_CONFIG.timeout_seconds
@@ -200,70 +164,6 @@ def _upsert_asset(
         )
     )
     return existing is None
-
-def _schema_snapshot_v1_from_v2(schema_result: Any) -> Any:
-    from alma_connectors.source_adapter import (
-        SchemaObjectKind as V1SchemaObjectKind,
-    )
-    from alma_connectors.source_adapter import (
-        SchemaSnapshot,
-        SourceColumnSchema,
-        SourceObjectDependency,
-        SourceTableSchema,
-    )
-
-    kind_map = {
-        "table": V1SchemaObjectKind.TABLE,
-        "view": V1SchemaObjectKind.VIEW,
-        "materialized_view": V1SchemaObjectKind.MATERIALIZED_VIEW,
-        "external_table": V1SchemaObjectKind.TABLE,
-    }
-
-    objects: list[SourceTableSchema] = []
-    supported_keys: set[tuple[str, str]] = set()
-    for obj in schema_result.objects:
-        mapped_kind = kind_map.get(obj.kind.value)
-        if mapped_kind is None:
-            continue
-        supported_keys.add((obj.schema_name, obj.object_name))
-        objects.append(
-            SourceTableSchema(
-                schema_name=obj.schema_name,
-                object_name=obj.object_name,
-                object_kind=mapped_kind,
-                columns=tuple(
-                    SourceColumnSchema(
-                        name=column.name,
-                        data_type=column.data_type,
-                        is_nullable=column.is_nullable,
-                    )
-                    for column in obj.columns
-                ),
-                row_count=obj.row_count,
-                size_bytes=obj.size_bytes,
-                partition_column=obj.partition_column,
-                clustering_columns=obj.clustering_columns,
-            )
-        )
-
-    dependencies = tuple(
-        SourceObjectDependency(
-            source_schema=dependency.source_schema,
-            source_object=dependency.source_object,
-            target_schema=dependency.target_schema,
-            target_object=dependency.target_object,
-        )
-        for dependency in schema_result.dependencies
-        if (dependency.source_schema, dependency.source_object) in supported_keys
-        and (dependency.target_schema, dependency.target_object) in supported_keys
-    )
-
-    return SchemaSnapshot(
-        captured_at=schema_result.meta.captured_at,
-        objects=tuple(objects),
-        dependencies=dependencies,
-    )
-
 
 def _store_discovery_assets(
     *,
@@ -410,7 +310,7 @@ def _store_schema_projection(
         )
         edge_count += 1
 
-    return asset_count, edge_count, _schema_snapshot_v1_from_v2(schema_result)
+    return asset_count, edge_count, schema_result
 
 
 def _store_lineage_projection(
@@ -475,16 +375,16 @@ def _store_scan_results(
     persisted: Any,
     results: dict[Any, Any],
 ) -> tuple[int, int, Any | None]:
-    from alma_atlas.pipeline.scanner_v2 import _upsert_extraction_result
+    from alma_atlas.pipeline.capability_execution import upsert_extraction_result
     from alma_atlas.pipeline.stitch import stitch
     from alma_connectors.source_adapter_v2 import AdapterCapability
 
     for capability, result in results.items():
-        _upsert_extraction_result(db, persisted.key, capability, result)
+        upsert_extraction_result(db, persisted.key, capability, result)
 
     asset_count = 0
     edge_count = 0
-    snapshot_v1 = None
+    snapshot_result = None
 
     schema_result = results.get(AdapterCapability.SCHEMA)
     definition_result = results.get(AdapterCapability.DEFINITIONS)
@@ -494,7 +394,7 @@ def _store_scan_results(
     orchestration_result = results.get(AdapterCapability.ORCHESTRATION)
 
     if schema_result is not None:
-        stored_assets, stored_edges, snapshot_v1 = _store_schema_projection(
+        stored_assets, stored_edges, snapshot_result = _store_schema_projection(
             db=db,
             source=source,
             schema_result=schema_result,
@@ -535,7 +435,7 @@ def _store_scan_results(
         if traffic_result.observation_cursor is not None:
             source.params["observation_cursor"] = dict(traffic_result.observation_cursor)
 
-    return asset_count, edge_count, snapshot_v1
+    return asset_count, edge_count, snapshot_result
 
 
 async def run_scan_async(
@@ -592,7 +492,7 @@ async def _run_scan_impl(
     dry_run: bool = False,
 ) -> ScanResult:
     """Inner implementation of run_scan_async (no timeout wrapper)."""
-    from alma_atlas.pipeline.scanner_v2 import CapabilityRouter, ExtractionPipeline
+    from alma_atlas.pipeline.capability_execution import CapabilityRouter, ExtractionPipeline
     from alma_atlas_store.db import Database
     from alma_connectors.source_adapter_v2 import SourceAdapterV2
 
@@ -617,7 +517,7 @@ async def _run_scan_impl(
         if not isinstance(adapter, SourceAdapterV2):
             raise ExtractionError(
                 f"Adapter {type(adapter).__name__} does not implement SourceAdapterV2; "
-                "the legacy v1 scan path has been removed"
+                "the v1 scan path has been removed"
             )
 
         # Phase: capability probing.
@@ -696,7 +596,7 @@ async def _run_scan_impl(
                 t_enforce = time.monotonic()
                 logger.info("[scan/%s] Phase: enforcement", source.id)
                 try:
-                    from alma_atlas.enforcement.runtime import run_enforcement_for_snapshot
+                    from alma_atlas.application.enforcement.use_cases import run_enforcement_for_snapshot
 
                     enforcement_blocked, enforcement_violations = run_enforcement_for_snapshot(
                         snapshot,
@@ -731,17 +631,15 @@ async def _run_scan_impl(
         if enforcement_blocked:
             result.warnings.append("enforcement_blocked: schema violations detected in enforce mode")
 
-        # Fire drift_detected hooks if any violations were found.
-        if enforcement_violations and cfg.hooks:
-            from alma_atlas.hooks import HookExecutor, make_drift_detected_event
+        from alma_atlas.application.scan.post_scan import fire_drift_hooks
 
-            executor = HookExecutor(cfg.hooks)
-            event = make_drift_detected_event(
-                source_id=source.id,
-                blocked=enforcement_blocked,
-                asset_count=asset_count,
-            )
-            await executor.fire(event)
+        await fire_drift_hooks(
+            cfg,
+            source_id=source.id,
+            asset_count=asset_count,
+            blocked=enforcement_blocked,
+            has_violations=enforcement_violations,
+        )
 
         return result
     finally:
@@ -770,7 +668,7 @@ def run_scan(
 
 
 def _run_enforcement(snapshot: SchemaSnapshot, source_id: str, db: Any) -> tuple[bool, bool]:
-    from alma_atlas.enforcement.runtime import run_enforcement_for_snapshot
+    from alma_atlas.application.enforcement.use_cases import run_enforcement_for_snapshot
 
     return run_enforcement_for_snapshot(snapshot, source_id, db)
 
@@ -785,12 +683,6 @@ async def _run_scan_all_async(
     no_learn: bool = False,
 ) -> ScanAllResult:
     """Async implementation of run_scan_all with concurrency control."""
-    from alma_atlas.pipeline.cross_system_edges import (
-        discover_cross_system_edges,
-        resolve_dbt_source_edges,
-    )
-    from alma_atlas_store.db import Database
-
     semaphore = asyncio.Semaphore(max_concurrent)
     if cfg.db_path is None:
         raise ConfigurationError("Atlas db_path is not configured")
@@ -805,7 +697,6 @@ async def _run_scan_all_async(
     )
 
     results: list[ScanResult] = []
-    snapshots: dict[str, SchemaSnapshot] = {}
 
     for source, raw in zip(sources, raw_results, strict=False):
         if isinstance(raw, BaseException):
@@ -813,35 +704,15 @@ async def _run_scan_all_async(
             results.append(ScanResult(source_id=source.id, error=str(raw)))
         else:
             results.append(raw)
-            if raw.snapshot is not None:
-                snapshots[source.id] = raw.snapshot
+    from alma_atlas.application.scan.post_scan import run_multi_source_post_scan
 
-    kind_by_id = {s.id: s.kind for s in sources}
-    dbt_snapshots = {sid: snap for sid, snap in snapshots.items() if kind_by_id.get(sid) == "dbt"}
-    warehouse_snapshots = {sid: snap for sid, snap in snapshots.items() if kind_by_id.get(sid) != "dbt"}
-
-    cross_system_edge_count = 0
-    if len(snapshots) >= 2:
-        with Database(cfg.db_path) as db, db.transaction():
-            cross_system_edge_count = discover_cross_system_edges(snapshots, db)
-            cross_system_edge_count += resolve_dbt_source_edges(dbt_snapshots, warehouse_snapshots, db)
-
-    # Run learning phase only when the required non-mock agent configs exist.
-    if repo_path is not None and not no_learn:
-        from alma_atlas.pipeline.learn import (
-            asset_annotation_is_enabled,
-            edge_learning_is_enabled,
-            run_asset_annotation,
-            run_edge_learning,
-        )
-
-        with Database(cfg.db_path) as db, db.transaction():
-            if edge_learning_is_enabled(cfg.learning):
-                logger.info("[scan] Running edge learning from %s", repo_path)
-                await run_edge_learning(db, repo_path, config=cfg.learning)
-            if asset_annotation_is_enabled(cfg.learning):
-                logger.info("[scan] Running asset annotation from %s", repo_path)
-                await run_asset_annotation(db, repo_path, config=cfg.learning)
+    cross_system_edge_count = await run_multi_source_post_scan(
+        sources=sources,
+        results=results,
+        cfg=cfg,
+        repo_path=repo_path,
+        no_learn=no_learn,
+    )
 
     return ScanAllResult(results=results, cross_system_edge_count=cross_system_edge_count)
 
@@ -861,9 +732,9 @@ def run_scan_all(
     ``asyncio.Semaphore``.  Each source scan is bounded by *timeout* seconds.
     Results for all sources are collected even if individual scans fail.
 
-    When *repo_path* is provided and ``cfg.learning.provider`` is not ``mock``,
+    When *repo_path* is provided and the configured learning agents are enabled,
     the learning phase (edge learning + asset annotation) runs automatically
-    after cross-system edge discovery.  Pass ``no_learn=True`` to suppress this.
+    after cross-system edge discovery. Pass ``no_learn=True`` to suppress this.
 
     Args:
         sources:        List of source configurations to scan.
@@ -893,7 +764,7 @@ def run_scan_all(
 
 
 def _build_adapter(source: SourceConfig):  # type: ignore[return]
-    """Compatibility wrapper for the extracted source runtime factory."""
+    """Build the runtime adapter pair for one source configuration."""
     from alma_atlas.source_runtime import build_runtime_adapter
 
     return build_runtime_adapter(source)

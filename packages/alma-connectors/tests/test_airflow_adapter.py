@@ -210,55 +210,6 @@ async def test_probe_specific_capabilities() -> None:
 
 
 # ---------------------------------------------------------------------------
-# test_connection()
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_connection_success() -> None:
-    adapter = _make_adapter_token()
-    persisted = _make_adapter()
-
-    async def fake_api_get(path: str, *, params: dict | None = None) -> dict:
-        return {"metadatabase": {"status": "healthy"}, "scheduler": {"status": "healthy"}}
-
-    with patch.object(adapter, "_api_get", side_effect=fake_api_get):
-        result = await adapter.test_connection(persisted)
-
-    assert result.success
-    assert "healthy" in result.message
-
-
-@pytest.mark.asyncio
-async def test_connection_failure_unhealthy() -> None:
-    adapter = _make_adapter_token()
-    persisted = _make_adapter()
-
-    async def fake_api_get(path: str, *, params: dict | None = None) -> dict:
-        return {"metadatabase": {"status": "unhealthy"}}
-
-    with patch.object(adapter, "_api_get", side_effect=fake_api_get):
-        result = await adapter.test_connection(persisted)
-
-    assert not result.success
-
-
-@pytest.mark.asyncio
-async def test_connection_failure_exception() -> None:
-    adapter = _make_adapter_token()
-    persisted = _make_adapter()
-
-    async def fake_api_get(path: str, *, params: dict | None = None) -> dict:
-        raise RuntimeError("network down")
-
-    with patch.object(adapter, "_api_get", side_effect=fake_api_get):
-        result = await adapter.test_connection(persisted)
-
-    assert not result.success
-    assert "network down" in result.message
-
-
-# ---------------------------------------------------------------------------
 # discover()
 # ---------------------------------------------------------------------------
 

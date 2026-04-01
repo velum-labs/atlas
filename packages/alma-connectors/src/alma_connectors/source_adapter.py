@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import re
-import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
-from typing import Protocol, runtime_checkable
 from uuid import UUID
 
 _KEY_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
@@ -829,81 +827,3 @@ class SetupInstructions:
         )
 
 
-@runtime_checkable
-class SourceAdapter(Protocol):
-    """Canonical protocol implemented by all persisted source adapters.
-
-    .. deprecated:: 0.2.0
-        ``SourceAdapter`` (v1) is deprecated and will be removed in 1.0.0.
-        Implement :class:`alma_connectors.source_adapter_v2.SourceAdapterV2` instead.
-        See ``MIGRATION.md`` for the full migration guide.
-    """
-
-    kind: SourceAdapterKind
-    capabilities: SourceAdapterCapabilities
-
-    async def test_connection(
-        self,
-        adapter: PersistedSourceAdapter,
-    ) -> ConnectionTestResult:
-        """Validate credentials and connectivity for one adapter.
-
-        .. deprecated:: 0.2.0
-            Use :meth:`SourceAdapterV2.probe` instead.
-        """
-        warnings.warn(
-            "SourceAdapter.test_connection() is deprecated since 0.2.0 and will be removed in 1.0.0. "
-            "Use SourceAdapterV2.probe() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        raise NotImplementedError
-
-    async def introspect_schema(
-        self,
-        adapter: PersistedSourceAdapter,
-    ) -> SchemaSnapshot:
-        """Return a typed snapshot of source objects and dependencies.
-
-        .. deprecated:: 0.2.0
-            Use :meth:`SourceAdapterV2.extract_schema` instead.
-        """
-        warnings.warn(
-            "SourceAdapter.introspect_schema() is deprecated since 0.2.0 and will be removed in 1.0.0. "
-            "Use SourceAdapterV2.extract_schema() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        raise NotImplementedError
-
-    async def observe_traffic(
-        self,
-        adapter: PersistedSourceAdapter,
-        *,
-        since: datetime | None = None,
-    ) -> TrafficObservationResult:
-        """Observe traffic and return canonical query events.
-
-        .. deprecated:: 0.2.0
-            Use :meth:`SourceAdapterV2.extract_traffic` instead.
-        """
-        warnings.warn(
-            "SourceAdapter.observe_traffic() is deprecated since 0.2.0 and will be removed in 1.0.0. "
-            "Use SourceAdapterV2.extract_traffic() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        raise NotImplementedError
-
-    async def execute_query(
-        self,
-        adapter: PersistedSourceAdapter,
-        sql: str,
-        *,
-        max_rows: int | None = None,
-        probe_target: str | None = None,
-    ) -> QueryResult:
-        """Execute one query for validation or shadow-style workflows."""
-
-    def get_setup_instructions(self) -> SetupInstructions:
-        """Return operator guidance for enabling this adapter kind."""

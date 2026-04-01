@@ -14,12 +14,12 @@ from __future__ import annotations
 import dataclasses
 import logging
 import uuid as _uuid_mod
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from alma_atlas.application.sync.mappers import parse_sync_timestamp
+from alma_atlas.application.sync.use_cases import run_full_sync
 from alma_atlas.http_utils import async_request_with_retry
 from alma_atlas.sync.auth import TeamAuth
-from alma_atlas.sync.conflict import ConflictResolver
 from alma_atlas.sync.protocol import SyncPayload, SyncResponse
 
 if TYPE_CHECKING:
@@ -29,9 +29,6 @@ if TYPE_CHECKING:
     from alma_atlas_store.db import Database
 
 log = logging.getLogger(__name__)
-
-_NULL_CURSOR = "1970-01-01T00:00:00Z"
-
 
 @dataclasses.dataclass(frozen=True)
 class SyncRuntimeConfig:
@@ -48,32 +45,9 @@ class SyncRuntimeConfig:
 DEFAULT_SYNC_RUNTIME_CONFIG = SyncRuntimeConfig()
 
 
-def _parse_ts(ts: str | None) -> datetime:
-    if not ts:
-        return datetime.min.replace(tzinfo=UTC)
-    dt = datetime.fromisoformat(ts)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
-    return dt
-
-
-def _asset_to_dict(a: Any) -> dict:
-    return _to_dict(a)
-
-
-def _edge_to_dict(e: Any) -> dict:
-    d = _to_dict(e)
-    # include computed id for convenience
-    d.setdefault("id", e.id if hasattr(e, "id") else "")
-    return d
-
-
-def _contract_to_dict(c: Any) -> dict:
-    return _to_dict(c)
-
-
-def _violation_to_dict(v: Any) -> dict:
-    return _to_dict(v)
+def _parse_ts(ts: str | None):
+    """Compatibility helper for callers that still import `_parse_ts`."""
+    return parse_sync_timestamp(ts)
 
 
 def _validate_response(data: Any) -> dict:
@@ -81,24 +55,6 @@ def _validate_response(data: Any) -> dict:
     if not isinstance(data, dict):
         raise ValueError(f"Server returned unexpected response type: {type(data).__name__}")
     return data
-
-
-def _to_dict(value: Any) -> dict[str, Any]:
-    return dataclasses.asdict(value) if dataclasses.is_dataclass(value) else dict(value)
-
-
-def _latest_cursor(*cursors: str) -> str:
-    latest = ""
-    latest_dt = datetime.min.replace(tzinfo=UTC)
-    for cursor in cursors:
-        if not cursor:
-            continue
-        parsed = _parse_ts(cursor)
-        if parsed >= latest_dt:
-            latest_dt = parsed
-            latest = cursor
-    return latest
-
 
 class SyncClient:
     """Async HTTP client for syncing Atlas graphs with a team server."""
@@ -249,131 +205,5 @@ class SyncClient:
     # ------------------------------------------------------------------ full sync
 
     async def full_sync(self, db: Database, cfg: AtlasConfig) -> SyncResponse:
-        """Push all local changes and pull team contracts/assets.
-
-        Uses the stored sync cursor so only records changed since the last
-        sync are transmitted.  Saves the new cursor only after all pushes
-        succeed (atomicity — a partial failure leaves the cursor unchanged
-        so the next sync retries).
-        """
-        from alma_atlas_store.asset_repository import AssetRepository
-        from alma_atlas_store.contract_repository import ContractRepository
-        from alma_atlas_store.edge_repository import EdgeRepository
-        from alma_atlas_store.violation_repository import ViolationRepository
-
-        cursor = cfg.load_sync_cursor() or _NULL_CURSOR
-
-        # Collect local records changed since cursor
-        all_assets = AssetRepository(db).list_all()
-        all_edges = EdgeRepository(db).list_all()
-        all_contracts = ContractRepository(db).list_all()
-        all_violations = ViolationRepository(db).list_recent(limit=1000)
-
-        assets = [a for a in all_assets if _parse_ts(a.last_seen) >= _parse_ts(cursor)]
-        edges = [e for e in all_edges if _parse_ts(e.last_seen) >= _parse_ts(cursor)]
-        contracts = [c for c in all_contracts if _parse_ts(c.updated_at) >= _parse_ts(cursor)]
-        violations = [v for v in all_violations if _parse_ts(v.detected_at) >= _parse_ts(cursor)]
-
-        log.info(
-            "[sync] pushing %d assets, %d edges, %d contracts, %d violations (cursor=%s)",
-            len(assets),
-            len(edges),
-            len(contracts),
-            len(violations),
-            cursor,
-        )
-
-        # Push all record types atomically — if any push fails the exception
-        # propagates and the cursor is NOT updated, so the next sync retries.
-        asset_resp = await self.push_assets([_asset_to_dict(a) for a in assets], cursor)
-        if asset_resp.rejected:
-            log.warning("[sync] server rejected %d asset(s)", len(asset_resp.rejected))
-        edge_resp = await self.push_edges([_edge_to_dict(e) for e in edges], cursor)
-        if edge_resp.rejected:
-            log.warning("[sync] server rejected %d edge(s)", len(edge_resp.rejected))
-        contract_push_resp = await self.push_contracts([_contract_to_dict(c) for c in contracts], cursor)
-        if contract_push_resp.rejected:
-            log.warning("[sync] server rejected %d contract(s)", len(contract_push_resp.rejected))
-        violation_resp = await self.push_violations([_violation_to_dict(v) for v in violations], cursor)
-        if violation_resp.rejected:
-            log.warning("[sync] server rejected %d violation(s)", len(violation_resp.rejected))
-
-        new_cursor = _latest_cursor(
-            asset_resp.new_cursor,
-            edge_resp.new_cursor,
-            contract_push_resp.new_cursor,
-            violation_resp.new_cursor,
-        ) or cursor
-
-        # Pull team contracts (server-wins)
-        resolver = ConflictResolver()
-        contract_repo = ContractRepository(db)
-        pulled_contracts = await self.pull_contracts(cursor)
-        for remote in pulled_contracts:
-            local = contract_repo.get(remote["id"])
-            resolved = resolver.resolve_contract(_contract_to_dict(local) if local else {}, remote)
-            contract_repo.upsert(_dict_to_contract(resolved))
-        log.info("[sync] pulled %d contract(s) from team", len(pulled_contracts))
-
-        # Pull team assets (last-write-wins)
-        asset_repo = AssetRepository(db)
-        pulled_assets = await self.pull_assets(cursor)
-        for remote in pulled_assets:
-            local = asset_repo.get(remote["id"])
-            resolved = resolver.resolve_asset(_asset_to_dict(local) if local else {}, remote)
-            asset_repo.upsert(_dict_to_asset(resolved))
-        log.info("[sync] pulled %d asset(s) from team", len(pulled_assets))
-
-        # Save cursor only after all pushes and pulls succeeded.
-        if new_cursor:
-            cfg.save_sync_cursor(new_cursor)
-
-        return SyncResponse(
-            accepted_count=(
-                asset_resp.accepted_count
-                + edge_resp.accepted_count
-                + contract_push_resp.accepted_count
-                + violation_resp.accepted_count
-            ),
-            rejected=[
-                *asset_resp.rejected,
-                *edge_resp.rejected,
-                *contract_push_resp.rejected,
-                *violation_resp.rejected,
-            ],
-            new_cursor=new_cursor,
-        )
-
-
-# ------------------------------------------------------------------ helpers
-
-
-def _dict_to_asset(d: dict) -> Any:
-    from alma_atlas_store.asset_repository import Asset
-
-    return Asset(
-        id=d["id"],
-        source=d.get("source", ""),
-        kind=d.get("kind", ""),
-        name=d.get("name", ""),
-        description=d.get("description"),
-        tags=d.get("tags", []),
-        metadata=d.get("metadata", {}),
-        first_seen=d.get("first_seen"),
-        last_seen=d.get("last_seen"),
-    )
-
-
-def _dict_to_contract(d: dict) -> Any:
-    from alma_atlas_store.contract_repository import Contract
-
-    return Contract(
-        id=d["id"],
-        asset_id=d.get("asset_id", ""),
-        version=d.get("version", "1"),
-        spec=d.get("spec", {}),
-        status=d.get("status", "draft"),
-        mode=d.get("mode", "shadow"),
-        created_at=d.get("created_at"),
-        updated_at=d.get("updated_at"),
-    )
+        """Run the canonical application-layer full sync use case."""
+        return await run_full_sync(self, db, cfg)

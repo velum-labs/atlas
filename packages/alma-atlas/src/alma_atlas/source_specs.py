@@ -6,13 +6,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from alma_atlas.config import SourceConfig
-from alma_atlas.source_registry import (
-    allowed_source_params as _allowed_source_params,
-)
-from alma_atlas.source_registry import (
-    ensure_source_params_allowed as _ensure_source_params_allowed,
-)
-from alma_connectors.registry import (
+from alma_connectors.catalog import (
     DEFAULT_AIRFLOW_AUTH_TOKEN_ENV,
     DEFAULT_BIGQUERY_LOCATION,
     DEFAULT_FIVETRAN_API_KEY_ENV,
@@ -22,6 +16,9 @@ from alma_connectors.registry import (
     DEFAULT_LOOKER_PORT,
     DEFAULT_POSTGRES_SCHEMA,
     DEFAULT_SNOWFLAKE_ACCOUNT_SECRET_ENV,
+)
+from alma_connectors.catalog import (
+    allowed_source_params as _allowed_source_params,
 )
 
 
@@ -36,7 +33,13 @@ def allowed_source_params(kind: str) -> frozenset[str]:
 
 
 def ensure_source_params_allowed(source: SourceConfig) -> None:
-    _ensure_source_params_allowed(source.kind, source.params)
+    allowed = allowed_source_params(source.kind)
+    unknown = set(source.params) - set(allowed)
+    if unknown:
+        raise ValueError(
+            f"{source.kind} source has unsupported param(s): {sorted(unknown)}. "
+            f"Allowed params: {sorted(allowed)}"
+        )
 
 
 def make_bigquery_source(

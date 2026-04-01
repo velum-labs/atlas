@@ -78,7 +78,7 @@ class BoundColumnRef:
     explicitly ties a column to its source relation instance, enabling
     correct handling of aliases and self-joins.
 
-    Note: This is a legacy type for RA-level binding. For full binding
+    Note: This is a lightweight RA-level binding type. For full binding
     with type information, use algebrakit.bound.AttributeRef.
     """
 

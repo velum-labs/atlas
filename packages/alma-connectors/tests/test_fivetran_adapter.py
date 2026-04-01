@@ -182,38 +182,6 @@ def test_api_get_raises_on_http_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# test_connection
-# ---------------------------------------------------------------------------
-
-
-def test_test_connection_success() -> None:
-    persisted = _make_persisted()
-    adapter = _make_adapter()
-    mock_client = _make_mock_client(
-        get_return=_mock_response({"data": {"account_name": "Acme Corp"}})
-    )
-    adapter._client = mock_client
-
-    result = asyncio.run(adapter.test_connection(persisted))
-
-    assert result.success is True
-    assert "Acme Corp" in result.message
-
-
-def test_test_connection_failure() -> None:
-    persisted = _make_persisted()
-    adapter = _make_adapter()
-    mock_client = AsyncMock()
-    mock_client.get.side_effect = Exception("Connection refused")
-    adapter._client = mock_client
-
-    result = asyncio.run(adapter.test_connection(persisted))
-
-    assert result.success is False
-    assert "Connection refused" in result.message
-
-
-# ---------------------------------------------------------------------------
 # probe
 # ---------------------------------------------------------------------------
 

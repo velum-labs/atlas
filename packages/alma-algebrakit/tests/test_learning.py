@@ -12,20 +12,17 @@ import pytest
 
 from alma_algebrakit.learning import (
     ClusteringConfig,
-    DerivationConfig,
-    EvidenceComputer,
-    GlobalEvidenceComputer,
     JoinGraphAnalyzer,
     PatternCluster,
     PatternClusterer,
     PatternExtractor,
     PatternInstance,
     PatternSignature,
-    ViewCandidate,
-    ViewDeriver,
     Workload,
     compute_workload_statistics,
 )
+from alma_algebrakit.learning.derivation import DerivationConfig, ViewCandidate, ViewDeriver
+from alma_algebrakit.learning.evidence import EvidenceComputer, GlobalEvidenceComputer
 from alma_algebrakit.models.algebra import (
     AggregateFunction,
     AggregateSpec,

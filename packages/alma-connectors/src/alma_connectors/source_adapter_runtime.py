@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from alma_connectors.registry import instantiate_runtime_adapter as instantiate_runtime_adapter_from_registry
+from alma_connectors.runtime_factory import instantiate_runtime_adapter as instantiate_runtime_adapter_from_registry
 from alma_connectors.source_adapter import ExternalSecretRef, ManagedSecret, PersistedSourceAdapter
 
 type SecretResolver = Callable[[ManagedSecret | ExternalSecretRef], str]

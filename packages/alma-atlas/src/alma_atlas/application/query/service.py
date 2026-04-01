@@ -1,4 +1,4 @@
-"""Shared read/query helpers for the Atlas graph."""
+"""Application-layer query services for the Atlas graph."""
 
 from __future__ import annotations
 
@@ -161,7 +161,11 @@ class GraphReadService:
         if not graph.has_asset(asset_id):
             return LineageSummary(asset_exists=False, related=[])
 
-        related = graph.upstream(asset_id, depth=depth) if direction == "upstream" else graph.downstream(asset_id, depth=depth)
+        related = (
+            graph.upstream(asset_id, depth=depth)
+            if direction == "upstream"
+            else graph.downstream(asset_id, depth=depth)
+        )
         return LineageSummary(asset_exists=True, related=related)
 
     def get_impact_summary(
@@ -314,13 +318,6 @@ def get_impact_summary(
 
     with Database(db_path) as db:
         return GraphReadService(db).get_impact_summary(asset_id, depth=depth)
-
-
-async def run_team_sync(cfg: AtlasConfig):
-    """Backward-compatible wrapper around the sync service."""
-    from alma_atlas.sync.service import run_team_sync as run_team_sync_service
-
-    return await run_team_sync_service(cfg)
 
 
 def _to_lineage_edge(edge: GraphEdge):

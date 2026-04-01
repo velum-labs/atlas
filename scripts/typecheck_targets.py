@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print the curated set of source files that must pass `ty check`."""
+"""Print the configured source targets that must pass `ty check`."""
 
 from __future__ import annotations
 

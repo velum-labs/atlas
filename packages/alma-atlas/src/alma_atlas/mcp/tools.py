@@ -193,7 +193,7 @@ def _tool_specs() -> tuple[AtlasToolSpec, ...]:
 
 def _db_path(cfg: AtlasConfig) -> Path:
     """Resolve the configured Atlas SQLite database path."""
-    from alma_atlas.graph_service import require_db_path
+    from alma_atlas.application.query.service import require_db_path
 
     return require_db_path(cfg)
 
@@ -207,7 +207,7 @@ def register(server: Server, cfg: AtlasConfig) -> None:
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
-        from alma_atlas.graph_service import require_db_path
+        from alma_atlas.application.query.service import require_db_path
 
         try:
             require_db_path(cfg)
@@ -224,7 +224,7 @@ def register(server: Server, cfg: AtlasConfig) -> None:
 
 
 def _handle_search(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
-    from alma_atlas.graph_service import search_assets
+    from alma_atlas.application.query.service import search_assets
 
     query = arguments["query"]
     limit = arguments.get("limit", 20)
@@ -239,7 +239,7 @@ def _handle_search(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextCont
 
 
 def _handle_get_asset(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
-    from alma_atlas.graph_service import get_asset
+    from alma_atlas.application.query.service import get_asset
 
     asset_id = arguments["asset_id"]
     asset = get_asset(_db_path(cfg), asset_id)
@@ -272,7 +272,7 @@ def _handle_get_annotations(cfg: AtlasConfig, arguments: dict[str, Any]) -> list
     If asset_id is provided, returns that annotation (or a not-found message).
     Otherwise returns up to `limit` most recent annotations.
     """
-    from alma_atlas.graph_service import get_annotations
+    from alma_atlas.application.query.service import get_annotations
 
     asset_id = arguments.get("asset_id")
     limit = int(arguments.get("limit", 100))
@@ -299,7 +299,7 @@ def _handle_get_annotations(cfg: AtlasConfig, arguments: dict[str, Any]) -> list
 
 
 def _handle_lineage(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
-    from alma_atlas.graph_service import get_lineage_summary
+    from alma_atlas.application.query.service import get_lineage_summary
 
     asset_id = arguments["asset_id"]
     direction = arguments["direction"]
@@ -320,7 +320,7 @@ def _handle_lineage(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextCon
 
 
 def _handle_status(cfg: AtlasConfig) -> list[TextContent]:
-    from alma_atlas.graph_service import get_graph_status
+    from alma_atlas.application.query.service import get_graph_status
 
     summary = get_graph_status(_db_path(cfg))
 
@@ -342,7 +342,7 @@ def _handle_status(cfg: AtlasConfig) -> list[TextContent]:
 
 
 def _handle_get_schema(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
-    from alma_atlas.graph_service import get_latest_schema
+    from alma_atlas.application.query.service import get_latest_schema
 
     asset_id = arguments["asset_id"]
     asset, snapshot = get_latest_schema(_db_path(cfg), asset_id)
@@ -376,7 +376,7 @@ def _handle_get_schema(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[Text
 
 
 def _handle_impact(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
-    from alma_atlas.graph_service import get_impact_summary
+    from alma_atlas.application.query.service import get_impact_summary
 
     asset_id = arguments["asset_id"]
     depth = arguments.get("depth")
@@ -411,7 +411,7 @@ def _handle_impact(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextCont
 
 
 def _handle_get_query_patterns(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
-    from alma_atlas.graph_service import get_query_patterns
+    from alma_atlas.application.query.service import get_query_patterns
 
     top_n = arguments.get("top_n", 20)
     queries = get_query_patterns(_db_path(cfg), top_n=top_n)
@@ -432,7 +432,7 @@ def _handle_get_query_patterns(cfg: AtlasConfig, arguments: dict[str, Any]) -> l
 
 
 def _handle_suggest_tables(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
-    from alma_atlas.graph_service import suggest_tables
+    from alma_atlas.application.query.service import suggest_tables
 
     query = arguments["query"]
     limit = arguments.get("limit", 10)
@@ -451,7 +451,7 @@ def _handle_suggest_tables(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[
 
 
 def _handle_list_violations(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
-    from alma_atlas.graph_service import list_violations
+    from alma_atlas.application.query.service import list_violations
 
     asset_id = arguments.get("asset_id")
     limit = arguments.get("limit", 50)
@@ -490,7 +490,7 @@ def _tool_handlers():
 
 
 async def _handle_team_sync(cfg: AtlasConfig) -> list[TextContent]:
-    from alma_atlas.graph_service import run_team_sync
+    from alma_atlas.application.sync.use_cases import run_team_sync
 
     try:
         response = await run_team_sync(cfg)
@@ -505,14 +505,12 @@ async def _handle_team_sync(cfg: AtlasConfig) -> list[TextContent]:
 
 
 def _handle_check_contract(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
-    from alma_atlas.contract_service import validate_stored_contracts_for_asset
-    from alma_atlas_store.db import Database
+    from alma_atlas.application.contracts.use_cases import check_asset_contracts
 
     asset_id = arguments["asset_id"]
-    with Database(_db_path(cfg)) as db:
-        checks = validate_stored_contracts_for_asset(db, asset_id)
-        if not checks:
-            return [TextContent(type="text", text=f"No contracts found for asset: {asset_id}")]
+    checks = check_asset_contracts(cfg, asset_id)
+    if not checks:
+        return [TextContent(type="text", text=f"No contracts found for asset: {asset_id}")]
 
     violations: list[str] = []
     for check in checks:

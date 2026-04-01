@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import time
-import warnings
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -256,27 +255,11 @@ class DbtAdapter(BaseAdapterV2):
     # Protocol methods
     # ------------------------------------------------------------------
 
-    async def test_connection(
+    async def _validate_connection(
         self,
         adapter: PersistedSourceAdapter,
     ) -> ConnectionTestResult:
-        """Verify that manifest.json exists, is valid JSON, and has a schema version.
-
-        Args:
-            adapter: Persisted adapter record (used for context only).
-
-        Returns:
-            ConnectionTestResult indicating success or failure with a message.
-
-        .. deprecated:: 0.2.0
-            Use :meth:`~alma_connectors.source_adapter_v2.SourceAdapterV2.probe` instead.
-        """
-        warnings.warn(
-            "DbtAdapter.test_connection() is deprecated since 0.2.0 and will be removed in 1.0.0. "
-            "Use probe() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
+        """Verify that manifest.json exists, is valid JSON, and has a schema version."""
         try:
             manifest = self._load_manifest()
         except FileNotFoundError as exc:
@@ -301,34 +284,11 @@ class DbtAdapter(BaseAdapterV2):
             resource_label="dbt objects",
         )
 
-    async def introspect_schema(
+    async def _build_schema_snapshot_data(
         self,
         adapter: PersistedSourceAdapter,
     ) -> SchemaSnapshot:
-        """Parse manifest and catalog artifacts to produce a SchemaSnapshot.
-
-        Processing steps:
-            1. Load manifest.json (required) and catalog.json (optional).
-            2. Collect models, seeds, and snapshots from ``manifest["nodes"]``.
-            3. Collect external sources from ``manifest["sources"]``.
-            4. Merge column types from catalog when available.
-            5. Build SourceObjectDependency edges from ``depends_on.nodes``.
-
-        Args:
-            adapter: Persisted adapter record (used for context only).
-
-        Returns:
-            SchemaSnapshot with all discovered objects and lineage edges.
-
-        .. deprecated:: 0.2.0
-            Use :meth:`~alma_connectors.source_adapter_v2.SourceAdapterV2.extract_schema` instead.
-        """
-        warnings.warn(
-            "DbtAdapter.introspect_schema() is deprecated since 0.2.0 and will be removed in 1.0.0. "
-            "Use extract_schema() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
+        """Parse manifest and catalog artifacts into schema object data."""
         manifest = self._load_manifest()
         catalog = self._load_catalog()
 
@@ -391,30 +351,13 @@ class DbtAdapter(BaseAdapterV2):
             dependencies=tuple(dependencies),
         )
 
-    async def observe_traffic(
+    async def _empty_traffic_result(
         self,
         adapter: PersistedSourceAdapter,
         *,
         since: datetime | None = None,
     ) -> TrafficObservationResult:
-        """Return an empty result — dbt artifacts do not carry query traffic.
-
-        Args:
-            adapter: Persisted adapter record (unused).
-            since: Lower bound timestamp (unused).
-
-        Returns:
-            TrafficObservationResult with zero records and no events.
-
-        .. deprecated:: 0.2.0
-            Use :meth:`~alma_connectors.source_adapter_v2.SourceAdapterV2.extract_traffic` instead.
-        """
-        warnings.warn(
-            "DbtAdapter.observe_traffic() is deprecated since 0.2.0 and will be removed in 1.0.0. "
-            "Use extract_traffic() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
+        """Return an empty result because dbt artifacts do not carry query traffic."""
         return TrafficObservationResult(scanned_records=0, events=())
 
     def get_setup_instructions(self) -> SetupInstructions:

@@ -16,7 +16,7 @@ from rich import print as rprint
 from rich.console import Console
 from rich.table import Table
 
-from alma_atlas.config import get_config
+from alma_atlas.bootstrap import load_config as get_config
 
 app = typer.Typer(help="Manage team sync — share Atlas graphs with your team.")
 console = Console()
@@ -58,8 +58,9 @@ def team_init(
 @app.command("sync")
 def team_sync() -> None:
     """Push local changes to the team server and pull team contracts."""
+    from alma_atlas.application.query.service import require_db_path
+    from alma_atlas.application.sync.use_cases import run_team_sync
     from alma_atlas.async_utils import run_sync
-    from alma_atlas.graph_service import require_db_path, run_team_sync
 
     cfg = get_config()
     cfg.load_team_config()
@@ -96,43 +97,28 @@ def team_sync() -> None:
 @app.command("status")
 def team_status() -> None:
     """Show sync state — last sync cursor and pending change counts."""
-    from alma_atlas.graph_service import get_graph_status
+    from alma_atlas.application.team.status import get_team_sync_status
 
     cfg = get_config()
-    cfg.load_team_config()
+    status = get_team_sync_status(cfg)
 
     table = Table(title="Team Sync Status", show_header=False, box=None, padding=(0, 2))
     table.add_column("Key", style="bold")
     table.add_column("Value")
 
-    if cfg.team_server_url:
-        table.add_row("Server", cfg.team_server_url)
-        table.add_row("Team ID", cfg.team_id or "default")
-        cursor = cfg.load_sync_cursor()
-        table.add_row("Last sync cursor", cursor or "[dim]never synced[/dim]")
+    if status.server_url:
+        table.add_row("Server", status.server_url)
+        table.add_row("Team ID", status.team_id or "default")
+        table.add_row("Last sync cursor", status.cursor or "[dim]never synced[/dim]")
 
-        if cfg.db_path and cfg.db_path.exists():
-            from alma_atlas.sync.client import _parse_ts
-            from alma_atlas_store.asset_repository import AssetRepository
-            from alma_atlas_store.contract_repository import ContractRepository
-            from alma_atlas_store.db import Database
-
-            summary = get_graph_status(cfg.db_path)
-            with Database(cfg.db_path) as db:
-                asset_repo = AssetRepository(db)
-                contract_count = len(ContractRepository(db).list_all())
-                if cursor:
-                    pending = len(
-                        [
-                            asset
-                            for asset in asset_repo.list_all()
-                            if _parse_ts(asset.last_seen) >= _parse_ts(cursor)
-                        ]
-                    )
-                    table.add_row("Pending asset changes", str(pending))
-            table.add_row("Total assets", str(summary.asset_count))
-            table.add_row("Total edges", str(summary.edge_count))
-            table.add_row("Total contracts", str(contract_count))
+        if status.pending_asset_changes is not None:
+            table.add_row("Pending asset changes", str(status.pending_asset_changes))
+        if status.asset_count is not None:
+            table.add_row("Total assets", str(status.asset_count))
+        if status.edge_count is not None:
+            table.add_row("Total edges", str(status.edge_count))
+        if status.contract_count is not None:
+            table.add_row("Total contracts", str(status.contract_count))
     else:
         table.add_row("Status", "[dim]not configured — run alma-atlas team init[/dim]")
 

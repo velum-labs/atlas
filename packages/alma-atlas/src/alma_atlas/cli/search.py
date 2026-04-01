@@ -32,8 +32,8 @@ def search(
         rprint("[yellow]Provide a search query. Example: [bold]alma-atlas search orders[/bold][/yellow]")
         raise typer.Exit(1)
 
+    from alma_atlas.application.query.service import search_assets
     from alma_atlas.cli.common import require_db_path_or_exit
-    from alma_atlas.graph_service import search_assets
 
     results = search_assets(require_db_path_or_exit(), query, limit=limit)
 

@@ -21,8 +21,8 @@ def export_json(
     output: Annotated[str | None, typer.Option("--output", "-o", help="Output file path (stdout if omitted).")] = None,
 ) -> None:
     """Export the full asset graph as JSON."""
-    from alma_atlas.config import get_config
-    from alma_atlas.graph_service import export_graph, require_db_path
+    from alma_atlas.application.query.service import export_graph, require_db_path
+    from alma_atlas.bootstrap import load_config as get_config
 
     cfg = get_config()
     try:
