@@ -56,11 +56,14 @@ alma-atlas serve
 
 Now your AI can call:
 
-atlas_get_schema("dbt:analytics.fct_orders")
-→ order_id, customer_id, order_created_at, status, total_amount
+**`atlas_get_schema("dbt:analytics.fct_orders")`** — returns columns such as `order_id`, `customer_id`, `order_created_at`, `status`, `total_amount`.
 
-atlas_impact("raw.orders")
-→ 5 downstream assets would be affected
+**`atlas_impact("raw.orders")`** — five downstream assets would be affected:
+
+```mermaid
+flowchart LR
+  raw[raw.orders] --> aff["5 downstream assets affected"]
+```
 
 ---
 

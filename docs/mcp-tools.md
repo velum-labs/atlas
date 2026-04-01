@@ -25,11 +25,7 @@ This page is a usage guide. The authoritative tool catalog and input schemas are
 
 ## Asset IDs
 
-Atlas asset IDs use the canonical form:
-
-```text
-{source_id}::{object_ref}
-```
+Atlas asset IDs use the canonical form `{source_id}::{object_ref}`.
 
 Examples:
 

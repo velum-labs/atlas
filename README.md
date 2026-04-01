@@ -66,11 +66,7 @@ See [docs/mcp-tools.md](docs/mcp-tools.md) for usage examples. The canonical too
 
 ## Asset IDs
 
-Atlas uses canonical asset IDs in the form:
-
-```text
-{source_id}::{object_ref}
-```
+Atlas uses canonical asset IDs in the form `{source_id}::{object_ref}`.
 
 Examples:
 

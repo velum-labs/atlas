@@ -4,12 +4,13 @@
 
 Atlas stores local state in `~/.alma/` by default:
 
-```text
-~/.alma/
-├── atlas.db
-├── config.json
-├── sources.json
-└── sync_cursor.json
+```mermaid
+flowchart TD
+  R["~/.alma/"]
+  R --> DB[atlas.db]
+  R --> CJ[config.json]
+  R --> SJ[sources.json]
+  R --> SC[sync_cursor.json]
 ```
 
 Override the root with:
@@ -252,11 +253,7 @@ learning:
 
 ## Asset IDs
 
-Atlas uses:
-
-```text
-{source_id}::{object_ref}
-```
+Atlas uses the canonical form `{source_id}::{object_ref}`.
 
 Examples:
 

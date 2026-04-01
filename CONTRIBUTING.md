@@ -21,18 +21,19 @@ uv run alma-atlas --help
 
 ## Project structure
 
-```text
-atlas/
-├── packages/
-│   ├── alma-atlas/          # CLI + MCP server + pipeline
-│   ├── alma-atlas-store/    # SQLite store
-│   ├── alma-ports/          # Protocol interfaces
-│   ├── alma-connectors/     # Source adapters
-│   ├── alma-analysis/       # Analysis functions
-│   ├── alma-sqlkit/         # SQL utilities
-│   └── alma-algebrakit/     # SQL algebra + fingerprinting
-├── pyproject.toml           # Workspace root + ruff/pytest config
-└── .python-version          # Pinned Python version
+```mermaid
+flowchart TD
+  R[atlas/]
+  R --> P[packages/]
+  R --> PT[pyproject.toml — workspace root, ruff/pytest]
+  R --> PV[.python-version — pinned Python]
+  P --> A[alma-atlas/ — CLI, MCP server, pipeline]
+  P --> S[alma-atlas-store/ — SQLite store]
+  P --> O[alma-ports/ — protocol interfaces]
+  P --> C[alma-connectors/ — source adapters]
+  P --> N[alma-analysis/ — analysis functions]
+  P --> Q[alma-sqlkit/ — SQL utilities]
+  P --> G[alma-algebrakit/ — SQL algebra and fingerprinting]
 ```
 
 ## Development workflow

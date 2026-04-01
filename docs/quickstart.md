@@ -93,11 +93,7 @@ Use MCP or CLI search/lineage commands to discover real asset IDs before request
 
 ## Asset IDs
 
-Atlas uses canonical IDs in the form:
-
-```text
-{source_id}::{object_ref}
-```
+Atlas uses canonical IDs in the form `{source_id}::{object_ref}`.
 
 Examples:
 

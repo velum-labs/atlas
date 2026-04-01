@@ -46,26 +46,34 @@ alma-atlas serve
 
 Now add Atlas to your IDE's MCP config and your agent can call tools like:
 
-```
-atlas_search("orders")
-→ bigquery:my-project.raw.orders [TABLE]
-→ bigquery:my-project.analytics.orders_daily [VIEW]
-→ dbt:analytics.fct_orders [TABLE] — Fact table for order events
+**`atlas_search("orders")`** — example matches:
 
-atlas_get_schema("dbt:analytics.fct_orders")
-→ order_id        STRING    NOT NULL
-→ customer_id     STRING    NOT NULL
-→ order_created_at TIMESTAMP NOT NULL   ← the actual column name
-→ status          STRING    NULL
-→ total_amount    NUMERIC   NULL
+| Asset |
+|-------|
+| `bigquery:my-project.raw.orders` (TABLE) |
+| `bigquery:my-project.analytics.orders_daily` (VIEW) |
+| `dbt:analytics.fct_orders` (TABLE) — fact table for order events |
 
-atlas_impact("bigquery:my-project.raw.orders")
-→ 5 downstream assets would be affected:
-→   bigquery:my-project.analytics.orders
-→   bigquery:my-project.analytics.orders_daily
-→   dbt:analytics.stg_orders
-→   dbt:analytics.fct_orders
-→   dbt:analytics.rpt_revenue
+**`atlas_get_schema("dbt:analytics.fct_orders")`** — excerpt:
+
+| Column | Type | Null |
+|--------|------|------|
+| order_id | STRING | NOT NULL |
+| customer_id | STRING | NOT NULL |
+| order_created_at | TIMESTAMP | NOT NULL (actual column name) |
+| status | STRING | NULL |
+| total_amount | NUMERIC | NULL |
+
+**`atlas_impact("bigquery:my-project.raw.orders")`** — five downstream assets would be affected:
+
+```mermaid
+flowchart TD
+  raw["bigquery:my-project.raw.orders"]
+  raw --> a1["bigquery:my-project.analytics.orders"]
+  raw --> a2["bigquery:my-project.analytics.orders_daily"]
+  raw --> d1["dbt:analytics.stg_orders"]
+  raw --> d2["dbt:analytics.fct_orders"]
+  raw --> d3["dbt:analytics.rpt_revenue"]
 ```
 
 Before writing any migration, your agent has the live schema, knows the correct column names, and can see the blast radius of the change. The renamed column incident from the scenario above becomes: agent calls `atlas_get_schema`, sees `order_created_at`, uses the right name.
