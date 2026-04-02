@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 
 @dataclass
@@ -19,6 +19,7 @@ class AnnotationRecord:
     sensitivity: str | None = None
     annotated_at: str | None = None
     annotated_by: str | None = None
+    properties: dict[str, Any] = field(default_factory=dict)
 
 
 @runtime_checkable
