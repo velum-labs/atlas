@@ -62,17 +62,31 @@ def _read_dbt_project_name(manifest_path: str) -> str | None:
 @app.command("bigquery")
 def connect_bigquery(
     project: Annotated[str, typer.Option("--project", "-p", help="GCP project ID.")],
-    credentials: Annotated[str | None, typer.Option(help="Path to service account JSON.")] = None,
+    credentials: Annotated[
+        str | None,
+        typer.Option(
+            help=(
+                "Optional path to a service account JSON key file."
+                " If omitted, Atlas uses Application Default Credentials."
+            )
+        ),
+    ] = None,
     service_account_env: Annotated[
         str | None,
-        typer.Option("--service-account-env", help="Env var containing the raw service account JSON payload."),
+        typer.Option(
+            "--service-account-env",
+            help=(
+                "Optional env var containing the raw service account JSON payload."
+                " If omitted, Atlas uses Application Default Credentials."
+            ),
+        ),
     ] = None,
     location: Annotated[
         str,
         typer.Option("--location", help="BigQuery location / region."),
     ] = DEFAULT_BIGQUERY_LOCATION,
 ) -> None:
-    """Register a Google BigQuery data source."""
+    """Register a Google BigQuery data source using ADC by default."""
     cfg = get_config()
     try:
         source = make_bigquery_source(
@@ -85,7 +99,8 @@ def connect_bigquery(
         rprint(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from exc
     cfg.add_source(source)
-    rprint(f"[green]Connected:[/green] BigQuery project [bold]{project}[/bold]")
+    auth_mode = "Application Default Credentials" if credentials is None and service_account_env is None else "explicit credentials"
+    rprint(f"[green]Connected:[/green] BigQuery project [bold]{project}[/bold] ({auth_mode})")
 
 
 @app.command("postgres")

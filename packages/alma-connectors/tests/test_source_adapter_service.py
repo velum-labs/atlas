@@ -146,6 +146,15 @@ def test_get_setup_instructions_supports_community_kinds() -> None:
         assert instructions.summary
 
 
+def test_get_setup_instructions_bigquery_mentions_adc() -> None:
+    service = _make_service()
+
+    instructions = service.get_setup_instructions(SourceAdapterKind.BIGQUERY)
+
+    assert "Application Default Credentials" in instructions.summary
+    assert any("gcloud auth application-default login" in step for step in instructions.steps)
+
+
 def test_get_capabilities_discovery_only_adapter_is_not_schema() -> None:
     service = _make_service()
     runtime_adapter = MagicMock()

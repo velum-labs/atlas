@@ -31,7 +31,7 @@ def test_resolve_env_raises_for_missing_variable() -> None:
         _resolve_env(ExternalSecretRef(provider="env", reference="MISSING_SECRET"))
 
 
-def test_build_runtime_adapter_allows_explicit_bigquery_adc() -> None:
+def test_build_runtime_adapter_defaults_bigquery_to_adc() -> None:
     source = SourceConfig(id="bigquery:analytics", kind="bigquery", params={"project_id": "acme-project"})
 
     _adapter, persisted = build_runtime_adapter(source)

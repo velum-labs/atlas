@@ -50,10 +50,10 @@ Atlas may also persist runtime source state alongside the definition, for exampl
 
 Optional auth fields:
 
-- `credentials`: absolute path to a service-account JSON file
-- `service_account_env`: env var containing the raw JSON payload
+- `credentials`: optional absolute path to a service-account JSON file
+- `service_account_env`: optional env var containing the raw JSON payload
 
-If neither is set, Atlas uses Application Default Credentials.
+If neither is set, Atlas uses Application Default Credentials. This is the preferred local-development path.
 
 ### PostgreSQL
 

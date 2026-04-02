@@ -49,6 +49,10 @@ def make_bigquery_source(
     service_account_env: str | None = None,
     location: str = DEFAULT_BIGQUERY_LOCATION,
 ) -> SourceConfig:
+    """Build a BigQuery source config.
+
+    When credentials are omitted, the runtime uses Application Default Credentials.
+    """
     if credentials and service_account_env:
         raise ValueError("Use either credentials or service_account_env, not both")
     params: dict[str, str] = {"project_id": project, "location": location}

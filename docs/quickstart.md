@@ -18,17 +18,24 @@ alma-atlas --help
 
 ### BigQuery
 
-Atlas supports either Application Default Credentials or an explicit key file.
+Atlas prefers Application Default Credentials (ADC) for local development. Use an explicit
+service account key only when you need non-user auth or cannot rely on ADC.
 
 ```bash
-# ADC
+# Preferred: ADC
 gcloud auth application-default login
 alma-atlas connect bigquery --project my-gcp-project
 
-# Explicit key file
+# Optional fallback: explicit key file
 alma-atlas connect bigquery \
   --project my-gcp-project \
   --credentials ~/.config/gcloud/atlas-sa.json
+
+# Optional fallback: raw JSON from an env var
+export BQ_SERVICE_ACCOUNT_JSON='{"type":"service_account","project_id":"my-gcp-project",...}'
+alma-atlas connect bigquery \
+  --project my-gcp-project \
+  --service-account-env BQ_SERVICE_ACCOUNT_JSON
 ```
 
 ### PostgreSQL

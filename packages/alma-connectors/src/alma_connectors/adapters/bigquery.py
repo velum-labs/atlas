@@ -551,7 +551,7 @@ class BigQueryAdapter:
     # ------------------------------------------------------------------
 
     async def _validate_connection(self, adapter: PersistedSourceAdapter) -> ConnectionTestResult:
-        """Verify connectivity and that the service account can list datasets and run queries."""
+        """Verify connectivity and that the configured identity can list datasets and run queries."""
         config = self._get_config(adapter)  # raises ValueError for wrong kind — intentional
         self._validate_config(config)
         try:
@@ -583,8 +583,8 @@ class BigQueryAdapter:
                     success=False,
                     message=(
                         f"Permission denied for adapter '{adapter.key}': {exc}."
-                        " Ensure the service account has the BigQuery Job User and"
-                        " BigQuery Metadata Viewer roles."
+                        " Ensure the configured identity has the BigQuery Job User and"
+                        " BigQuery Metadata Viewer roles, or equivalent permissions."
                     ),
                 )
             if "404" in msg or "Not Found" in msg or "not found" in msg.lower():
@@ -1771,18 +1771,23 @@ class BigQueryAdapter:
         return SetupInstructions(
             title="BigQuery Source Adapter",
             summary=(
-                "Register a BigQuery project with a service account JSON key."
-                " The service account requires permissions to list datasets, list jobs,"
-                " and read INFORMATION_SCHEMA views."
+                "Register a BigQuery project using Application Default Credentials"
+                " (recommended) or an explicit service account JSON key."
+                " The configured identity requires permissions to list datasets,"
+                " list jobs, and read INFORMATION_SCHEMA views."
             ),
             steps=(
-                "Create a Google Cloud service account in the target GCP project.",
-                "Grant the service account the 'BigQuery Job User' role"
+                "For local development, run 'gcloud auth application-default login'"
+                " to configure Application Default Credentials.",
+                "If you need explicit non-user auth, create a Google Cloud service"
+                " account in the target GCP project.",
+                "Grant the configured identity the 'BigQuery Job User' role"
                 " (roles/bigquery.jobUser) for bigquery.jobs.create and"
                 " bigquery.jobs.list, and the 'BigQuery Metadata Viewer' role"
                 " (roles/bigquery.metadataViewer) for INFORMATION_SCHEMA access.",
-                "Download the service account JSON key and store it as a managed"
-                " secret or an environment-variable reference (provider='env').",
+                "If using explicit credentials, download the service account JSON key"
+                " and store it as a managed secret or an environment-variable"
+                " reference (provider='env').",
                 "Set project_id to the GCP project ID and location to the BigQuery"
                 " region matching your datasets (e.g. 'us', 'eu', 'us-central1')."
                 " INFORMATION_SCHEMA is region-scoped; mismatched location returns"

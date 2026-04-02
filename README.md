@@ -24,6 +24,9 @@ Atlas gives them that context through a local graph and MCP tools.
 ```bash
 uv add alma-atlas
 
+# Authenticate BigQuery for local development (ADC)
+gcloud auth application-default login
+
 # Register one or more sources
 alma-atlas connect bigquery --project my-gcp-project
 alma-atlas connect postgres --dsn "postgresql://user:pass@host/db" --schema public
