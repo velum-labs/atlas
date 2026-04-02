@@ -68,6 +68,7 @@ def persist_edge_learning(db, unlearned_edges: list[Edge], enrichments: list) ->
 def build_asset_annotation_contexts(
     db,
     asset_ids: list[str],
+    column_profiles: dict[str, list] | None = None,
 ) -> list[dict]:
     """Build annotation contexts for one batch of assets."""
     from alma_atlas_store.edge_repository import EdgeRepository
@@ -90,31 +91,44 @@ def build_asset_annotation_contexts(
         if asset is None:
             continue
         schema = schema_repo.get_latest(asset_id)
-        contexts.append(
-            {
-                "asset_id": asset.id,
-                "source": asset.source,
-                "kind": asset.kind,
-                "name": asset.name,
-                "description": asset.description,
-                "tags": asset.tags,
-                "schema": (
-                    {
-                        "fingerprint": schema.fingerprint,
-                        "columns": [
-                            {"name": column.name, "type": column.type, "nullable": column.nullable}
-                            for column in (schema.columns[:50] if schema else [])
-                        ],
-                    }
-                    if schema
-                    else None
-                ),
-                "lineage": {
-                    "upstream": upstream_by_asset.get(asset_id, [])[:25],
-                    "downstream": downstream_by_asset.get(asset_id, [])[:25],
-                },
-            }
-        )
+        ctx: dict = {
+            "asset_id": asset.id,
+            "source": asset.source,
+            "kind": asset.kind,
+            "name": asset.name,
+            "description": asset.description,
+            "tags": asset.tags,
+            "schema": (
+                {
+                    "fingerprint": schema.fingerprint,
+                    "columns": [
+                        {"name": column.name, "type": column.type, "nullable": column.nullable}
+                        for column in (schema.columns[:50] if schema else [])
+                    ],
+                }
+                if schema
+                else None
+            ),
+            "lineage": {
+                "upstream": upstream_by_asset.get(asset_id, [])[:25],
+                "downstream": downstream_by_asset.get(asset_id, [])[:25],
+            },
+        }
+        if column_profiles and asset_id in column_profiles:
+            ctx["column_profiles"] = [
+                {
+                    "column_name": p.column_name,
+                    "distinct_count": p.distinct_count,
+                    "null_count": p.null_count,
+                    "null_fraction": p.null_fraction,
+                    "min_value": p.min_value,
+                    "max_value": p.max_value,
+                    "top_values": p.top_values,
+                    "sample_values": p.sample_values,
+                }
+                for p in column_profiles[asset_id]
+            ]
+        contexts.append(ctx)
     return contexts
 
 

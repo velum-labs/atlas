@@ -776,3 +776,103 @@ def test_load_atlas_yml_unknown_learning_key_rejected(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="unknown learning key"):
         load_atlas_yml(yml)
+
+
+# ---------------------------------------------------------------------------
+# Annotator — prompt construction and column profiling
+# ---------------------------------------------------------------------------
+
+
+def test_annotator_system_prompt_includes_column_notes_and_notes() -> None:
+    from alma_atlas.agents.annotator import _SYSTEM_PROMPT as _ANNOTATOR_SYSTEM_PROMPT
+
+    assert "column_notes" in _ANNOTATOR_SYSTEM_PROMPT
+    assert "notes" in _ANNOTATOR_SYSTEM_PROMPT
+    assert "properties" in _ANNOTATOR_SYSTEM_PROMPT
+
+
+def test_annotator_build_user_prompt_includes_profiling_data() -> None:
+    from alma_atlas.agents.annotator import _build_user_prompt as _annotator_build_user_prompt
+    from alma_ports.profiling import ColumnProfile
+
+    assets = [
+        {
+            "asset_id": "pg::public.orders",
+            "name": "public.orders",
+            "column_profiles": [
+                {
+                    "column_name": "status_code",
+                    "distinct_count": 4,
+                    "null_count": 0,
+                    "null_fraction": 0.0,
+                    "min_value": None,
+                    "max_value": None,
+                    "top_values": [{"value": "pending", "count": 500}, {"value": "shipped", "count": 300}],
+                    "sample_values": ["pending", "shipped"],
+                }
+            ],
+        }
+    ]
+    prompt = _annotator_build_user_prompt(
+        assets,
+        [],
+        Path("/repo"),
+        allow_repo_exploration=False,
+    )
+    assert "status_code" in prompt
+    assert "distinct=4" in prompt
+    assert "pending" in prompt
+    assert "shipped" in prompt
+    # column_profiles key should not appear in the JSON assets dump
+    assert '"column_profiles"' not in prompt.split("## Column profiling stats")[0]
+
+
+def test_annotator_build_user_prompt_no_profiles_no_section() -> None:
+    from alma_atlas.agents.annotator import _build_user_prompt as _annotator_build_user_prompt
+
+    assets = [{"asset_id": "pg::public.orders", "name": "public.orders"}]
+    prompt = _annotator_build_user_prompt(
+        assets,
+        [],
+        Path("/repo"),
+        allow_repo_exploration=False,
+    )
+    assert "Column profiling stats" not in prompt
+
+
+async def test_run_asset_annotation_persists_column_notes_and_notes(db: Database, tmp_path: Path) -> None:
+    asset_id = "pg::public.users"
+    AssetRepository(db).upsert(Asset(id=asset_id, source="pg:test", kind="table", name="public.users"))
+    SchemaRepository(db).upsert(
+        SchemaSnapshot(
+            asset_id=asset_id,
+            columns=[ColumnInfo(name="id", type="int"), ColumnInfo(name="status_code", type="text")],
+        )
+    )
+
+    fixed = AnnotationResult(
+        annotations=[
+            AssetAnnotation(
+                asset_id=asset_id,
+                ownership="data-team",
+                column_notes={"status_code": "encoded category: 1=active 2=suspended 3=deleted"},
+                notes="Do not use status_code directly; join status_dim instead.",
+                properties={"partition_key": "created_at"},
+            )
+        ],
+        repo_summary="ok",
+    )
+    provider = MockProvider(fixed_result=fixed)
+    learning_cfg = LearningConfig(
+        explorer=AgentConfig(provider="acp"),
+        annotator=AgentConfig(provider="acp"),
+    )
+    with patch("alma_atlas.pipeline.learn._provider_from_agent_config", return_value=provider):
+        count = await run_asset_annotation(db, tmp_path, config=learning_cfg, limit=10, batch_size=20)
+    assert count == 1
+
+    record = AnnotationRepository(db).get(asset_id)
+    assert record is not None
+    assert record.properties["column_notes"] == {"status_code": "encoded category: 1=active 2=suspended 3=deleted"}
+    assert record.properties["notes"] == "Do not use status_code directly; join status_dim instead."
+    assert record.properties["partition_key"] == "created_at"

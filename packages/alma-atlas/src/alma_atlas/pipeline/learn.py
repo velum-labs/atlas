@@ -284,9 +284,16 @@ async def run_asset_annotation(
         use_direct_repo = _supports_direct_repo_exploration(enricher_provider)
         if use_direct_repo:
             logger.debug("run_asset_annotation: annotator will inspect repository directly via ACP")
+        from alma_atlas_store.profiling_repository import ProfilingRepository as _ProfilingRepository
+        profiling_repo = _ProfilingRepository(db)
         for i in range(0, len(asset_ids), batch_size):
             batch_ids = asset_ids[i : i + batch_size]
-            contexts = build_asset_annotation_contexts(db, batch_ids)
+            column_profiles = {
+                asset_id: profiles
+                for asset_id in batch_ids
+                if (profiles := profiling_repo.list_for_asset(asset_id))
+            }
+            contexts = build_asset_annotation_contexts(db, batch_ids, column_profiles=column_profiles or None)
             if not contexts:
                 continue
 

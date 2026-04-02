@@ -47,11 +47,29 @@ For each asset, report:
 - freshness_guarantee: update cadence or SLA if present, else null
 - business_logic_summary: 1-2 sentence plain-English description, else null
 - sensitivity: one of 'PII', 'financial', 'public' if inferable, else null
+- column_notes: a dict mapping column names to brief notes. Only annotate
+  columns where the name or type alone is insufficient. Focus on:
+  - Value meanings not obvious from the column name
+  - Storage format quirks (dates stored as TEXT, times as strings, encoded categories)
+  - Null semantics when NULL means something specific
+  - Units when ambiguous (e.g. milliseconds vs seconds, USD vs local currency)
+  - Surrogate keys that look like they might carry business meaning
+  - Common pitfalls (e.g. "do not aggregate this column directly")
+  Skip self-explanatory columns. Only include what is non-obvious.
+  Leave empty if all columns are self-explanatory.
+- notes: optional table-level catch-all for conventions, data quality issues,
+  implicit business rules, or anything that does not fit the typed fields above.
+  Leave null if there is nothing important to add.
+- properties: if you notice something important that does not fit any field
+  above (e.g. known data quality issues, partition strategy, common misuse),
+  add it here using a descriptive key. Leave empty if nothing else stands out.
 
 Rules:
-- Do NOT fabricate. If the repository doesn't contain evidence, leave fields
-  null/empty.
+- Do NOT fabricate. If the repository and profiling data do not contain
+  evidence, leave fields null/empty.
 - Keep business_logic_summary short and concrete.
+- Use column profiling stats (top values, null counts, distinct counts) as
+  evidence when inferring column semantics and writing column_notes.
 - If the prompt says direct repository access is available, inspect the repo
   using ACP file-system and terminal tools before answering.
 - Agents are READ-ONLY: never suggest modifying the repository.
@@ -65,8 +83,46 @@ def _build_user_prompt(
     *,
     allow_repo_exploration: bool,
 ) -> str:
+    # Extract column_profiles from asset contexts before JSON dump to render them separately.
+    profiles_by_asset: dict[str, list] = {}
+    clean_assets: list[dict[str, Any]] = []
+    for asset in assets:
+        profiles = asset.get("column_profiles")
+        if profiles:
+            profiles_by_asset[asset["asset_id"]] = profiles
+        clean_assets.append({k: v for k, v in asset.items() if k != "column_profiles"})
+
     parts: list[str] = ["## Assets to annotate\n"]
-    parts.append(json.dumps({"assets": assets}, indent=2))
+    parts.append(json.dumps({"assets": clean_assets}, indent=2))
+
+    if profiles_by_asset:
+        parts.append("\n## Column profiling stats\n")
+        for asset_id, profiles in profiles_by_asset.items():
+            parts.append(f"### {asset_id}")
+            for col in profiles:
+                tokens: list[str] = [f"- {col['column_name']}:"]
+                if col.get("distinct_count") is not None:
+                    tokens.append(f"distinct={col['distinct_count']}")
+                if col.get("null_count") is not None:
+                    null_info = f"nulls={col['null_count']}"
+                    if col.get("null_fraction") is not None:
+                        null_info += f" ({col['null_fraction']:.1%})"
+                    tokens.append(null_info)
+                if col.get("min_value") is not None or col.get("max_value") is not None:
+                    tokens.append(f"range=[{col.get('min_value', '?')}..{col.get('max_value', '?')}]")
+                if col.get("top_values"):
+                    top = col["top_values"][:5]
+                    vals = ", ".join(
+                        f"{t['value']}({t['count']})"
+                        for t in top
+                        if "value" in t and "count" in t
+                    )
+                    if vals:
+                        tokens.append(f"top=[{vals}]")
+                if col.get("sample_values"):
+                    tokens.append(f"samples={col['sample_values'][:3]}")
+                parts.append(" ".join(tokens))
+            parts.append("")
 
     if allow_repo_exploration:
         parts.append("\n## Repository access\n")

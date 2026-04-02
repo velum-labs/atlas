@@ -58,8 +58,10 @@ For each edge, report:
   MERGE, UNKNOWN
 - watermark_column: column used for incremental loads if found, else null
 - owner: DAG owner, script author, or team name if identifiable, else null
-- confidence_note: one or two sentences explaining what evidence you found; if no 
+- confidence_note: one or two sentences explaining what evidence you found; if no
   evidence, say so explicitly.
+- join_guidance: when applicable, note which column(s) to use for joining this
+  edge and when to prefer this path vs alternatives, else null
 
 Rules:
 - Do NOT invent additional edges beyond the provided list.
