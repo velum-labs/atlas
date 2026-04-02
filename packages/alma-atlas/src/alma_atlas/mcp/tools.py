@@ -23,6 +23,8 @@ Tool catalogue:
     - atlas_find_term               Find assets and columns matching a business term
     - atlas_verify                  Check if a SQL query is correct against Atlas knowledge
     - atlas_define_term             Define or update a business term in the glossary
+    - atlas_context                 Get curated context (tables, joins, columns, warnings) for a question
+    - atlas_ask                     Ask Atlas a data question -- returns an explanation, no SQL
 """
 
 from __future__ import annotations
@@ -243,12 +245,17 @@ def _tool_specs() -> tuple[AtlasToolSpec, ...]:
         ),
         AtlasToolSpec(
             name="atlas_verify",
-            description="Check if something is correct — a SQL query, a join path, a metric definition. Atlas will validate against its learned knowledge.",
+            description="Check if something is correct -- a SQL query, a join path, a metric definition. Atlas will validate against its learned knowledge.",
             input_schema={
                 "type": "object",
                 "properties": {
                     "sql": {"type": "string", "description": "SQL query to verify"},
                     "source_id": {"type": "string", "description": "Source/database context"},
+                    "deep": {
+                        "type": "boolean",
+                        "description": "Use Atlas agent for deeper LLM-backed analysis (default: false)",
+                        "default": False,
+                    },
                 },
                 "required": ["sql"],
             },
@@ -265,6 +272,50 @@ def _tool_specs() -> tuple[AtlasToolSpec, ...]:
                     "referenced_columns": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": ["name"],
+            },
+        ),
+        AtlasToolSpec(
+            name="atlas_context",
+            description=(
+                "Get the context you need to work with this data. Describe what you're trying to do "
+                "and Atlas will gather relevant tables, join paths, column semantics, value "
+                "distributions, and known pitfalls."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "What you're trying to do or answer",
+                    },
+                    "db_id": {
+                        "type": "string",
+                        "description": "Database or source identifier (optional scope)",
+                    },
+                    "evidence": {
+                        "type": "string",
+                        "description": "Optional hints or domain context",
+                    },
+                },
+                "required": ["question"],
+            },
+        ),
+        AtlasToolSpec(
+            name="atlas_ask",
+            description=(
+                "Ask Atlas a question about your data. Returns an explanation grounded in schema, "
+                "annotations, profiling stats, and lineage. No SQL -- just understanding."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string"},
+                    "source_id": {
+                        "type": "string",
+                        "description": "Optional: scope to a specific source",
+                    },
+                },
+                "required": ["question"],
             },
         ),
     )
@@ -939,6 +990,51 @@ def _handle_define_term(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[Tex
     return [TextContent(type="text", text="\n".join(parts))]
 
 
+async def _handle_context(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
+    from alma_atlas.agents.atlas_agent import run_atlas_context
+
+    question = arguments["question"]
+    db_id = arguments.get("db_id", "")
+    evidence = arguments.get("evidence")
+    result = await run_atlas_context(cfg, question, db_id=db_id, evidence=evidence)
+    return [TextContent(type="text", text=result.model_dump_json(indent=2))]
+
+
+async def _handle_ask(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
+    from alma_atlas.agents.atlas_agent import run_atlas_ask
+
+    question = arguments["question"]
+    source_id = arguments.get("source_id")
+    result = await run_atlas_ask(cfg, question, source_id=source_id)
+    return [TextContent(type="text", text=result.model_dump_json(indent=2))]
+
+
+async def _handle_verify_deep(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
+    from alma_atlas.agents.atlas_agent import run_verify_deep
+
+    sql = arguments.get("sql", "").strip()
+    source_id = arguments.get("source_id")
+
+    # Run static analysis first, then hand off to the LLM for deeper analysis.
+    static_texts = _handle_verify(cfg, {k: v for k, v in arguments.items() if k != "deep"})
+    static_result: dict[str, Any] | None = None
+    if static_texts:
+        try:
+            static_result = json.loads(static_texts[0].text)
+        except Exception:
+            pass
+
+    result = await run_verify_deep(cfg, sql, source_id=source_id, static_result=static_result)
+    return [TextContent(type="text", text=result.model_dump_json(indent=2))]
+
+
+def _dispatch_verify(cfg: AtlasConfig, arguments: dict[str, Any]):
+    """Dispatch atlas_verify to static or deep handler based on the 'deep' flag."""
+    if arguments.get("deep"):
+        return _handle_verify_deep(cfg, arguments)
+    return _handle_verify(cfg, arguments)
+
+
 def _tool_handlers():
     return {
         "atlas_search": _handle_search,
@@ -957,8 +1053,10 @@ def _tool_handlers():
         "atlas_profile_column": _handle_profile_column,
         "atlas_describe_relationship": _handle_describe_relationship,
         "atlas_find_term": _handle_find_term,
-        "atlas_verify": _handle_verify,
+        "atlas_verify": _dispatch_verify,
         "atlas_define_term": _handle_define_term,
+        "atlas_context": _handle_context,
+        "atlas_ask": _handle_ask,
     }
 
 
