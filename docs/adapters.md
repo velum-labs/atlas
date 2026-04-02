@@ -4,11 +4,11 @@ Atlas scans all supported source kinds through the same canonical runtime, but t
 
 ## BigQuery
 
-Use either:
+Prefer Application Default Credentials for local development. Use one of:
 
 - Application Default Credentials
-- `credentials` path in `sources.json`
-- `service_account_env` pointing at raw JSON in an env var
+- `credentials` path in `sources.json` for an explicit service-account key
+- `service_account_env` pointing at raw JSON in an env var for an explicit service-account key
 
 Common params:
 

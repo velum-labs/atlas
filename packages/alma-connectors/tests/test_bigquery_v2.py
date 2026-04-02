@@ -802,7 +802,7 @@ def test_validate_location_format() -> None:
     _validate_bq_location("eu-west1")
 
 
-def test_get_client_passes_location_to_bigquery_client(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_client_uses_adc_when_service_account_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     captured_kwargs: dict[str, Any] = {}
 
     class _FakeClient:
@@ -819,6 +819,47 @@ def test_get_client_passes_location_to_bigquery_client(monkeypatch: pytest.Monke
 
     assert captured_kwargs["project"] == "acme-project"
     assert captured_kwargs["location"] == "eu"
+    assert "credentials" not in captured_kwargs
+
+
+def test_get_client_passes_explicit_service_account_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_kwargs: dict[str, Any] = {}
+    captured_credentials_call: dict[str, Any] = {}
+    fake_credentials = object()
+
+    class _FakeClient:
+        def __init__(self, **kwargs: Any) -> None:
+            captured_kwargs.update(kwargs)
+
+    def _fake_from_service_account_info(info: dict[str, Any], scopes: list[str]) -> object:
+        captured_credentials_call["info"] = info
+        captured_credentials_call["scopes"] = scopes
+        return fake_credentials
+
+    monkeypatch.setattr(
+        "alma_connectors.adapters.bigquery._get_bigquery_module",
+        lambda: SimpleNamespace(Client=_FakeClient),
+    )
+    monkeypatch.setattr(
+        "google.oauth2.service_account.Credentials.from_service_account_info",
+        _fake_from_service_account_info,
+    )
+
+    adapter = BigQueryAdapter(resolve_secret=lambda s: "")
+    adapter._get_client(
+        "acme-project",
+        '{"type":"service_account","project_id":"acme-project"}',
+        location="eu",
+    )  # noqa: SLF001
+
+    assert captured_credentials_call["info"] == {
+        "type": "service_account",
+        "project_id": "acme-project",
+    }
+    assert captured_credentials_call["scopes"] == ["https://www.googleapis.com/auth/bigquery"]
+    assert captured_kwargs["project"] == "acme-project"
+    assert captured_kwargs["location"] == "eu"
+    assert captured_kwargs["credentials"] is fake_credentials
 
 
 def test_execute_query_dry_run_returns_bytes_processed() -> None:

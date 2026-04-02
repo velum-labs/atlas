@@ -48,10 +48,13 @@ def test_connect_bigquery(tmp_path: Path) -> None:
     with patch("alma_atlas.cli.connect.get_config", return_value=cfg):
         result = runner.invoke(app, ["connect", "bigquery", "--project", "my-project"])
     assert result.exit_code == 0
+    assert "Application Default Credentials" in result.output
     sources = cfg.load_sources()
     assert len(sources) == 1
     assert sources[0].kind == "bigquery"
     assert sources[0].params["project_id"] == "my-project"
+    assert "credentials" not in sources[0].params
+    assert "service_account_env" not in sources[0].params
 
 
 def test_connect_bigquery_with_credentials(tmp_path: Path) -> None:
@@ -61,8 +64,29 @@ def test_connect_bigquery_with_credentials(tmp_path: Path) -> None:
             app, ["connect", "bigquery", "--project", "proj", "--credentials", "/path/to/creds.json"]
         )
     assert result.exit_code == 0
+    assert "explicit credentials" in result.output
     sources = cfg.load_sources()
     assert sources[0].params.get("credentials") == "/path/to/creds.json"
+
+
+def test_connect_bigquery_with_service_account_env(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    with patch("alma_atlas.cli.connect.get_config", return_value=cfg):
+        result = runner.invoke(
+            app,
+            [
+                "connect",
+                "bigquery",
+                "--project",
+                "proj",
+                "--service-account-env",
+                "BQ_SERVICE_ACCOUNT_JSON",
+            ],
+        )
+    assert result.exit_code == 0
+    assert "explicit credentials" in result.output
+    sources = cfg.load_sources()
+    assert sources[0].params.get("service_account_env") == "BQ_SERVICE_ACCOUNT_JSON"
 
 
 # ---------------------------------------------------------------------------
