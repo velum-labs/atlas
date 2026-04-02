@@ -21,6 +21,8 @@ Tool catalogue:
     - atlas_profile_column          Get data distribution stats for a column
     - atlas_describe_relationship   Describe how two tables relate
     - atlas_find_term               Find assets and columns matching a business term
+    - atlas_verify                  Check if a SQL query is correct against Atlas knowledge
+    - atlas_define_term             Define or update a business term in the glossary
 """
 
 from __future__ import annotations
@@ -237,6 +239,32 @@ def _tool_specs() -> tuple[AtlasToolSpec, ...]:
                     "term": {"type": "string", "description": "Business term or concept to search for"},
                 },
                 "required": ["term"],
+            },
+        ),
+        AtlasToolSpec(
+            name="atlas_verify",
+            description="Check if something is correct — a SQL query, a join path, a metric definition. Atlas will validate against its learned knowledge.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "sql": {"type": "string", "description": "SQL query to verify"},
+                    "source_id": {"type": "string", "description": "Source/database context"},
+                },
+                "required": ["sql"],
+            },
+        ),
+        AtlasToolSpec(
+            name="atlas_define_term",
+            description="Define or update a business term (e.g., 'revenue', 'active user') with its definition, formula, and referenced columns.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "definition": {"type": "string"},
+                    "formula": {"type": "string"},
+                    "referenced_columns": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["name"],
             },
         ),
     )
@@ -726,6 +754,7 @@ def _handle_describe_relationship(cfg: AtlasConfig, arguments: dict[str, Any]) -
 def _handle_find_term(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
     from alma_atlas_store.annotation_repository import AnnotationRepository
     from alma_atlas_store.asset_repository import AssetRepository
+    from alma_atlas_store.business_term_repository import BusinessTermRepository
     from alma_atlas_store.db import Database
 
     term = arguments["term"]
@@ -734,10 +763,17 @@ def _handle_find_term(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextC
     fts_results: list[tuple[str, str]] = []
     asset_results = []
     fts_only_assets: dict[str, Any] = {}
+    term_results = []
 
     with Database(_db_path(cfg)) as db:
         annotation_repo = AnnotationRepository(db)
         asset_repo = AssetRepository(db)
+        term_repo = BusinessTermRepository(db)
+
+        try:
+            term_results = term_repo.search(term)[:limit]
+        except Exception:
+            pass
 
         try:
             fts_results = annotation_repo.search_fts(term, limit=limit)
@@ -753,15 +789,27 @@ def _handle_find_term(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextC
             if asset:
                 fts_only_assets[aid] = asset
 
-    if not fts_results and not asset_results:
-        return [TextContent(type="text", text=f"No assets found for term {term!r}.")]
+    if not term_results and not fts_results and not asset_results:
+        return [TextContent(type="text", text=f"No assets or terms found for {term!r}.")]
 
-    seen: set[str] = set()
-    lines: list[str] = [f"Assets matching term {term!r}:\n"]
+    seen_assets: set[str] = set()
+    lines: list[str] = [f"Results for term {term!r}:\n"]
+
+    if term_results:
+        lines.append("Business terms:")
+        for bt in term_results:
+            lines.append(f"  {bt.name}  [business_term]  source={bt.source}")
+            if bt.definition:
+                lines.append(f"    {bt.definition}")
+            if bt.formula:
+                lines.append(f"    formula: {bt.formula}")
+            if bt.referenced_columns:
+                lines.append(f"    columns: {', '.join(bt.referenced_columns)}")
+        lines.append("")
 
     for asset_id, snippet in fts_results:
-        if asset_id not in seen:
-            seen.add(asset_id)
+        if asset_id not in seen_assets:
+            seen_assets.add(asset_id)
             asset = name_map.get(asset_id) or fts_only_assets.get(asset_id)
             if asset:
                 lines.append(f"  {asset.id}  [{asset.kind}]  source={asset.source}")
@@ -770,12 +818,125 @@ def _handle_find_term(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextC
             lines.append(f"    ...{snippet}...")
 
     for a in asset_results:
-        if a.id not in seen:
-            seen.add(a.id)
+        if a.id not in seen_assets:
+            seen_assets.add(a.id)
             desc = f"  {a.description}" if a.description else ""
             lines.append(f"  {a.id}  [{a.kind}]  source={a.source}{desc}")
 
     return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _handle_verify(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
+    import sqlglot
+    from sqlglot import exp
+
+    from alma_atlas_store.annotation_repository import AnnotationRepository
+    from alma_atlas_store.asset_repository import AssetRepository
+    from alma_atlas_store.db import Database
+    from alma_atlas_store.edge_repository import EdgeRepository
+    from alma_sqlkit.table_refs import extract_tables_from_sql
+
+    sql = arguments.get("sql", "").strip()
+    if not sql:
+        result = {"valid": False, "warnings": ["No SQL provided."], "suggestions": []}
+        return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    try:
+        table_refs = extract_tables_from_sql(sql)
+    except Exception as exc:
+        result = {"valid": False, "warnings": [f"SQL parse error: {exc}"], "suggestions": []}
+        return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    warnings: list[str] = []
+    suggestions: list[str] = []
+
+    agg_columns: set[str] = set()
+    try:
+        parsed = sqlglot.parse_one(sql)
+        for agg in parsed.find_all(exp.Sum, exp.Avg):
+            for col in agg.find_all(exp.Column):
+                agg_columns.add(col.name.lower())
+    except Exception:
+        pass
+
+    with Database(_db_path(cfg)) as db:
+        asset_repo = AssetRepository(db)
+        annotation_repo = AnnotationRepository(db)
+        edge_repo = EdgeRepository(db)
+
+        table_asset_map: dict[str, str] = {}
+        for ref in table_refs:
+            candidates = asset_repo.search(ref.canonical_name)
+            if candidates:
+                best = next(
+                    (a for a in candidates if a.name == ref.canonical_name),
+                    candidates[0],
+                )
+                table_asset_map[ref.canonical_name] = best.id
+
+        for asset_id in table_asset_map.values():
+            annotation = annotation_repo.get(asset_id)
+            if annotation is None:
+                continue
+            column_notes = annotation.properties.get("column_notes", {})
+            for col_name, note in column_notes.items():
+                if note and "surrogate key" in note.lower() and col_name.lower() in agg_columns:
+                    warnings.append(
+                        f"Column '{col_name}' in '{asset_id}' is annotated as a surrogate key "
+                        f"but appears in an aggregate function (SUM/AVG): {note}"
+                    )
+
+        table_names = list(table_asset_map.keys())
+        for i, name_a in enumerate(table_names):
+            for name_b in table_names[i + 1:]:
+                asset_a = table_asset_map[name_a]
+                asset_b = table_asset_map[name_b]
+                for edge in edge_repo.list_for_asset(asset_a):
+                    pair_match = (
+                        (edge.upstream_id == asset_a and edge.downstream_id == asset_b)
+                        or (edge.upstream_id == asset_b and edge.downstream_id == asset_a)
+                    )
+                    if pair_match:
+                        join_guidance = edge.metadata.get("join_guidance")
+                        if join_guidance:
+                            warnings.append(
+                                f"JOIN between '{name_a}' and '{name_b}': {join_guidance}"
+                            )
+
+    result = {"valid": len(warnings) == 0, "warnings": warnings, "suggestions": suggestions}
+    return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+
+def _handle_define_term(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
+    from alma_atlas_store.business_term_repository import BusinessTermRepository
+    from alma_atlas_store.db import Database
+    from alma_ports.business_term import BusinessTerm
+
+    name = arguments["name"]
+    definition = arguments.get("definition")
+    formula = arguments.get("formula")
+    referenced_columns = arguments.get("referenced_columns", [])
+
+    term = BusinessTerm(
+        name=name,
+        definition=definition,
+        formula=formula,
+        referenced_columns=referenced_columns,
+        source="manual",
+    )
+
+    with Database(_db_path(cfg)) as db:
+        BusinessTermRepository(db).upsert(term)
+
+    parts = [f"Business term '{name}' defined."]
+    if definition:
+        parts.append(f"Definition: {definition}")
+    if formula:
+        parts.append(f"Formula: {formula}")
+    if referenced_columns:
+        parts.append(f"Referenced columns: {', '.join(referenced_columns)}")
+
+    return [TextContent(type="text", text="\n".join(parts))]
 
 
 def _tool_handlers():
@@ -796,6 +957,8 @@ def _tool_handlers():
         "atlas_profile_column": _handle_profile_column,
         "atlas_describe_relationship": _handle_describe_relationship,
         "atlas_find_term": _handle_find_term,
+        "atlas_verify": _handle_verify,
+        "atlas_define_term": _handle_define_term,
     }
 
 
