@@ -131,6 +131,11 @@ def persist_annotations(
     annotated_count = 0
     for annotation in annotations:
         try:
+            props: dict = {**annotation.properties}
+            if annotation.column_notes:
+                props["column_notes"] = annotation.column_notes
+            if annotation.notes is not None:
+                props["notes"] = annotation.notes
             repo.upsert(
                 AnnotationRecord(
                     asset_id=annotation.asset_id,
@@ -141,6 +146,7 @@ def persist_annotations(
                     business_logic_summary=annotation.business_logic_summary,
                     sensitivity=annotation.sensitivity,
                     annotated_by=annotated_by,
+                    properties=props,
                 )
             )
             annotated_count += 1

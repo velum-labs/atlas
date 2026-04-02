@@ -160,3 +160,42 @@ def test_fts_upsert_updates_index(repo):
     ))
     assert repo.search_fts("oranges") != []
     assert repo.search_fts("apples") == []
+
+
+# ---------------------------------------------------------------------------
+# Properties round-trip tests
+# ---------------------------------------------------------------------------
+
+
+def test_properties_round_trip(repo):
+    """Properties dict is persisted and retrieved without data loss."""
+    props = {"column_notes": {"id": "surrogate key"}, "notes": "test DB"}
+    record = AnnotationRecord(
+        asset_id="src::schema.orders",
+        business_logic_summary="Order fact table",
+        properties=props,
+    )
+    repo.upsert(record)
+    result = repo.get("src::schema.orders")
+    assert result is not None
+    assert result.properties == props
+    assert result.properties["column_notes"] == {"id": "surrogate key"}
+    assert result.properties["notes"] == "test DB"
+
+
+def test_properties_default_empty(repo):
+    """AnnotationRecord with no properties stores and retrieves an empty dict."""
+    repo.upsert(AnnotationRecord(asset_id="src::schema.empty"))
+    result = repo.get("src::schema.empty")
+    assert result is not None
+    assert result.properties == {}
+
+
+def test_properties_overwritten_on_upsert(repo):
+    """Re-upserting an annotation replaces properties."""
+    repo.upsert(AnnotationRecord(asset_id="src::t", properties={"notes": "v1"}))
+    repo.upsert(AnnotationRecord(asset_id="src::t", properties={"notes": "v2", "column_notes": {"col": "desc"}}))
+    result = repo.get("src::t")
+    assert result is not None
+    assert result.properties["notes"] == "v2"
+    assert result.properties["column_notes"] == {"col": "desc"}

@@ -7,6 +7,8 @@ learning data is written to the store.
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel
 
 
@@ -22,6 +24,7 @@ class EdgeEnrichment(BaseModel):
     watermark_column: str | None = None
     owner: str | None = None
     confidence_note: str
+    join_guidance: str | None = None
 
 
 class PipelineAnalysisResult(BaseModel):
@@ -41,6 +44,9 @@ class AssetAnnotation(BaseModel):
     freshness_guarantee: str | None = None  # 'updated hourly' / 'SLA: 6h'
     business_logic_summary: str | None = None  # 1-2 sentence description
     sensitivity: str | None = None        # 'PII', 'financial', 'public'
+    column_notes: dict[str, str] = {}
+    notes: str | None = None
+    properties: dict[str, Any] = {}
 
 
 class AnnotationResult(BaseModel):

@@ -98,6 +98,18 @@ def test_edge_enrichment_optional_fields_default_to_none() -> None:
     assert e.write_disposition is None
     assert e.watermark_column is None
     assert e.owner is None
+    assert e.join_guidance is None
+
+
+def test_edge_enrichment_join_guidance() -> None:
+    e = EdgeEnrichment(
+        source_table="raw.orders",
+        dest_table="staging.stg_orders",
+        transport_kind="DBT",
+        confidence_note="dbt model found.",
+        join_guidance="Join on order_id; filter deleted_at IS NULL.",
+    )
+    assert e.join_guidance == "Join on order_id; filter deleted_at IS NULL."
 
 
 def test_edge_enrichment_missing_required_fields_raises() -> None:
@@ -122,6 +134,39 @@ def test_edge_enrichment_missing_source_table_raises() -> None:
             transport_kind="UNKNOWN",
             confidence_note="x",
         )
+
+
+# ---------------------------------------------------------------------------
+# Schema validation — AssetAnnotation
+# ---------------------------------------------------------------------------
+
+
+def test_asset_annotation_new_fields_default() -> None:
+    a = AssetAnnotation(asset_id="src::schema.tbl")
+    assert a.column_notes == {}
+    assert a.notes is None
+    assert a.properties == {}
+
+
+def test_asset_annotation_column_notes() -> None:
+    a = AssetAnnotation(
+        asset_id="src::schema.tbl",
+        column_notes={"id": "surrogate key", "email": "PII"},
+    )
+    assert a.column_notes == {"id": "surrogate key", "email": "PII"}
+
+
+def test_asset_annotation_notes() -> None:
+    a = AssetAnnotation(asset_id="src::schema.tbl", notes="Main orders table.")
+    assert a.notes == "Main orders table."
+
+
+def test_asset_annotation_properties() -> None:
+    a = AssetAnnotation(
+        asset_id="src::schema.tbl",
+        properties={"custom_key": "custom_value"},
+    )
+    assert a.properties == {"custom_key": "custom_value"}
 
 
 # ---------------------------------------------------------------------------

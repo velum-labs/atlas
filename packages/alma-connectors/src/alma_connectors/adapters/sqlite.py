@@ -8,6 +8,8 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+from alma_ports.profiling import ColumnProfile
+
 from alma_connectors.adapters._base import BaseAdapterV2
 from alma_connectors.source_adapter import (
     PersistedSourceAdapter,
@@ -33,6 +35,11 @@ from alma_connectors.source_adapter_v2 import SchemaSnapshotV2
 
 _DEFAULT_QUERY_ROW_LIMIT = 100
 _SQLITE_SCHEMA_NAME = "_default"
+_PROFILE_ROW_LIMIT = 1_000_000
+_TOP_VALUES_LIMIT = 50
+_LOW_CARDINALITY_THRESHOLD = 200
+_SAMPLE_VALUES_LIMIT = 5
+_DATE_TYPE_KEYWORDS = ("date", "time", "timestamp")
 _USER_OBJECTS_SQL = """
 SELECT name, type
 FROM sqlite_master
@@ -271,6 +278,124 @@ class SQLiteAdapter(BaseAdapterV2):
             objects=objects,
             dependencies=dependencies,
         )
+
+    async def extract_profiles(
+        self,
+        adapter: PersistedSourceAdapter,
+    ) -> list[ColumnProfile]:
+        """Profile all columns in the database, skipping tables with >1M rows."""
+
+        def _profile_sync() -> list[ColumnProfile]:
+            profiles: list[ColumnProfile] = []
+            profiled_at = datetime.now(UTC).isoformat()
+
+            with self._connect() as connection:
+                object_rows = connection.execute(_USER_OBJECTS_SQL).fetchall()
+                for row in object_rows:
+                    object_name = str(row["name"])
+                    quoted_object = _quote_identifier(object_name)
+                    asset_id = f"{adapter.key}/{object_name}"
+
+                    row_count_result = connection.execute(
+                        f"SELECT COUNT(*) AS row_count FROM {quoted_object}"
+                    ).fetchone()
+                    row_count = int(row_count_result["row_count"]) if row_count_result else 0
+                    if row_count > _PROFILE_ROW_LIMIT:
+                        continue
+
+                    column_rows = connection.execute(
+                        f"PRAGMA table_info({quoted_object})"
+                    ).fetchall()
+
+                    for col_row in column_rows:
+                        col_name = str(col_row["name"])
+                        col_type = str(col_row["type"]).lower()
+                        quoted_col = _quote_identifier(col_name)
+
+                        try:
+                            stat_row = connection.execute(
+                                f"SELECT"
+                                f" COUNT(DISTINCT {quoted_col}) AS distinct_count,"
+                                f" COUNT(*) - COUNT({quoted_col}) AS null_count,"
+                                f" MIN({quoted_col}) AS min_value,"
+                                f" MAX({quoted_col}) AS max_value"
+                                f" FROM {quoted_object}"
+                            ).fetchone()
+                        except sqlite3.Error:
+                            continue
+
+                        if stat_row is None:
+                            continue
+
+                        distinct_count = stat_row["distinct_count"]
+                        null_count = stat_row["null_count"]
+                        null_fraction = (
+                            null_count / row_count if row_count > 0 else None
+                        )
+                        min_value = (
+                            str(stat_row["min_value"])
+                            if stat_row["min_value"] is not None
+                            else None
+                        )
+                        max_value = (
+                            str(stat_row["max_value"])
+                            if stat_row["max_value"] is not None
+                            else None
+                        )
+
+                        top_values: list[dict] = []
+                        if distinct_count is not None and distinct_count <= _LOW_CARDINALITY_THRESHOLD:
+                            try:
+                                tv_rows = connection.execute(
+                                    f"SELECT {quoted_col} AS value, COUNT(*) AS cnt"
+                                    f" FROM {quoted_object}"
+                                    f" GROUP BY {quoted_col}"
+                                    f" ORDER BY cnt DESC"
+                                    f" LIMIT {_TOP_VALUES_LIMIT}"
+                                ).fetchall()
+                                top_values = [
+                                    {"value": str(r["value"]) if r["value"] is not None else None, "count": r["cnt"]}
+                                    for r in tv_rows
+                                ]
+                            except sqlite3.Error:
+                                pass
+
+                        sample_values: list[str] = []
+                        is_date_like = any(kw in col_type for kw in _DATE_TYPE_KEYWORDS) or any(
+                            kw in col_name.lower() for kw in _DATE_TYPE_KEYWORDS
+                        )
+                        if is_date_like:
+                            try:
+                                sv_rows = connection.execute(
+                                    f"SELECT {quoted_col} AS value"
+                                    f" FROM {quoted_object}"
+                                    f" WHERE {quoted_col} IS NOT NULL"
+                                    f" LIMIT {_SAMPLE_VALUES_LIMIT}"
+                                ).fetchall()
+                                sample_values = [
+                                    str(r["value"]) for r in sv_rows if r["value"] is not None
+                                ]
+                            except sqlite3.Error:
+                                pass
+
+                        profiles.append(
+                            ColumnProfile(
+                                asset_id=asset_id,
+                                column_name=col_name,
+                                distinct_count=distinct_count,
+                                null_count=null_count,
+                                null_fraction=null_fraction,
+                                min_value=min_value,
+                                max_value=max_value,
+                                top_values=top_values,
+                                sample_values=sample_values,
+                                profiled_at=profiled_at,
+                            )
+                        )
+
+            return profiles
+
+        return await asyncio.to_thread(_profile_sync)
 
     async def execute_query(
         self,
