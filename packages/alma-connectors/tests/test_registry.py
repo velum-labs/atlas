@@ -8,7 +8,7 @@ from alma_connectors.registry import (
     deserialize_config,
     serialize_definition,
 )
-from alma_connectors.source_adapter import ExternalSecretRef, SourceAdapterKind
+from alma_connectors.source_adapter import ExternalSecretRef, SourceAdapterKind, SQLiteAdapterConfig
 from alma_connectors.source_adapter_service import SourceAdapterService
 
 
@@ -53,3 +53,38 @@ def test_registry_serializes_and_deserializes_definition_roundtrip() -> None:
 
     assert restored == definition.config
     assert isinstance(restored.client_id, ExternalSecretRef)
+
+
+def test_registry_builds_sqlite_persisted_adapter() -> None:
+    adapter = build_persisted_adapter(
+        "sqlite:sample",
+        "sqlite",
+        {"path": "/tmp/sample.sqlite"},
+    )
+
+    assert adapter.kind == SourceAdapterKind.SQLITE
+    assert isinstance(adapter.config, SQLiteAdapterConfig)
+    assert adapter.config.path.endswith("/tmp/sample.sqlite")
+
+
+def test_registry_serializes_and_deserializes_sqlite_definition_roundtrip() -> None:
+    service = _service()
+    definition = build_adapter_definition(
+        "sqlite:sample",
+        "sqlite",
+        {"path": "/tmp/sample.sqlite"},
+    )
+
+    config_payload, secrets_payload = serialize_definition(
+        definition,
+        serialize_secret=service._serialize_secret,
+    )
+    restored = deserialize_config(
+        kind="sqlite",
+        config=config_payload,
+        secrets=secrets_payload,
+        deserialize_secret=service._secret_from_storage_payload,
+    )
+
+    assert secrets_payload == {}
+    assert restored == definition.config

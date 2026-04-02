@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
+from pathlib import Path
 from uuid import UUID
 
 _KEY_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
@@ -71,6 +72,7 @@ class SourceAdapterKind(StrEnum):
     """Supported adapter kinds."""
 
     POSTGRES = "postgres"
+    SQLITE = "sqlite"
     BIGQUERY = "bigquery"
     DBT = "dbt"
     SNOWFLAKE = "snowflake"
@@ -233,6 +235,21 @@ class PostgresAdapterConfig:
             self,
             "probe_target",
             _normalize_optional_probe_target(self.probe_target, field_name="probe_target"),
+        )
+
+
+@dataclass(frozen=True)
+class SQLiteAdapterConfig:
+    """Canonical persisted config for SQLite adapters."""
+
+    path: str
+
+    def __post_init__(self) -> None:
+        normalized_path = _normalize_required_string(self.path, field_name="path")
+        object.__setattr__(
+            self,
+            "path",
+            str(Path(normalized_path).expanduser().resolve()),
         )
 
 
@@ -454,6 +471,7 @@ class MetabaseAdapterConfig:
 
 type SourceAdapterConfig = (
     PostgresAdapterConfig
+    | SQLiteAdapterConfig
     | BigQueryAdapterConfig
     | DbtAdapterConfig
     | SnowflakeAdapterConfig

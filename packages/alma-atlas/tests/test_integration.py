@@ -163,6 +163,96 @@ class TestDbtIntegration:
 
 
 # ---------------------------------------------------------------------------
+# SQLite adapter integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestSQLiteIntegration:
+    """Integration tests against a temporary SQLite database file."""
+
+    def _setup_sqlite_source(self, config: AtlasConfig) -> Path:
+        db_path = config.config_dir / "sample.sqlite"
+        connection = sqlite3.connect(str(db_path))
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            """
+            CREATE TABLE users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                nickname
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE orders (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id),
+                amount REAL
+            )
+            """
+        )
+        connection.executemany(
+            "INSERT INTO users (name, nickname) VALUES (?, ?)",
+            [("Alice", "ally"), ("Bob", None)],
+        )
+        connection.executemany(
+            "INSERT INTO orders (id, user_id, amount) VALUES (?, ?, ?)",
+            [(1, 1, 99.9), (2, 2, 49.5)],
+        )
+        connection.execute("CREATE VIEW user_names AS SELECT id, name FROM users")
+        connection.commit()
+        connection.close()
+
+        config.add_source(
+            SourceConfig(
+                id="sqlite:sample",
+                kind="sqlite",
+                params={"path": str(db_path)},
+            )
+        )
+        return db_path
+
+    def test_connect_sqlite(self, atlas_config: AtlasConfig) -> None:
+        self._setup_sqlite_source(atlas_config)
+        sources = atlas_config.load_sources()
+        assert len(sources) == 1
+        assert sources[0].id == "sqlite:sample"
+        assert sources[0].kind == "sqlite"
+
+    def test_scan_sqlite(self, atlas_config: AtlasConfig) -> None:
+        from alma_atlas.pipeline.learn import get_unannotated_assets
+        from alma_atlas.pipeline.scan import run_scan
+        from alma_atlas_store.db import Database
+
+        self._setup_sqlite_source(atlas_config)
+        sources = atlas_config.load_sources()
+        result = run_scan(sources[0], atlas_config)
+
+        assert result.error is None
+        assert result.asset_count == 3
+        assert result.edge_count == 1
+
+        with Database(atlas_config.db_path) as db:
+            assets = db.conn.execute(
+                "SELECT name, kind FROM assets ORDER BY name"
+            ).fetchall()
+            edges = db.conn.execute(
+                "SELECT upstream_id, downstream_id, kind FROM edges ORDER BY upstream_id, downstream_id"
+            ).fetchall()
+            unannotated_assets = get_unannotated_assets(db)
+
+        assert [(row[0], row[1]) for row in assets] == [
+            ("_default.orders", "table"),
+            ("_default.user_names", "view"),
+            ("_default.users", "table"),
+        ]
+        assert len(edges) == 1
+        assert edges[0][2] == "depends_on"
+        assert len(unannotated_assets) == 3
+
+
+# ---------------------------------------------------------------------------
 # PostgreSQL adapter integration tests (optional, live DB)
 # ---------------------------------------------------------------------------
 

@@ -7,6 +7,7 @@ from alma_connectors.adapters.fivetran import FivetranAdapter
 from alma_connectors.adapters.looker import LookerAdapter
 from alma_connectors.adapters.metabase import MetabaseAdapter
 from alma_connectors.adapters.postgres import PostgresAdapter
+from alma_connectors.adapters.sqlite import SQLiteAdapter
 from alma_connectors.adapters.snowflake import SnowflakeAdapter
 from alma_connectors.catalog import (
     CONNECTOR_SPECS,
@@ -40,6 +41,7 @@ from alma_connectors.source_adapter import (
     SchemaObjectKind,
     SchemaSnapshot,
     SetupInstructions,
+    SQLiteAdapterConfig,
     SnowflakeAdapterConfig,
     SourceAdapterCapabilities,
     SourceAdapterDefinition,
@@ -87,6 +89,8 @@ __all__ = [
     "SchemaObjectKind",
     "SchemaSnapshot",
     "SetupInstructions",
+    "SQLiteAdapter",
+    "SQLiteAdapterConfig",
     "SnowflakeAdapter",
     "SnowflakeAdapterConfig",
     "SourceAdapterCapabilities",
