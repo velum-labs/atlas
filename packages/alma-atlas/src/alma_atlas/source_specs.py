@@ -84,6 +84,20 @@ def make_postgres_source(
     )
 
 
+def make_sqlite_source(
+    *,
+    path: str,
+    source_id: str | None = None,
+) -> SourceConfig:
+    resolved_path = str(Path(path).expanduser().resolve())
+    default_source_id = f"sqlite:{Path(resolved_path).stem}"
+    return SourceConfig(
+        id=source_id or default_source_id,
+        kind="sqlite",
+        params={"path": resolved_path},
+    )
+
+
 def make_snowflake_source(
     *,
     account: str,

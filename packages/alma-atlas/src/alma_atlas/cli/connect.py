@@ -38,6 +38,7 @@ from alma_atlas.source_specs import (
     make_looker_source,
     make_metabase_source,
     make_postgres_source,
+    make_sqlite_source,
     make_snowflake_source,
     resolve_dbt_auxiliary_paths,
 )
@@ -108,6 +109,82 @@ def connect_postgres(
     db_locator = dsn or dsn_env or "postgres"
     db_name = db_locator.rsplit("/", 1)[-1].split("?")[0]
     rprint(f"[green]Connected:[/green] Postgres database [bold]{db_name}[/bold] (schema: {schema})")
+
+
+@app.command("sqlite")
+def connect_sqlite(
+    path: Annotated[
+        str | None,
+        typer.Option("--path", help="Path to a SQLite database file."),
+    ] = None,
+    directory: Annotated[
+        str | None,
+        typer.Option("--dir", help="Directory containing SQLite database files."),
+    ] = None,
+    glob_pattern: Annotated[
+        str,
+        typer.Option("--glob", help="Glob pattern used with --dir."),
+    ] = "*.sqlite",
+    source_id: Annotated[
+        str | None,
+        typer.Option("--id", help="Custom source ID for single-file mode."),
+    ] = None,
+) -> None:
+    """Register one or more SQLite database files."""
+    if (path is None) == (directory is None):
+        rprint("[red]Error:[/red] Provide exactly one of --path or --dir")
+        raise typer.Exit(1)
+    if directory is not None and source_id is not None:
+        rprint("[red]Error:[/red] --id can only be used together with --path")
+        raise typer.Exit(1)
+
+    cfg = get_config()
+
+    if path is not None:
+        db_path = Path(path).expanduser().resolve()
+        if not db_path.is_file():
+            rprint(f"[red]Error:[/red] SQLite database not found: {db_path}")
+            raise typer.Exit(1)
+        source = make_sqlite_source(path=str(db_path), source_id=source_id)
+        cfg.add_source(source)
+        rprint(
+            f"[green]Connected:[/green] SQLite database [bold]{db_path.name}[/bold] "
+            f"as [bold]{source.id}[/bold]"
+        )
+        return
+
+    assert directory is not None
+    database_dir = Path(directory).expanduser().resolve()
+    if not database_dir.is_dir():
+        rprint(f"[red]Error:[/red] SQLite directory not found: {database_dir}")
+        raise typer.Exit(1)
+
+    database_files = sorted(candidate for candidate in database_dir.rglob(glob_pattern) if candidate.is_file())
+    if not database_files:
+        rprint(
+            f"[red]Error:[/red] No SQLite database files matched [bold]{glob_pattern}[/bold] "
+            f"under [bold]{database_dir}[/bold]"
+        )
+        raise typer.Exit(1)
+
+    sources = [make_sqlite_source(path=str(database_file)) for database_file in database_files]
+    seen_ids: set[str] = set()
+    duplicate_ids = sorted({source.id for source in sources if source.id in seen_ids or seen_ids.add(source.id)})
+    if duplicate_ids:
+        duplicates = ", ".join(duplicate_ids)
+        rprint(
+            "[red]Error:[/red] Generated duplicate SQLite source IDs in --dir mode: "
+            f"{duplicates}"
+        )
+        raise typer.Exit(1)
+
+    for source in sources:
+        cfg.add_source(source)
+
+    rprint(
+        f"[green]Connected:[/green] {len(sources)} SQLite database(s) from "
+        f"[bold]{database_dir}[/bold] using [bold]{glob_pattern}[/bold]"
+    )
 
 
 @app.command("snowflake")

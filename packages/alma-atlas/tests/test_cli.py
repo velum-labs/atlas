@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,6 +16,15 @@ runner = CliRunner()
 
 def _cfg(tmp_path: Path) -> AtlasConfig:
     return AtlasConfig(config_dir=tmp_path / "alma")
+
+
+def _create_sqlite_db(db_path: Path) -> None:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(str(db_path))
+    connection.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
+    connection.execute("INSERT INTO users (id, name) VALUES (1, 'Alice')")
+    connection.commit()
+    connection.close()
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +79,66 @@ def test_connect_postgres(tmp_path: Path) -> None:
     assert sources[0].id == "postgres:mydb"
     assert sources[0].kind == "postgres"
     assert sources[0].params["include_schemas"] == ["public"]
+
+
+# ---------------------------------------------------------------------------
+# connect sqlite
+# ---------------------------------------------------------------------------
+
+
+def test_connect_sqlite(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    db_path = tmp_path / "sample.sqlite"
+    _create_sqlite_db(db_path)
+
+    with patch("alma_atlas.cli.connect.get_config", return_value=cfg):
+        result = runner.invoke(app, ["connect", "sqlite", "--path", str(db_path)])
+
+    assert result.exit_code == 0
+    sources = cfg.load_sources()
+    assert sources[0].id == "sqlite:sample"
+    assert sources[0].kind == "sqlite"
+    assert sources[0].params["path"] == str(db_path.resolve())
+
+
+def test_connect_sqlite_with_custom_id(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    db_path = tmp_path / "sample.sqlite"
+    _create_sqlite_db(db_path)
+
+    with patch("alma_atlas.cli.connect.get_config", return_value=cfg):
+        result = runner.invoke(
+            app,
+            ["connect", "sqlite", "--path", str(db_path), "--id", "sqlite:custom"],
+        )
+
+    assert result.exit_code == 0
+    sources = cfg.load_sources()
+    assert sources[0].id == "sqlite:custom"
+
+
+def test_connect_sqlite_directory_mode(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    database_dir = tmp_path / "databases"
+    alpha_path = database_dir / "alpha" / "alpha.sqlite"
+    beta_path = database_dir / "beta" / "beta.sqlite"
+    _create_sqlite_db(alpha_path)
+    _create_sqlite_db(beta_path)
+
+    with patch("alma_atlas.cli.connect.get_config", return_value=cfg):
+        result = runner.invoke(
+            app,
+            ["connect", "sqlite", "--dir", str(database_dir), "--glob", "*.sqlite"],
+        )
+
+    assert result.exit_code == 0
+    assert "2 SQLite database(s)" in result.output
+    sources = sorted(cfg.load_sources(), key=lambda source: source.id)
+    assert [source.id for source in sources] == ["sqlite:alpha", "sqlite:beta"]
+    assert [source.params["path"] for source in sources] == [
+        str(alpha_path.resolve()),
+        str(beta_path.resolve()),
+    ]
 
 
 # ---------------------------------------------------------------------------

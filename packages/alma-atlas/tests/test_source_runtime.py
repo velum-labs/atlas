@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from alma_atlas.config import SourceConfig
@@ -22,8 +24,10 @@ from alma_connectors.source_adapter import (
     LookerAdapterConfig,
     MetabaseAdapterConfig,
     PostgresAdapterConfig,
+    SQLiteAdapterConfig,
     SnowflakeAdapterConfig,
 )
+from alma_connectors.adapters.sqlite import SQLiteAdapter
 
 
 def test_resolve_env_raises_for_missing_variable() -> None:
@@ -57,6 +61,22 @@ def test_build_runtime_adapter_normalizes_scalar_schema_values() -> None:
     assert isinstance(persisted.config, PostgresAdapterConfig)
     assert persisted.config.include_schemas == ("analytics",)
     assert persisted.config.exclude_schemas == ("internal",)
+
+
+def test_build_runtime_adapter_supports_sqlite(tmp_path: Path) -> None:
+    db_path = tmp_path / "sample.sqlite"
+    db_path.touch()
+    source = SourceConfig(
+        id="sqlite:sample",
+        kind="sqlite",
+        params={"path": str(db_path)},
+    )
+
+    adapter, persisted = build_runtime_adapter(source)
+
+    assert isinstance(adapter, SQLiteAdapter)
+    assert isinstance(persisted.config, SQLiteAdapterConfig)
+    assert persisted.config.path == str(db_path.resolve())
 
 
 def test_build_runtime_adapter_uses_default_secret_envs_for_runtime_sources(monkeypatch: pytest.MonkeyPatch) -> None:

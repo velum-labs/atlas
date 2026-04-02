@@ -15,6 +15,7 @@ from alma_connectors.adapters.fivetran import FivetranAdapter
 from alma_connectors.adapters.looker import LookerAdapter
 from alma_connectors.adapters.metabase import MetabaseAdapter
 from alma_connectors.adapters.postgres import PostgresAdapter
+from alma_connectors.adapters.sqlite import SQLiteAdapter
 from alma_connectors.adapters.snowflake import SnowflakeAdapter
 from alma_connectors.source_adapter import (
     AirflowAdapterConfig,
@@ -29,6 +30,7 @@ from alma_connectors.source_adapter import (
     PostgresAdapterConfig,
     PostgresLogCaptureConfig,
     PostgresReadReplicaConfig,
+    SQLiteAdapterConfig,
     SetupInstructions,
     SnowflakeAdapterConfig,
     SourceAdapterConfig,
@@ -249,6 +251,13 @@ def _build_postgres_config(params: dict[str, Any]) -> PostgresAdapterConfig:
     )
 
 
+def _build_sqlite_config(params: dict[str, Any]) -> SQLiteAdapterConfig:
+    path = params.get("path")
+    if path is None:
+        raise ValueError("sqlite sources require a 'path'")
+    return SQLiteAdapterConfig(path=str(path))
+
+
 def _build_dbt_config(params: dict[str, Any]) -> DbtAdapterConfig:
     return DbtAdapterConfig(
         manifest_path=str(params.get("manifest_path", "")),
@@ -335,6 +344,12 @@ def _build_metabase_config(params: dict[str, Any]) -> MetabaseAdapterConfig:
 def _build_postgres_runtime(config: SourceAdapterConfig, resolve_secret: SecretResolver) -> RuntimeSourceAdapter:
     assert isinstance(config, PostgresAdapterConfig)
     return PostgresAdapter(resolve_secret=resolve_secret)
+
+
+def _build_sqlite_runtime(config: SourceAdapterConfig, resolve_secret: SecretResolver) -> RuntimeSourceAdapter:
+    del resolve_secret
+    assert isinstance(config, SQLiteAdapterConfig)
+    return SQLiteAdapter(db_path=config.path)
 
 
 def _build_bigquery_runtime(config: SourceAdapterConfig, resolve_secret: SecretResolver) -> RuntimeSourceAdapter:
@@ -436,6 +451,15 @@ def _encode_postgres_definition(
     if config.read_replica is not None and config.read_replica.database_secret is not None:
         secrets["read_replica_database_secret"] = serialize_secret(config.read_replica.database_secret)
     return payload, secrets
+
+
+def _encode_sqlite_definition(
+    definition: SourceAdapterDefinition,
+    serialize_secret: SerializeSecret,
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    del serialize_secret
+    config = _require_config_type(definition, SQLiteAdapterConfig, kind="sqlite")
+    return ({"path": config.path}, {})
 
 
 def _encode_bigquery_definition(
@@ -623,6 +647,15 @@ def _decode_postgres_config(
     )
 
 
+def _decode_sqlite_config(
+    config: dict[str, Any],
+    secrets: dict[str, Any],
+    deserialize_secret: DeserializeSecret,
+) -> SourceAdapterConfig:
+    del secrets, deserialize_secret
+    return SQLiteAdapterConfig(path=str(config.get("path", "")))
+
+
 def _decode_bigquery_config(
     config: dict[str, Any],
     secrets: dict[str, Any],
@@ -751,6 +784,10 @@ def _postgres_setup_instructions() -> SetupInstructions:
     return PostgresAdapter(resolve_secret=lambda secret: "").get_setup_instructions()
 
 
+def _sqlite_setup_instructions() -> SetupInstructions:
+    return SQLiteAdapter(db_path="example.sqlite").get_setup_instructions()
+
+
 def _bigquery_setup_instructions() -> SetupInstructions:
     return BigQueryAdapter(resolve_secret=lambda secret: "").get_setup_instructions()
 
@@ -833,6 +870,22 @@ CONNECTOR_SPECS: dict[str, ConnectorSpec] = {
         encode_definition=_encode_postgres_definition,
         decode_config=_decode_postgres_config,
         setup_instructions_factory=_postgres_setup_instructions,
+    ),
+    "sqlite": ConnectorSpec(
+        kind="sqlite",
+        adapter_kind=SourceAdapterKind.SQLITE,
+        allowed_params=frozenset(
+            {
+                "observation_cursor",
+                "path",
+            }
+        ),
+        secret_paths=(),
+        build_config=_build_sqlite_config,
+        runtime_factory=_build_sqlite_runtime,
+        encode_definition=_encode_sqlite_definition,
+        decode_config=_decode_sqlite_config,
+        setup_instructions_factory=_sqlite_setup_instructions,
     ),
     "dbt": ConnectorSpec(
         kind="dbt",
