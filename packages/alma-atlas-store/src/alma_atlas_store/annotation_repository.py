@@ -147,27 +147,42 @@ class AnnotationRepository:
         ).fetchone()
         return self._row_to_record(row) if row else None
 
-    def list_unannotated(self, limit: int = 100) -> list[str]:
+    def list_unannotated(self, limit: int = 100, *, source_prefix: str | None = None) -> list[str]:
         """Return asset IDs that have no annotation yet.
 
         Performs a LEFT JOIN between the assets and asset_annotations tables.
 
         Args:
             limit: Maximum number of asset IDs to return.
+            source_prefix: When provided, only return assets whose ID starts with
+                ``<source_prefix>::``.
 
         Returns:
             List of asset IDs without any annotation, ordered by asset ID.
         """
-        rows = self._db.conn.execute(
-            """
-            SELECT a.id FROM assets a
-            LEFT JOIN asset_annotations aa ON a.id = aa.asset_id
-            WHERE aa.asset_id IS NULL
-            ORDER BY a.id
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
+        if source_prefix is not None:
+            rows = self._db.conn.execute(
+                """
+                SELECT a.id FROM assets a
+                LEFT JOIN asset_annotations aa ON a.id = aa.asset_id
+                WHERE aa.asset_id IS NULL
+                AND a.id LIKE ? || '::%'
+                ORDER BY a.id
+                LIMIT ?
+                """,
+                (source_prefix, limit),
+            ).fetchall()
+        else:
+            rows = self._db.conn.execute(
+                """
+                SELECT a.id FROM assets a
+                LEFT JOIN asset_annotations aa ON a.id = aa.asset_id
+                WHERE aa.asset_id IS NULL
+                ORDER BY a.id
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
         return [row["id"] for row in rows]
 
     def list_stale(self, max_age_days: int = 7) -> list[AnnotationRecord]:

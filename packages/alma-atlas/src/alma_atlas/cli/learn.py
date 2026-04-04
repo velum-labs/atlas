@@ -56,6 +56,10 @@ def learn(
         bool,
         typer.Option("--dry-run", help="Show unlearned items without calling the LLM."),
     ] = False,
+    source: Annotated[
+        str | None,
+        typer.Option("--source", "-s", help="Only learn assets/edges from this source."),
+    ] = None,
 ) -> None:
     """Learn cross-system edges with pipeline transport metadata.
 
@@ -75,7 +79,7 @@ def learn(
         from alma_atlas.pipeline.learn import get_unannotated_assets
 
         with Database(db_path) as db:
-            unannotated = get_unannotated_assets(db)
+            unannotated = get_unannotated_assets(db, source_prefix=source)
 
         if not unannotated:
             console.print("[green]No unannotated assets found.[/green]")
@@ -103,7 +107,7 @@ def learn(
     from alma_atlas.pipeline.learn import get_unlearned_edges
 
     with Database(db_path) as db:
-        unlearned = get_unlearned_edges(db)
+        unlearned = get_unlearned_edges(db, source_prefix=source)
 
     if not unlearned:
         console.print("[green]No unlearned edges found.[/green]")

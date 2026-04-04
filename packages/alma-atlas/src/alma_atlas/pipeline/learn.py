@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 _LEARNABLE_KINDS: frozenset[str] = frozenset({"schema_match", "dbt_source_ref", "depends_on"})
 
 
-def get_unlearned_edges(db: Database) -> list[Edge]:
+def get_unlearned_edges(db: Database, *, source_prefix: str | None = None) -> list[Edge]:
     """Return edges that have not yet been learned by the pipeline analysis workflow.
 
     An edge qualifies when its :attr:`~alma_atlas_store.edge_repository.Edge.kind`
@@ -62,12 +62,15 @@ def get_unlearned_edges(db: Database) -> list[Edge]:
 
     Args:
         db: Open :class:`~alma_atlas_store.db.Database` connection.
+        source_prefix: When provided, only return edges where at least one of
+            upstream_id or downstream_id starts with ``<source_prefix>::``.
 
     Returns:
         List of unlearned :class:`~alma_atlas_store.edge_repository.Edge` objects.
     """
     from alma_atlas_store.edge_repository import EdgeRepository
 
+    prefix = f"{source_prefix}::" if source_prefix is not None else None
     repo = EdgeRepository(db)
     return [
         e
@@ -82,6 +85,11 @@ def get_unlearned_edges(db: Database) -> list[Edge]:
             and e.upstream_id.split("::", 1)[-1] == e.downstream_id.split("::", 1)[-1]
         )
         and e.metadata.get("learning_status") != "learned"
+        and (
+            prefix is None
+            or e.upstream_id.startswith(prefix)
+            or e.downstream_id.startswith(prefix)
+        )
     ]
 
 
@@ -215,11 +223,18 @@ async def run_edge_learning(
     return learned_count
 
 
-def get_unannotated_assets(db: Database, *, limit: int = 100) -> list[str]:
-    """Return asset IDs that have no annotation record yet."""
+def get_unannotated_assets(db: Database, *, limit: int = 100, source_prefix: str | None = None) -> list[str]:
+    """Return asset IDs that have no annotation record yet.
+
+    Args:
+        db: Open Atlas database connection.
+        limit: Maximum number of asset IDs to return.
+        source_prefix: When provided, only return assets from this source
+            (i.e. whose ID starts with ``<source_prefix>::``).
+    """
     from alma_atlas_store.annotation_repository import AnnotationRepository
 
-    return AnnotationRepository(db).list_unannotated(limit=limit)
+    return AnnotationRepository(db).list_unannotated(limit=limit, source_prefix=source_prefix)
 
 
 async def run_asset_annotation(

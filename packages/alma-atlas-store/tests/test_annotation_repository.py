@@ -5,8 +5,10 @@ from __future__ import annotations
 import pytest
 
 from alma_atlas_store.annotation_repository import AnnotationRepository, _build_fts_content
+from alma_atlas_store.asset_repository import AssetRepository
 from alma_atlas_store.db import Database
 from alma_ports.annotation import AnnotationRecord
+from alma_ports.asset import Asset
 
 
 @pytest.fixture
@@ -199,3 +201,48 @@ def test_properties_overwritten_on_upsert(repo):
     assert result is not None
     assert result.properties["notes"] == "v2"
     assert result.properties["column_notes"] == {"col": "desc"}
+
+
+# ---------------------------------------------------------------------------
+# list_unannotated with source_prefix
+# ---------------------------------------------------------------------------
+
+
+def _seed_asset(db: Database, asset_id: str) -> None:
+    source = asset_id.split("::", 1)[0]
+    AssetRepository(db).upsert(Asset(id=asset_id, source=source, kind="table", name=asset_id))
+
+
+def test_list_unannotated_no_prefix_returns_all(db, repo):
+    """list_unannotated without source_prefix returns all unannotated assets."""
+    _seed_asset(db, "pg:henkel::analytics.revenue")
+    _seed_asset(db, "sqlite:bird::frpm")
+    unannotated = repo.list_unannotated()
+    assert "pg:henkel::analytics.revenue" in unannotated
+    assert "sqlite:bird::frpm" in unannotated
+
+
+def test_list_unannotated_with_prefix_filters_by_source(db, repo):
+    """list_unannotated with source_prefix only returns assets from that source."""
+    _seed_asset(db, "pg:henkel::analytics.revenue")
+    _seed_asset(db, "sqlite:bird::frpm")
+    unannotated = repo.list_unannotated(source_prefix="pg:henkel")
+    assert "pg:henkel::analytics.revenue" in unannotated
+    assert "sqlite:bird::frpm" not in unannotated
+
+
+def test_list_unannotated_with_prefix_excludes_annotated(db, repo):
+    """list_unannotated with source_prefix excludes already-annotated assets."""
+    _seed_asset(db, "pg:henkel::analytics.revenue")
+    _seed_asset(db, "pg:henkel::analytics.users")
+    repo.upsert(AnnotationRecord(asset_id="pg:henkel::analytics.revenue"))
+    unannotated = repo.list_unannotated(source_prefix="pg:henkel")
+    assert "pg:henkel::analytics.revenue" not in unannotated
+    assert "pg:henkel::analytics.users" in unannotated
+
+
+def test_list_unannotated_with_prefix_no_match_returns_empty(db, repo):
+    """list_unannotated with unknown source_prefix returns empty list."""
+    _seed_asset(db, "pg:henkel::analytics.revenue")
+    unannotated = repo.list_unannotated(source_prefix="nonexistent")
+    assert unannotated == []

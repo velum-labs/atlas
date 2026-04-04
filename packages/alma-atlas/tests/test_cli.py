@@ -371,3 +371,54 @@ def test_scan_uses_runtime_sources_without_persisting_them(tmp_path: Path) -> No
 
     assert result.exit_code == 0
     mock_save_sources.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# learn --source
+# ---------------------------------------------------------------------------
+
+
+def _seed_learn_assets(cfg, assets: list[tuple[str, str]]) -> None:
+    """Create the atlas DB and seed it with (asset_id, source) pairs."""
+    from alma_atlas_store.asset_repository import AssetRepository
+    from alma_atlas_store.db import Database
+    from alma_ports.asset import Asset
+
+    db_path = cfg.db_path
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with Database(db_path) as db:
+        repo = AssetRepository(db)
+        for asset_id, source in assets:
+            repo.upsert(Asset(id=asset_id, source=source, kind="table", name=asset_id))
+
+
+def test_learn_assets_source_filter_dry_run(tmp_path: Path) -> None:
+    """learn --assets --source <id> --dry-run shows only assets from that source."""
+    cfg = _cfg(tmp_path)
+    _seed_learn_assets(cfg, [
+        ("pg:henkel::analytics.revenue", "pg:henkel"),
+        ("sqlite:benchmark::frpm", "sqlite:benchmark"),
+    ])
+
+    with patch("alma_atlas.cli.learn.get_config", return_value=cfg):
+        result = runner.invoke(app, ["learn", "--assets", "--source", "pg:henkel", "--dry-run"])
+
+    assert result.exit_code == 0
+    assert "pg:henkel::analytics.revenue" in result.output
+    assert "sqlite:benchmark::frpm" not in result.output
+
+
+def test_learn_assets_no_source_filter_dry_run(tmp_path: Path) -> None:
+    """learn --assets --dry-run without --source shows all unannotated assets."""
+    cfg = _cfg(tmp_path)
+    _seed_learn_assets(cfg, [
+        ("pg:henkel::analytics.revenue", "pg:henkel"),
+        ("sqlite:benchmark::frpm", "sqlite:benchmark"),
+    ])
+
+    with patch("alma_atlas.cli.learn.get_config", return_value=cfg):
+        result = runner.invoke(app, ["learn", "--assets", "--dry-run"])
+
+    assert result.exit_code == 0
+    assert "pg:henkel::analytics.revenue" in result.output
+    assert "sqlite:benchmark::frpm" in result.output
