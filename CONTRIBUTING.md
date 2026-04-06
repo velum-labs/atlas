@@ -96,5 +96,19 @@ enable it automatically.
 
 ## Release
 
-Workspace releases are lockstep and derive from the root `VERSION` file.
-Run `python scripts/sync-versions.py --check` to verify version drift before releasing.
+See [RELEASING.md](RELEASING.md) for the full release runbook, including PyPI
+Trusted Publisher setup, the one-command release script, and how to monitor and
+debug a publish run.
+
+Quick reference:
+
+```bash
+# Verify all package versions match the VERSION file before releasing
+python3 scripts/sync-versions.py --check
+
+# Check which packages are currently live on PyPI (no install required)
+python3 scripts/check-pypi.py --latest
+
+# Cut a release (bumps VERSION, commits, tags, pushes — triggers publish workflow)
+./scripts/release.sh 0.2.0
+```
