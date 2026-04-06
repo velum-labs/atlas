@@ -12,6 +12,8 @@ This package provides a complete relational algebra engine including:
 All abstractions are SQL-agnostic and work for any query language.
 """
 
+__version__ = "0.1.0"
+
 from alma_algebrakit.bound.query import (
     BoundOrderItem,
     BoundQuery,

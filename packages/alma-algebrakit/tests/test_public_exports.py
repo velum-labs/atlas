@@ -5,6 +5,12 @@ from __future__ import annotations
 import alma_algebrakit as algebrakit
 
 
+def test_algebrakit_version_accessible() -> None:
+    assert hasattr(algebrakit, "__version__")
+    assert isinstance(algebrakit.__version__, str)
+    assert algebrakit.__version__  # non-empty
+
+
 def test_algebrakit_exports_are_unique() -> None:
     exports = list(algebrakit.__all__)
     assert len(exports) == len(set(exports))

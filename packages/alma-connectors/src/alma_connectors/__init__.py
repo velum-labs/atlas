@@ -1,5 +1,7 @@
 """Focused public entrypoints for connector adapters and source definitions."""
 
+__version__ = "0.1.0"
+
 from alma_connectors.adapters.airflow import AirflowAdapter
 from alma_connectors.adapters.bigquery import BigQueryAdapter
 from alma_connectors.adapters.dbt import DbtAdapter
@@ -7,8 +9,8 @@ from alma_connectors.adapters.fivetran import FivetranAdapter
 from alma_connectors.adapters.looker import LookerAdapter
 from alma_connectors.adapters.metabase import MetabaseAdapter
 from alma_connectors.adapters.postgres import PostgresAdapter
-from alma_connectors.adapters.sqlite import SQLiteAdapter
 from alma_connectors.adapters.snowflake import SnowflakeAdapter
+from alma_connectors.adapters.sqlite import SQLiteAdapter
 from alma_connectors.catalog import (
     CONNECTOR_SPECS,
     SUPPORTED_SOURCE_KINDS,
@@ -41,7 +43,6 @@ from alma_connectors.source_adapter import (
     SchemaObjectKind,
     SchemaSnapshot,
     SetupInstructions,
-    SQLiteAdapterConfig,
     SnowflakeAdapterConfig,
     SourceAdapterCapabilities,
     SourceAdapterDefinition,
@@ -51,6 +52,7 @@ from alma_connectors.source_adapter import (
     SourceColumnSchema,
     SourceObjectDependency,
     SourceTableSchema,
+    SQLiteAdapterConfig,
     TrafficObservationResult,
     apply_probe_routing_override,
     normalize_source_adapter_key,
