@@ -32,9 +32,24 @@ TAG="v${VERSION}"
 
 cd "$REPO_ROOT"
 
+# --- Ensure we are on main ---
+CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+if [[ "$CURRENT_BRANCH" != "main" ]]; then
+    echo "ERROR: Releases must be cut from 'main'. Currently on '${CURRENT_BRANCH}'." >&2
+    exit 1
+fi
+
 # --- Ensure working tree is clean ---
 if ! git diff --quiet || ! git diff --cached --quiet; then
     echo "ERROR: Working tree has uncommitted changes. Commit or stash them first." >&2
+    exit 1
+fi
+
+# --- Ensure tag does not already exist ---
+if git rev-parse "$TAG" >/dev/null 2>&1; then
+    echo "ERROR: Tag '${TAG}' already exists locally." >&2
+    echo "  Existing tags: $(git tag --list 'v*' | tr '\n' ' ')" >&2
+    echo "  Choose a version not already tagged, or delete the tag if it was not a real release." >&2
     exit 1
 fi
 
