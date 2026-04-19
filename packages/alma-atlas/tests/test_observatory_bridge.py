@@ -103,7 +103,7 @@ class TestUpsertAssets:
             assert "asset" in payload
             assert payload["asset"]["canonicalName"] == f"db.schema.table_{i}"
             assert payload["asset"]["layer"] == "raw"
-            assert payload["asset"]["contractStatus"] == "not_assessed"
+            assert payload["asset"]["contractStatus"] == "unobserved"
             assert payload["asset"]["sourceProvenance"] == "atlas"
             assert payload["asset"]["physicalNames"][0]["targetId"] == "t1"
 

@@ -77,7 +77,7 @@ class ObservatoryBridge:
                         # Use fully-qualified Atlas asset id to avoid collisions.
                         "canonicalName": asset.id,
                         "layer": "raw",
-                        "contractStatus": "not_assessed",
+                        "contractStatus": "unobserved",
                         "sourceProvenance": "atlas",
                         "qualityFlags": [],
                         "physicalNames": [
