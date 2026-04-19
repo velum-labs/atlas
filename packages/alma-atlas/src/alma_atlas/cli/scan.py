@@ -62,6 +62,26 @@ def scan(
         bool,
         typer.Option("--no-learn", help="Skip the learning phase even when agents and --repo are configured."),
     ] = False,
+    push_to_observatory: Annotated[
+        str | None,
+        typer.Option("--push-to-observatory", help="Observatory base URL to push scan results to."),
+    ] = None,
+    observatory_target_id: Annotated[
+        str,
+        typer.Option("--observatory-target-id", help="Target ID for Observatory upserts."),
+    ] = "local",
+    observatory_backend_system: Annotated[
+        str,
+        typer.Option("--observatory-backend-system", help="Backend system tag for ingested queries."),
+    ] = "unknown",
+    observatory_auth_token: Annotated[
+        str | None,
+        typer.Option("--observatory-auth-token", help="Bearer token for Observatory auth."),
+    ] = None,
+    auto_derive: Annotated[
+        bool,
+        typer.Option("--auto-derive", help="Run Analyze + DeriveProposals after pushing to Observatory."),
+    ] = False,
 ) -> None:
     """Scan data sources and populate the Atlas asset graph."""
     if ctx.invoked_subcommand is not None:
@@ -218,6 +238,55 @@ def scan(
                 sync_error = str(exc)
                 if normalized_output_format != "json":
                     rprint(f"[yellow]Team sync failed:[/yellow] {exc}")
+
+    # Push to Observatory if requested
+    if push_to_observatory and scan_error is None:
+        import asyncio as _obs_asyncio
+
+        from alma_atlas.bridge.observatory_push import ObservatoryBridge
+
+        async def _push_to_observatory() -> None:
+            db_path = cfg.db_path
+            if db_path is None:
+                cfg.ensure_dir()
+                db_path = cfg.db_path
+            if db_path is None or not db_path.exists():
+                rprint("[yellow]Observatory push skipped: no Atlas database found.[/yellow]")
+                return
+
+            from alma_atlas_store.db import Database as StoreDb
+
+            bridge_db = StoreDb(db_path)
+            try:
+                async with ObservatoryBridge(
+                    push_to_observatory,
+                    auth_token=observatory_auth_token,
+                ) as bridge:
+                    asset_count = await bridge.upsert_assets_from_db(
+                        bridge_db, target_id=observatory_target_id
+                    )
+                    query_count = await bridge.ingest_queries_from_db(
+                        bridge_db,
+                        target_id=observatory_target_id,
+                        backend_system=observatory_backend_system,
+                    )
+                    if normalized_output_format != "json":
+                        rprint(
+                            f"[dim]Observatory push: {asset_count} asset(s), "
+                            f"{query_count} query event(s)[/dim]"
+                        )
+                    if auto_derive:
+                        result = await bridge.analyze_and_derive()
+                        if normalized_output_format != "json":
+                            rprint(f"[dim]Observatory derive complete: {result}[/dim]")
+            finally:
+                bridge_db.close()
+
+        try:
+            _obs_asyncio.run(_push_to_observatory())
+        except Exception as exc:
+            if normalized_output_format != "json":
+                rprint(f"[yellow]Observatory push failed:[/yellow] {exc}")
 
     # Exit codes: 0 = all succeeded, 1 = partial (some sources failed), 3 = complete failure
     if scan_error is not None:
