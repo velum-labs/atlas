@@ -26,6 +26,8 @@ from alma_atlas.source_specs import (
     DEFAULT_BIGQUERY_LOCATION,
     DEFAULT_FIVETRAN_API_KEY_ENV,
     DEFAULT_FIVETRAN_API_SECRET_ENV,
+    DEFAULT_GITHUB_PRIVATE_KEY_ENV,
+    DEFAULT_GITHUB_TOKEN_ENV,
     DEFAULT_LOOKER_CLIENT_ID_ENV,
     DEFAULT_LOOKER_CLIENT_SECRET_ENV,
     DEFAULT_LOOKER_PORT,
@@ -37,6 +39,7 @@ from alma_atlas.source_specs import (
     make_fivetran_source,
     make_looker_source,
     make_metabase_source,
+    make_github_source,
     make_postgres_source,
     make_sqlite_source,
     make_snowflake_source,
@@ -376,6 +379,93 @@ def connect_metabase(
         raise typer.Exit(1) from exc
     cfg.add_source(source)
     rprint(f"[green]Connected:[/green] Metabase instance [bold]{instance_url}[/bold]")
+
+
+
+
+@app.command("github")
+def connect_github(
+    app_id: Annotated[str | None, typer.Option("--app-id", help="GitHub App id.")] = None,
+    installation_id: Annotated[
+        str | None,
+        typer.Option("--installation-id", help="GitHub App installation id."),
+    ] = None,
+    private_key_env: Annotated[
+        str,
+        typer.Option(
+            "--private-key-env",
+            help="Env var containing the GitHub App private key PEM.",
+        ),
+    ] = DEFAULT_GITHUB_PRIVATE_KEY_ENV,
+    token_env: Annotated[
+        str | None,
+        typer.Option(
+            "--token-env",
+            help="Env var containing a GitHub token (alternative to App auth).",
+        ),
+    ] = None,
+    base_url: Annotated[
+        str,
+        typer.Option("--base-url", help="GitHub API base URL."),
+    ] = "https://api.github.com",
+    repo: Annotated[
+        list[str],
+        typer.Option(
+            "--repo",
+            help="Repository full name (owner/name). Can be repeated.",
+        ),
+    ] = [],
+    include: Annotated[
+        str | None,
+        typer.Option(
+            "--include",
+            help="Comma-separated include patterns (e.g. '*.sql,*.py,dbt_project.yml').",
+        ),
+    ] = None,
+    exclude: Annotated[
+        str | None,
+        typer.Option(
+            "--exclude",
+            help="Comma-separated exclude patterns (e.g. '**/node_modules/**,**/venv/**').",
+        ),
+    ] = None,
+    max_file_size_bytes: Annotated[
+        int,
+        typer.Option("--max-file-size-bytes", help="Skip files larger than this."),
+    ] = 1_000_000,
+    branch: Annotated[str | None, typer.Option("--branch", help="Optional branch override.")] = None,
+    source_id: Annotated[str | None, typer.Option("--id", help="Optional custom source id.")] = None,
+) -> None:
+    """Register a GitHub source (GitHub App or token)."""
+
+    def _split_patterns(raw: str | None) -> list[str] | None:
+        if raw is None:
+            return None
+        parts = [p.strip() for p in raw.split(",")]
+        return [p for p in parts if p]
+
+    cfg = get_config()
+    try:
+        source = make_github_source(
+            app_id=app_id,
+            installation_id=installation_id,
+            private_key_env=private_key_env,
+            token_env=token_env,
+            base_url=base_url,
+            repos=repo,
+            include_patterns=_split_patterns(include),
+            exclude_patterns=_split_patterns(exclude),
+            max_file_size_bytes=max_file_size_bytes,
+            branch=branch,
+            source_id=source_id,
+        )
+    except ValueError as exc:
+        rprint(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+    cfg.add_source(source)
+    auth_mode = "token" if token_env else "github app"
+    rprint(f"[green]Connected:[/green] GitHub source [bold]{source.id}[/bold] ({auth_mode})")
 
 
 @app.command("list")

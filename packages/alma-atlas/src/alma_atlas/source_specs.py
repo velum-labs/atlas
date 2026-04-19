@@ -229,6 +229,66 @@ def make_metabase_source(
     )
 
 
+
+
+DEFAULT_GITHUB_PRIVATE_KEY_ENV = "GITHUB_APP_PRIVATE_KEY"
+DEFAULT_GITHUB_TOKEN_ENV = "GITHUB_TOKEN"
+
+
+def make_github_source(
+    *,
+    app_id: str | None = None,
+    installation_id: str | None = None,
+    private_key_env: str | None = DEFAULT_GITHUB_PRIVATE_KEY_ENV,
+    token_env: str | None = None,
+    base_url: str = "https://api.github.com",
+    repos: list[str] | None = None,
+    include_patterns: list[str] | None = None,
+    exclude_patterns: list[str] | None = None,
+    max_file_size_bytes: int = 1_000_000,
+    branch: str | None = None,
+    source_id: str | None = None,
+) -> SourceConfig:
+    """Build a GitHub source config.
+
+    Auth:
+    - GitHub App mode: app_id + installation_id + private_key_env
+    - Token mode: token_env
+    """
+    repos = list(repos or [])
+    if token_env:
+        # token mode
+        params: dict[str, object] = {
+            "base_url": base_url,
+            "token_env": token_env,
+            "repos": repos,
+            "max_file_size_bytes": max_file_size_bytes,
+        }
+    else:
+        if not app_id or not installation_id:
+            raise ValueError("Provide either token_env, or app_id + installation_id (+ private_key_env)")
+        if not private_key_env:
+            raise ValueError("private_key_env is required for GitHub App auth")
+        params = {
+            "base_url": base_url,
+            "app_id": app_id,
+            "installation_id": installation_id,
+            "private_key_env": private_key_env,
+            "repos": repos,
+            "max_file_size_bytes": max_file_size_bytes,
+        }
+
+    if include_patterns:
+        params["include_patterns"] = list(include_patterns)
+    if exclude_patterns:
+        params["exclude_patterns"] = list(exclude_patterns)
+    if branch:
+        params["branch"] = branch
+
+    default_id = "github:default"
+    if repos:
+        default_id = "github:" + repos[0].replace("/", "-")
+    return SourceConfig(id=source_id or default_id, kind="github", params=params)
 def resolve_dbt_auxiliary_paths(manifest_path: str) -> tuple[str | None, str | None]:
     project_dir_path = Path(manifest_path).resolve().parent
     catalog_path = project_dir_path / "catalog.json"

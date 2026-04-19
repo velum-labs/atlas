@@ -280,6 +280,65 @@ def test_connect_metabase(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# connect github
+# ---------------------------------------------------------------------------
+
+
+def test_connect_github_app(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    with patch("alma_atlas.cli.connect.get_config", return_value=cfg):
+        result = runner.invoke(
+            app,
+            [
+                "connect",
+                "github",
+                "--app-id",
+                "123",
+                "--installation-id",
+                "456",
+                "--private-key-env",
+                "GITHUB_APP_PK",
+                "--repo",
+                "velum-labs/atlas",
+            ],
+        )
+
+    assert result.exit_code == 0
+    sources = cfg.load_sources()
+    assert len(sources) == 1
+    assert sources[0].kind == "github"
+    assert sources[0].params["app_id"] == "123"
+    assert sources[0].params["installation_id"] == "456"
+    assert sources[0].params["private_key_env"] == "GITHUB_APP_PK"
+    assert sources[0].params["repos"] == ["velum-labs/atlas"]
+
+
+def test_connect_github_token(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    with patch("alma_atlas.cli.connect.get_config", return_value=cfg):
+        result = runner.invoke(
+            app,
+            [
+                "connect",
+                "github",
+                "--token-env",
+                "GITHUB_TOKEN",
+                "--repo",
+                "velum-labs/atlas",
+            ],
+        )
+
+    assert result.exit_code == 0
+    sources = cfg.load_sources()
+    assert len(sources) == 1
+    assert sources[0].kind == "github"
+    assert sources[0].params["token_env"] == "GITHUB_TOKEN"
+    assert sources[0].params["repos"] == ["velum-labs/atlas"]
+
+
 # connect list
 # ---------------------------------------------------------------------------
 
