@@ -1,7 +1,12 @@
 """Push Atlas scan results to a running Alma Observatory instance.
 
-Uses the Observatory Connect-RPC JSON endpoints to upsert assets,
-ingest query observations, and optionally trigger analysis/derivation.
+Uses the Observatory Connect-RPC JSON endpoints (served as plain JSON over HTTP)
+so Atlas can integrate without generated protobuf client stubs.
+
+This module:
+- upserts assets via `UpsertAsset`
+- ingests query observations via `Ingest`
+- optionally triggers `Analyze` + `DeriveProposals`
 """
 
 from __future__ import annotations
@@ -36,10 +41,7 @@ class ObservatoryBridge:
         headers: dict[str, str] = {"Content-Type": "application/json"}
         if auth_token:
             headers["Authorization"] = f"Bearer {auth_token}"
-        self._client = httpx.AsyncClient(
-            headers=headers,
-            timeout=timeout,
-        )
+        self._client = httpx.AsyncClient(headers=headers, timeout=timeout)
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -50,43 +52,43 @@ class ObservatoryBridge:
     async def __aexit__(self, *_: object) -> None:
         await self.aclose()
 
-    # ------------------------------------------------------------------
-    # Low-level RPC helper
-    # ------------------------------------------------------------------
-
     async def _call_rpc(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
-        """POST a JSON-encoded Connect-RPC request and return the response body."""
+        """POST a JSON-encoded RPC request and return the response body."""
         url = f"{self._base_url}/{_RPC_BASE}/{method}"
         response = await self._client.post(url, json=payload)
         if response.status_code != 200:
             body_text = response.text[:500]
-            raise ObservatoryRpcError(
-                f"{method} failed (HTTP {response.status_code}): {body_text}"
-            )
-        return response.json()  # type: ignore[no-any-return]
+            raise ObservatoryRpcError(f"{method} failed (HTTP {response.status_code}): {body_text}")
+        parsed = response.json()
+        if not isinstance(parsed, dict):
+            raise ObservatoryRpcError(f"{method} response must be an object")
+        return parsed
 
-    # ------------------------------------------------------------------
-    # High-level operations
-    # ------------------------------------------------------------------
-
-    async def upsert_assets_from_db(
-        self,
-        db: Database,
-        *,
-        target_id: str,
-    ) -> int:
+    async def upsert_assets_from_db(self, db: Database, *, target_id: str) -> int:
         """Upsert all Atlas assets into Observatory. Returns the count pushed."""
         assets = AssetRepository(db).list_all()
         for asset in assets:
+            # Observatory enforces a strict layer enum ('raw', 'compatibility', 'curated', 'other').
+            # Atlas assets are generally best treated as raw ingested artifacts by default.
             await self._call_rpc(
                 "UpsertAsset",
                 {
-                    "targetId": target_id,
-                    "assetId": asset.id,
-                    "name": asset.name,
-                    "kind": asset.kind,
-                    "source": asset.source,
-                    "description": asset.description or "",
+                    "asset": {
+                        # Use fully-qualified Atlas asset id to avoid collisions.
+                        "canonicalName": asset.id,
+                        "layer": "raw",
+                        "contractStatus": "not_assessed",
+                        "sourceProvenance": "atlas",
+                        "qualityFlags": [],
+                        "physicalNames": [
+                            {
+                                "targetId": target_id,
+                                "system": asset.source,
+                                "physicalName": asset.name,
+                            }
+                        ],
+                        "columns": [],
+                    }
                 },
             )
         logger.info("Upserted %d asset(s) to Observatory", len(assets))
@@ -112,34 +114,40 @@ class ObservatoryBridge:
         for q in queries:
             event: dict[str, Any] = {
                 "id": q.fingerprint,
-                "sql": q.sql_text,
+                "capturedAt": now_rfc3339,
                 "sourceName": q.source,
+                "sql": q.sql_text,
                 "targetId": target_id,
+                "captureSourceId": ingest_source_id,
+                "captureSourceKind": ingest_source_kind,
                 "backendSystem": backend_system,
                 "fingerprintHash": q.fingerprint,
-                "capturedAt": now_rfc3339,
             }
-            metadata: dict[str, Any] = {}
+            metadata: dict[str, str] = {}
             if q.execution_count > 1:
-                metadata["executionCount"] = q.execution_count
+                metadata["executionCount"] = str(q.execution_count)
             if q.tables:
-                metadata["tables"] = q.tables
+                metadata["tables"] = ",".join(q.tables)
             if metadata:
                 event["metadata"] = metadata
             events.append(event)
 
         pushed = 0
         for i in range(0, len(events), batch_size):
-            batch = events[i : i + batch_size]
+            batch_events = events[i : i + batch_size]
             await self._call_rpc(
                 "Ingest",
                 {
-                    "sourceId": ingest_source_id,
-                    "sourceKind": ingest_source_kind,
-                    "events": batch,
+                    "batch": {
+                        "events": batch_events,
+                        "ingestSourceId": ingest_source_id,
+                        "ingestSourceKind": ingest_source_kind,
+                        "targetId": target_id,
+                        "backendSystem": backend_system,
+                    }
                 },
             )
-            pushed += len(batch)
+            pushed += len(batch_events)
 
         logger.info("Ingested %d query event(s) to Observatory", pushed)
         return pushed
@@ -156,7 +164,17 @@ class ObservatoryBridge:
             analyze_payload["supportThreshold"] = support_threshold
 
         analyze_resp = await self._call_rpc("Analyze", analyze_payload)
-        derive_resp = await self._call_rpc("DeriveProposals", {})
+        analysis_run_id = analyze_resp.get("analysisRunId")
+        if not isinstance(analysis_run_id, str) or not analysis_run_id.strip():
+            raise ObservatoryRpcError("Analyze response missing analysisRunId")
+
+        derive_resp = await self._call_rpc(
+            "DeriveProposals",
+            {
+                "analysisRunId": analysis_run_id,
+                "dryRun": False,
+            },
+        )
         return {"analyze": analyze_resp, "derive": derive_resp}
 
 
