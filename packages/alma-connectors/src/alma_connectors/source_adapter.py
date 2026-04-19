@@ -80,6 +80,7 @@ class SourceAdapterKind(StrEnum):
     LOOKER = "looker"
     FIVETRAN = "fivetran"
     METABASE = "metabase"
+    GITHUB = "github"
 
 
 class SourceAdapterStatus(StrEnum):
@@ -469,6 +470,32 @@ class MetabaseAdapterConfig:
             raise ValueError("metabase adapters require api_key or both username and password")
 
 
+@dataclass(frozen=True)
+class GitHubAdapterConfig:
+    """Canonical persisted config for GitHub App adapters."""
+
+    base_url: str = "https://api.github.com"
+    app_id: str = ""
+    private_key_secret: SourceAdapterSecret | None = None
+    installation_id: str = ""
+    token_secret: SourceAdapterSecret | None = None
+    repos: tuple[str, ...] = ()
+    include_patterns: tuple[str, ...] = ("*.sql", "*.py", "dbt_project.yml", "schema.yml", "*.yml")
+    exclude_patterns: tuple[str, ...] = ("**/node_modules/**", "**/.git/**", "**/venv/**")
+    max_file_size_bytes: int = 1_000_000
+    branch: str = ""
+
+    def __post_init__(self) -> None:
+        normalized_base_url = _normalize_required_string(self.base_url, field_name="base_url").rstrip("/")
+        object.__setattr__(self, "base_url", normalized_base_url)
+        if not self.token_secret and not self.app_id:
+            raise ValueError("github adapters require either app_id + installation_id or a token")
+        if self.app_id and not self.installation_id:
+            raise ValueError("github adapters with app_id also require installation_id")
+        if self.max_file_size_bytes < 1:
+            raise ValueError("max_file_size_bytes must be >= 1")
+
+
 type SourceAdapterConfig = (
     PostgresAdapterConfig
     | SQLiteAdapterConfig
@@ -479,6 +506,7 @@ type SourceAdapterConfig = (
     | LookerAdapterConfig
     | FivetranAdapterConfig
     | MetabaseAdapterConfig
+    | GitHubAdapterConfig
 )
 
 
