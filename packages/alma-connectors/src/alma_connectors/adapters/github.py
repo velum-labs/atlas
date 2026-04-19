@@ -114,17 +114,36 @@ async def _clone_repo(
         )
 
 
+def _path_parts_contain(rel_path: str, exclude_dirs: frozenset[str]) -> bool:
+    """Check if any path component is in the excluded directory set."""
+    return bool(set(Path(rel_path).parts) & exclude_dirs)
+
+
+# Pre-built set of common excluded directory names extracted from glob patterns.
+_EXCLUDED_DIR_NAMES = frozenset({"node_modules", ".git", "venv", "__pycache__"})
+
+
 def _matches_patterns(
     rel_path: str,
     include: tuple[str, ...],
     exclude: tuple[str, ...],
 ) -> bool:
     """Check if a relative path matches include patterns and not exclude patterns."""
-    included = any(fnmatch.fnmatch(rel_path, pat) for pat in include)
+    p = Path(rel_path)
+    included = any(p.match(pat) for pat in include)
     if not included:
         return False
-    excluded = any(fnmatch.fnmatch(rel_path, pat) for pat in exclude)
-    return not excluded
+    # Check exclude: any path component in the excluded dirs set, or fnmatch.
+    parts = set(p.parts)
+    for pat in exclude:
+        # Handle **/dirname/** patterns by checking path components.
+        stripped = pat.replace("**/", "").replace("/**", "").strip("/")
+        if stripped and not any(c in stripped for c in ("*", "?", "[")):
+            if stripped in parts:
+                return False
+        elif fnmatch.fnmatch(rel_path, pat):
+            return False
+    return True
 
 
 def _extract_tables_from_sql_file(content: str) -> list[TableRef]:
@@ -156,8 +175,7 @@ def _extract_tables_from_python_file(content: str) -> list[str]:
                 continue
             refs = _extract_tables_from_sql_file(sql_fragment)
             for ref in refs:
-                fqn = f"{ref.schema}.{ref.table}" if ref.schema else ref.table
-                tables.append(fqn)
+                tables.append(ref.canonical_name)
 
     return tables
 
@@ -194,8 +212,7 @@ def _scan_repo_dir(
         if path.suffix == ".sql":
             refs = _extract_tables_from_sql_file(content)
             for ref in refs:
-                fqn = f"{ref.schema}.{ref.table}" if ref.schema else ref.table
-                table_names.append(fqn)
+                table_names.append(ref.canonical_name)
         elif path.suffix == ".py":
             table_names = _extract_tables_from_python_file(content)
 
@@ -533,7 +550,7 @@ class GitHubAdapter(BaseAdapterV2):
                         LineageEdge(
                             source_object=source_obj,
                             target_object=target,
-                            edge_kind=LineageEdgeKind.INFERRED,
+                            edge_kind=LineageEdgeKind.INFERRED_SQL,
                             confidence=0.8,
                         )
                     )
