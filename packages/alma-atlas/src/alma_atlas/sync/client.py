@@ -14,6 +14,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import uuid as _uuid_mod
+import warnings
 from typing import TYPE_CHECKING, Any
 
 from alma_atlas.application.sync.mappers import parse_sync_timestamp
@@ -89,10 +90,22 @@ class SyncClient:
         return self
 
     async def __aexit__(self, *args: object) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        """Close the underlying HTTP client if this instance owns it."""
         if self._owns_client and self._http_client is not None:
             await self._http_client.aclose()
             self._http_client = None
             self._owns_client = False
+
+    def __del__(self) -> None:
+        if self._owns_client and self._http_client is not None:
+            warnings.warn(
+                "SyncClient was not closed; call aclose() or use 'async with'",
+                ResourceWarning,
+                stacklevel=1,
+            )
 
     def _get_client(self) -> httpx.AsyncClient:
         import httpx

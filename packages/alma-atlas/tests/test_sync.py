@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -348,6 +349,96 @@ class TestTeamAuthHeaders:
         async with SyncClient("https://team.example.com", auth, "team1", http_client=http) as client:
             await client.pull_assets("2024-01-01T00:00:00Z")
         assert captured_headers[0].get("Authorization") == "Bearer test-api-key-123"
+
+
+# ---------------------------------------------------------------------------
+# aclose / cleanup
+# ---------------------------------------------------------------------------
+
+
+class TestSyncClientClose:
+    @pytest.mark.asyncio
+    async def test_aclose_closes_owned_client(self):
+        """aclose() should close the HTTP client created by _get_client."""
+        auth = TeamAuth(api_key="k")
+        client = SyncClient("https://x.example.com", auth, "t1")
+        # Force creation of an owned http client
+        inner = client._get_client()
+        assert client._owns_client is True
+        inner.aclose = AsyncMock()
+
+        await client.aclose()
+
+        inner.aclose.assert_awaited_once()
+        assert client._http_client is None
+        assert client._owns_client is False
+
+    @pytest.mark.asyncio
+    async def test_aclose_skips_injected_client(self):
+        """aclose() should not close an externally-injected HTTP client."""
+        auth = TeamAuth(api_key="k")
+        injected = MagicMock()
+        injected.aclose = AsyncMock()
+        client = SyncClient("https://x.example.com", auth, "t1", http_client=injected)
+        assert client._owns_client is False
+
+        await client.aclose()
+
+        injected.aclose.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_aexit_calls_aclose(self):
+        """__aexit__ should delegate to aclose."""
+        auth = TeamAuth(api_key="k")
+        client = SyncClient("https://x.example.com", auth, "t1")
+        client.aclose = AsyncMock()  # type: ignore[method-assign]
+
+        await client.__aexit__(None, None, None)
+
+        client.aclose.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_aclose_idempotent(self):
+        """Calling aclose() twice should not raise."""
+        auth = TeamAuth(api_key="k")
+        client = SyncClient("https://x.example.com", auth, "t1")
+        inner = client._get_client()
+        inner.aclose = AsyncMock()
+
+        await client.aclose()
+        await client.aclose()  # second call is a no-op
+
+        inner.aclose.assert_awaited_once()
+
+    def test_del_warns_if_not_closed(self):
+        """__del__ should emit a ResourceWarning if the client was never closed."""
+        auth = TeamAuth(api_key="k")
+        client = SyncClient("https://x.example.com", auth, "t1")
+        # Force creation of an owned http client
+        client._get_client()
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            client.__del__()
+
+        assert len(w) == 1
+        assert issubclass(w[0].category, ResourceWarning)
+        assert "aclose()" in str(w[0].message)
+
+    def test_del_silent_when_closed(self):
+        """__del__ should not warn after the client has been properly closed."""
+        auth = TeamAuth(api_key="k")
+        client = SyncClient("https://x.example.com", auth, "t1")
+        # Simulate already-closed state
+        client._owns_client = False
+        client._http_client = None
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            client.__del__()
+
+        resource_warnings = [x for x in w if issubclass(x.category, ResourceWarning)]
+        assert len(resource_warnings) == 0
 
 
 # ---------------------------------------------------------------------------
