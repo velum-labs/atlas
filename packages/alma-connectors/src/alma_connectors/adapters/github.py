@@ -48,6 +48,7 @@ from alma_connectors.source_adapter_v2 import (
 from alma_connectors.source_adapter_v2 import (
     SchemaObjectKind as SchemaObjectKindV2,
 )
+from alma_sqlkit.lineage import extract_lineage as extract_sql_lineage
 from alma_sqlkit.table_refs import TableRef, extract_tables_from_sql
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,18 @@ _PANDAS_TO_SQL = re.compile(r"""\.to_sql\s*\(\s*['"]([^'"]+)['"]""")
 _RAW_SQL_STRING = re.compile(
     r"""(?:execute|text|raw_sql|cursor\.execute)\s*\(\s*['\"]{1,3}(.*?)['\"]{1,3}""",
     re.DOTALL,
+)
+
+# dbt Jinja patterns.
+_DBT_REF_RE = re.compile(r"""\{\{\s*ref\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\}\}""")
+_DBT_SOURCE_RE = re.compile(
+    r"""\{\{\s*source\s*\(\s*['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]\s*\)\s*\}\}"""
+)
+
+# Python import patterns.
+_PYTHON_IMPORT_RE = re.compile(
+    r"""^(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))""",
+    re.MULTILINE,
 )
 
 
@@ -178,6 +191,320 @@ def _extract_tables_from_python_file(content: str) -> list[str]:
                 tables.append(ref.canonical_name)
 
     return tables
+
+
+def _extract_dbt_refs(content: str) -> list[str]:
+    """Extract model names from dbt ref() calls."""
+    return [m.group(1) for m in _DBT_REF_RE.finditer(content)]
+
+
+def _extract_dbt_sources(content: str) -> list[tuple[str, str]]:
+    """Extract (source_name, table_name) from dbt source() calls."""
+    return [(m.group(1), m.group(2)) for m in _DBT_SOURCE_RE.finditer(content)]
+
+
+def _extract_python_imports(content: str) -> list[str]:
+    """Extract module names from Python import statements."""
+    modules: list[str] = []
+    for m in _PYTHON_IMPORT_RE.finditer(content):
+        mod = m.group(1) or m.group(2)
+        if mod:
+            modules.append(mod)
+    return modules
+
+
+def _resolve_import_to_file(module: str, repo_py_files: set[str]) -> str | None:
+    """Try to resolve a Python module name to a file path in the repo."""
+    parts = module.replace(".", "/")
+    for candidate in (f"{parts}.py", f"{parts}/__init__.py"):
+        if candidate in repo_py_files:
+            return candidate
+    return None
+
+
+def _lineage_from_sql_file(content: str, source_uri: str) -> list[LineageEdge]:
+    """Extract lineage edges from a SQL file using sqlkit and dbt regex."""
+    edges: list[LineageEdge] = []
+
+    # dbt ref/source (works even on Jinja-templated SQL).
+    for model_name in _extract_dbt_refs(content):
+        edges.append(
+            LineageEdge(
+                source_object=source_uri,
+                target_object=model_name,
+                edge_kind=LineageEdgeKind.DECLARED,
+                confidence=1.0,
+                metadata={"dbt_type": "ref"},
+            )
+        )
+    for source_name, table_name in _extract_dbt_sources(content):
+        edges.append(
+            LineageEdge(
+                source_object=source_uri,
+                target_object=f"{source_name}.{table_name}",
+                edge_kind=LineageEdgeKind.DECLARED,
+                confidence=1.0,
+                metadata={"dbt_type": "source"},
+            )
+        )
+
+    # SQL table references with read/write distinction via sqlkit.
+    try:
+        result = extract_sql_lineage(content, dialect="postgres")
+        for ref in result.source_tables:
+            edges.append(
+                LineageEdge(
+                    source_object=source_uri,
+                    target_object=ref.canonical_name,
+                    edge_kind=LineageEdgeKind.INFERRED_SQL,
+                    confidence=0.85,
+                    metadata={"direction": "reads"},
+                )
+            )
+        if result.target_table:
+            target = result.target_table
+            if "." not in target:
+                target = f"public.{target}"
+            edges.append(
+                LineageEdge(
+                    source_object=source_uri,
+                    target_object=target,
+                    edge_kind=LineageEdgeKind.INFERRED_SQL,
+                    confidence=0.85,
+                    metadata={"direction": "writes"},
+                )
+            )
+    except Exception:
+        # Fallback to simple table extraction.
+        refs = _extract_tables_from_sql_file(content)
+        for ref in refs:
+            edges.append(
+                LineageEdge(
+                    source_object=source_uri,
+                    target_object=ref.canonical_name,
+                    edge_kind=LineageEdgeKind.INFERRED_SQL,
+                    confidence=0.8,
+                )
+            )
+
+    return edges
+
+
+def _lineage_from_python_file(
+    content: str,
+    source_uri: str,
+    repo_name: str,
+    py_files: set[str],
+) -> list[LineageEdge]:
+    """Extract lineage edges from a Python file."""
+    edges: list[LineageEdge] = []
+    seen_targets: set[str] = set()
+
+    # SQLAlchemy __tablename__.
+    for match in _SQLALCHEMY_TABLENAME.finditer(content):
+        table = match.group(1)
+        target = table if "." in table else f"public.{table}"
+        if target not in seen_targets:
+            seen_targets.add(target)
+            edges.append(
+                LineageEdge(
+                    source_object=source_uri,
+                    target_object=target,
+                    edge_kind=LineageEdgeKind.INFERRED_SQL,
+                    confidence=0.8,
+                    metadata={"extraction": "sqlalchemy_model"},
+                )
+            )
+
+    # pandas to_sql.
+    for match in _PANDAS_TO_SQL.finditer(content):
+        table = match.group(1)
+        target = table if "." in table else f"public.{table}"
+        if target not in seen_targets:
+            seen_targets.add(target)
+            edges.append(
+                LineageEdge(
+                    source_object=source_uri,
+                    target_object=target,
+                    edge_kind=LineageEdgeKind.INFERRED_SQL,
+                    confidence=0.75,
+                    metadata={"direction": "writes", "extraction": "pandas_to_sql"},
+                )
+            )
+
+    # Embedded SQL strings parsed through sqlkit.
+    for pattern in (_PANDAS_READ_SQL, _RAW_SQL_STRING):
+        for match in pattern.finditer(content):
+            sql_fragment = match.group(1).strip()
+            if not sql_fragment:
+                continue
+            try:
+                result = extract_sql_lineage(sql_fragment, dialect="postgres")
+                for ref in result.source_tables:
+                    if ref.canonical_name not in seen_targets:
+                        seen_targets.add(ref.canonical_name)
+                        edges.append(
+                            LineageEdge(
+                                source_object=source_uri,
+                                target_object=ref.canonical_name,
+                                edge_kind=LineageEdgeKind.INFERRED_SQL,
+                                confidence=0.7,
+                                metadata={"direction": "reads", "extraction": "python_embedded_sql"},
+                            )
+                        )
+                if result.target_table:
+                    t = result.target_table
+                    tgt = t if "." in t else f"public.{t}"
+                    if tgt not in seen_targets:
+                        seen_targets.add(tgt)
+                        edges.append(
+                            LineageEdge(
+                                source_object=source_uri,
+                                target_object=tgt,
+                                edge_kind=LineageEdgeKind.INFERRED_SQL,
+                                confidence=0.7,
+                                metadata={"direction": "writes", "extraction": "python_embedded_sql"},
+                            )
+                        )
+            except Exception:
+                refs = _extract_tables_from_sql_file(sql_fragment)
+                for ref in refs:
+                    if ref.canonical_name not in seen_targets:
+                        seen_targets.add(ref.canonical_name)
+                        edges.append(
+                            LineageEdge(
+                                source_object=source_uri,
+                                target_object=ref.canonical_name,
+                                edge_kind=LineageEdgeKind.INFERRED_SQL,
+                                confidence=0.6,
+                            )
+                        )
+
+    # Python script -> script import edges.
+    for module in _extract_python_imports(content):
+        resolved = _resolve_import_to_file(module, py_files)
+        if resolved:
+            target_uri = f"github://{repo_name}/{resolved}"
+            if target_uri not in seen_targets:
+                seen_targets.add(target_uri)
+                edges.append(
+                    LineageEdge(
+                        source_object=source_uri,
+                        target_object=target_uri,
+                        edge_kind=LineageEdgeKind.HEURISTIC,
+                        confidence=0.9,
+                        metadata={"import_type": "python"},
+                    )
+                )
+
+    return edges
+
+
+def _scan_repo_lineage_edges(
+    repo_dir: str,
+    repo_name: str,
+    include_patterns: tuple[str, ...],
+    exclude_patterns: tuple[str, ...],
+    max_file_size: int,
+) -> list[LineageEdge]:
+    """Walk a cloned repo and extract detailed lineage edges.
+
+    Returns LineageEdge objects with source URIs prefixed by the repo name.
+    """
+    root = Path(repo_dir)
+    edges: list[LineageEdge] = []
+
+    # Collect Python file paths for import resolution.
+    py_files: set[str] = set()
+    for path in root.rglob("*.py"):
+        rel = str(path.relative_to(root))
+        if _matches_patterns(rel, include_patterns, exclude_patterns):
+            py_files.add(rel)
+
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        rel = str(path.relative_to(root))
+        if not _matches_patterns(rel, include_patterns, exclude_patterns):
+            continue
+        if path.stat().st_size > max_file_size:
+            continue
+
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        source_uri = f"github://{repo_name}/{rel}"
+
+        if path.suffix == ".sql":
+            edges.extend(_lineage_from_sql_file(content, source_uri))
+        elif path.suffix == ".py":
+            edges.extend(
+                _lineage_from_python_file(content, source_uri, repo_name, py_files)
+            )
+
+    return edges
+
+
+def stitch_cross_system_edges(
+    github_edges: tuple[LineageEdge, ...],
+    warehouse_tables: frozenset[str],
+) -> tuple[LineageEdge, ...]:
+    """Create cross-system edges where GitHub table references match warehouse tables.
+
+    Matches on exact FQN and suffix match (e.g. schema.table matches
+    project.schema.table in the warehouse).
+    """
+    if not warehouse_tables:
+        return ()
+
+    # Build lookups: normalized full name and two-part suffix.
+    wh_by_name: dict[str, str] = {}
+    wh_by_suffix: dict[str, str] = {}
+    for fqn in warehouse_tables:
+        norm = fqn.strip().lower()
+        wh_by_name[norm] = fqn
+        parts = norm.split(".")
+        if len(parts) >= 2:
+            suffix = ".".join(parts[-2:])
+            wh_by_suffix.setdefault(suffix, fqn)
+
+    stitched: list[LineageEdge] = []
+    for edge in github_edges:
+        target = edge.target_object.strip().lower()
+        if target.startswith("github://"):
+            continue
+
+        matched_fqn: str | None = None
+        match_type = "exact"
+
+        if target in wh_by_name:
+            matched_fqn = wh_by_name[target]
+        else:
+            parts = target.split(".")
+            if len(parts) >= 2:
+                suffix = ".".join(parts[-2:])
+                if suffix in wh_by_suffix:
+                    matched_fqn = wh_by_suffix[suffix]
+                    match_type = "suffix"
+
+        if matched_fqn and matched_fqn.strip().lower() != target:
+            stitched.append(
+                LineageEdge(
+                    source_object=edge.source_object,
+                    target_object=matched_fqn,
+                    edge_kind=LineageEdgeKind.HEURISTIC,
+                    confidence=0.9 if match_type == "exact" else 0.7,
+                    metadata={
+                        "cross_system": True,
+                        "match_type": match_type,
+                        "original_target": edge.target_object,
+                    },
+                )
+            )
+
+    return tuple(stitched)
 
 
 def _scan_repo_dir(
@@ -531,30 +858,37 @@ class GitHubAdapter(BaseAdapterV2):
         meta = self._make_meta(adapter, AdapterCapability.DEFINITIONS, len(definitions), duration_ms)
         return DefinitionSnapshot(meta=meta, definitions=tuple(definitions))
 
+    async def _scan_all_repos_lineage(self) -> list[LineageEdge]:
+        """Clone and scan all repos for detailed lineage edges."""
+        token = await self._resolve_token()
+        all_edges: list[LineageEdge] = []
+
+        for repo in self._repos:
+            tmp_dir = tempfile.mkdtemp(prefix="atlas-github-lineage-")
+            try:
+                await _clone_repo(repo, token, self._branch, tmp_dir)
+                edges = _scan_repo_lineage_edges(
+                    tmp_dir,
+                    repo,
+                    self._include_patterns,
+                    self._exclude_patterns,
+                    self._max_file_size_bytes,
+                )
+                all_edges.extend(edges)
+            except Exception:
+                logger.exception("Failed to scan repo %s for lineage", repo)
+            finally:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        return all_edges
+
     async def extract_lineage(
         self,
         adapter: PersistedSourceAdapter,
     ) -> LineageSnapshot:
-        """Build lineage edges: source file -> table reference."""
+        """Build lineage edges: source file -> table (reads/writes), dbt refs, python imports."""
         t0 = time.monotonic()
-        scan_results = await self._scan_all_repos()
-
-        edges: list[LineageEdge] = []
-        for repo, tables in scan_results.items():
-            for fqn, files in tables.items():
-                parts = fqn.rsplit(".", 1)
-                target = f"{parts[0]}.{parts[-1]}" if len(parts) > 1 else f"public.{fqn}"
-                for file_path in sorted(files):
-                    source_obj = f"github://{repo}/{file_path}"
-                    edges.append(
-                        LineageEdge(
-                            source_object=source_obj,
-                            target_object=target,
-                            edge_kind=LineageEdgeKind.INFERRED_SQL,
-                            confidence=0.8,
-                        )
-                    )
-
+        edges = await self._scan_all_repos_lineage()
         duration_ms = (time.monotonic() - t0) * 1000
         meta = self._make_meta(adapter, AdapterCapability.LINEAGE, len(edges), duration_ms)
         return LineageSnapshot(meta=meta, edges=tuple(edges))
