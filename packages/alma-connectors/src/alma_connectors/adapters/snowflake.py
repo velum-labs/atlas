@@ -436,11 +436,13 @@ WHERE TABLE_SCHEMA NOT IN ('INFORMATION_SCHEMA')
     ) -> TrafficObservationResult:
         config = self._get_config(adapter)
         self._validate_config(config)
-        if since is not None:
-            hours_since = max(1, int((datetime.now(UTC) - since).total_seconds() / 3600) + 1)
-        else:
-            hours_since = config.lookback_hours
         max_rows = config.max_query_rows
+
+        if since is not None:
+            since_utc = since.astimezone(UTC) if since.tzinfo else since.replace(tzinfo=UTC)
+            time_filter = f"START_TIME >= '{since_utc.strftime('%Y-%m-%d %H:%M:%S')}'"
+        else:
+            time_filter = f"START_TIME >= DATEADD(hour, -{config.lookback_hours}, CURRENT_TIMESTAMP())"
 
         traffic_sql = f"""\
 SELECT
@@ -455,7 +457,7 @@ SELECT
     END_TIME,
     TOTAL_ELAPSED_TIME
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-WHERE START_TIME >= DATEADD(hour, -{hours_since}, CURRENT_TIMESTAMP())
+WHERE {time_filter}
   AND EXECUTION_STATUS = 'SUCCESS'
   AND QUERY_TYPE IN ('SELECT', 'CTAS', 'INSERT', 'MERGE', 'UPDATE', 'DELETE', 'CREATE_TABLE_AS_SELECT')
 ORDER BY START_TIME DESC
