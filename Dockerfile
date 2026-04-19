@@ -11,13 +11,17 @@ COPY pyproject.toml uv.lock ./
 # Copy all workspace packages
 COPY packages/ packages/
 
-# Install all packages (production only, no dev deps)
-RUN uv sync --frozen --no-dev --no-editable
+# Install workspace packages (prod only)
+RUN uv sync --frozen --no-dev --package alma-atlas
 
 # ---- runtime ----
 FROM python:3.12-slim
 
 WORKDIR /app
+
+# Editable workspace installs need the source tree at runtime
+COPY --from=builder /app/pyproject.toml /app/uv.lock ./
+COPY --from=builder /app/packages/ /app/packages/
 
 # Copy the installed venv from builder
 COPY --from=builder /app/.venv /app/.venv

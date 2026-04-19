@@ -44,6 +44,25 @@ alma-atlas scan
 alma-atlas serve
 ```
 
+
+## Docker (optional)
+
+If you prefer running Atlas in a container:
+
+```bash
+# build image
+docker build -t atlas .
+
+# run CLI commands
+docker run --rm -v $HOME/.alma-atlas:/root/.alma-atlas atlas status
+
+# or use docker compose
+docker compose run --rm atlas scan
+
+# start MCP server (SSE) on http://localhost:8080
+docker compose up atlas-mcp
+```
+
 See [docs/quickstart.md](docs/quickstart.md) for connector-specific setup and examples.
 
 ## Supported Source Kinds

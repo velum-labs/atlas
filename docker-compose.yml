@@ -1,0 +1,20 @@
+services:
+  atlas:
+    build:
+      context: .
+    image: ghcr.io/velum-labs/atlas:local
+    # run arbitrary CLI commands, e.g.
+    #   docker compose run --rm atlas status
+    #   docker compose run --rm atlas scan
+    volumes:
+      - ${HOME}/.alma-atlas:/root/.alma-atlas
+
+  atlas-mcp:
+    build:
+      context: .
+    image: ghcr.io/velum-labs/atlas:local
+    command: ["serve", "--transport", "sse", "--host", "0.0.0.0", "--port", "8080"]
+    ports:
+      - "8080:8080"
+    volumes:
+      - ${HOME}/.alma-atlas:/root/.alma-atlas
