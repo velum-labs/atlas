@@ -12,6 +12,7 @@ from alma_connectors.adapters.airflow import AirflowAdapter
 from alma_connectors.adapters.bigquery import BigQueryAdapter
 from alma_connectors.adapters.dbt import DbtAdapter
 from alma_connectors.adapters.fivetran import FivetranAdapter
+from alma_connectors.adapters.github import GitHubAdapter
 from alma_connectors.adapters.looker import LookerAdapter
 from alma_connectors.adapters.metabase import MetabaseAdapter
 from alma_connectors.adapters.postgres import PostgresAdapter
@@ -23,6 +24,7 @@ from alma_connectors.source_adapter import (
     DbtAdapterConfig,
     ExternalSecretRef,
     FivetranAdapterConfig,
+    GitHubAdapterConfig,
     LookerAdapterConfig,
     ManagedSecret,
     MetabaseAdapterConfig,
@@ -328,6 +330,30 @@ def _build_fivetran_config(params: dict[str, Any]) -> FivetranAdapterConfig:
     return FivetranAdapterConfig(api_key=api_key, api_secret=api_secret)
 
 
+def _build_github_config(params: dict[str, Any]) -> GitHubAdapterConfig:
+    token_secret = _optional_secret(params, literal_key="token", env_key="token_env")
+    repos_raw = params.get("repos", [])
+    repos = tuple(str(r) for r in repos_raw) if isinstance(repos_raw, (list, tuple)) else (str(repos_raw),)
+    return GitHubAdapterConfig(
+        base_url=params.get("base_url", "https://api.github.com"),
+        app_id=params.get("app_id", ""),
+        private_key_secret=_optional_secret(params, literal_key="private_key", env_key="private_key_env"),
+        installation_id=params.get("installation_id", ""),
+        token_secret=token_secret,
+        repos=repos,
+        include_patterns=_normalize_schema_tuple(
+            params.get("include_patterns"),
+            default=("*.sql", "*.py", "dbt_project.yml", "schema.yml", "*.yml"),
+        ),
+        exclude_patterns=_normalize_schema_tuple(
+            params.get("exclude_patterns"),
+            default=("**/node_modules/**", "**/.git/**", "**/venv/**"),
+        ),
+        max_file_size_bytes=int(params.get("max_file_size_bytes", 1_000_000)),
+        branch=params.get("branch", ""),
+    )
+
+
 def _build_metabase_config(params: dict[str, Any]) -> MetabaseAdapterConfig:
     api_key = _optional_secret(params, literal_key="api_key", env_key="api_key_env")
     has_basic_auth = bool(params.get("username")) and bool(params.get("password") or params.get("password_env"))
@@ -402,6 +428,24 @@ def _build_fivetran_runtime(config: SourceAdapterConfig, resolve_secret: SecretR
         api_secret=resolve_secret(config.api_secret),
         api_base=config.api_base,
         timeout_seconds=config.timeout_seconds,
+    )
+
+
+def _build_github_runtime(config: SourceAdapterConfig, resolve_secret: SecretResolver) -> RuntimeSourceAdapter:
+    assert isinstance(config, GitHubAdapterConfig)
+    token = _resolve_optional_secret(config.token_secret, resolve_secret=resolve_secret)
+    private_key = _resolve_optional_secret(config.private_key_secret, resolve_secret=resolve_secret)
+    return GitHubAdapter(
+        token=token,
+        app_id=config.app_id or None,
+        private_key=private_key,
+        installation_id=config.installation_id or None,
+        repos=config.repos,
+        branch=config.branch,
+        include_patterns=config.include_patterns,
+        exclude_patterns=config.exclude_patterns,
+        max_file_size_bytes=config.max_file_size_bytes,
+        base_url=config.base_url,
     )
 
 
@@ -574,6 +618,29 @@ def _encode_fivetran_definition(
             "api_secret": serialize_secret(config.api_secret),
         },
     )
+
+
+def _encode_github_definition(
+    definition: SourceAdapterDefinition,
+    serialize_secret: SerializeSecret,
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    config = _require_config_type(definition, GitHubAdapterConfig, kind="github")
+    payload = {
+        "base_url": config.base_url,
+        "app_id": config.app_id,
+        "installation_id": config.installation_id,
+        "repos": list(config.repos),
+        "include_patterns": list(config.include_patterns),
+        "exclude_patterns": list(config.exclude_patterns),
+        "max_file_size_bytes": config.max_file_size_bytes,
+        "branch": config.branch,
+    }
+    secrets: dict[str, dict[str, Any]] = {}
+    if config.token_secret is not None:
+        secrets["token_secret"] = serialize_secret(config.token_secret)
+    if config.private_key_secret is not None:
+        secrets["private_key_secret"] = serialize_secret(config.private_key_secret)
+    return payload, secrets
 
 
 def _encode_metabase_definition(
@@ -764,6 +831,31 @@ def _decode_fivetran_config(
     )
 
 
+def _decode_github_config(
+    config: dict[str, Any],
+    secrets: dict[str, Any],
+    deserialize_secret: DeserializeSecret,
+) -> SourceAdapterConfig:
+    token_secret = secrets.get("token_secret")
+    private_key_secret = secrets.get("private_key_secret")
+    return GitHubAdapterConfig(
+        base_url=str(config.get("base_url") or "https://api.github.com"),
+        app_id=str(config.get("app_id") or ""),
+        private_key_secret=(
+            deserialize_secret(dict(private_key_secret or {})) if private_key_secret is not None else None
+        ),
+        installation_id=str(config.get("installation_id") or ""),
+        token_secret=(deserialize_secret(dict(token_secret or {})) if token_secret is not None else None),
+        repos=tuple(str(r) for r in (config.get("repos") or [])),
+        include_patterns=tuple(str(p) for p in (config.get("include_patterns") or ("*.sql", "*.py"))),
+        exclude_patterns=tuple(
+            str(p) for p in (config.get("exclude_patterns") or ("**/node_modules/**", "**/.git/**", "**/venv/**"))
+        ),
+        max_file_size_bytes=int(config.get("max_file_size_bytes") or 1_000_000),
+        branch=str(config.get("branch") or ""),
+    )
+
+
 def _decode_metabase_config(
     config: dict[str, Any],
     secrets: dict[str, Any],
@@ -814,6 +906,10 @@ def _looker_setup_instructions() -> SetupInstructions:
 
 def _fivetran_setup_instructions() -> SetupInstructions:
     return FivetranAdapter(api_key="api-key", api_secret="api-secret").get_setup_instructions()
+
+
+def _github_setup_instructions() -> SetupInstructions:
+    return GitHubAdapter(token="placeholder").get_setup_instructions()
 
 
 def _metabase_setup_instructions() -> SetupInstructions:
@@ -991,6 +1087,33 @@ CONNECTOR_SPECS: dict[str, ConnectorSpec] = {
         encode_definition=_encode_fivetran_definition,
         decode_config=_decode_fivetran_config,
         setup_instructions_factory=_fivetran_setup_instructions,
+    ),
+    "github": ConnectorSpec(
+        kind="github",
+        adapter_kind=SourceAdapterKind.GITHUB,
+        allowed_params=frozenset(
+            {
+                "app_id",
+                "base_url",
+                "branch",
+                "exclude_patterns",
+                "include_patterns",
+                "installation_id",
+                "max_file_size_bytes",
+                "observation_cursor",
+                "private_key",
+                "private_key_env",
+                "repos",
+                "token",
+                "token_env",
+            }
+        ),
+        secret_paths=(("token",), ("private_key",)),
+        build_config=_build_github_config,
+        runtime_factory=_build_github_runtime,
+        encode_definition=_encode_github_definition,
+        decode_config=_decode_github_config,
+        setup_instructions_factory=_github_setup_instructions,
     ),
     "metabase": ConnectorSpec(
         kind="metabase",
