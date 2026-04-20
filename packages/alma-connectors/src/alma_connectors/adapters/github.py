@@ -245,7 +245,13 @@ async def _scan_repo_via_git_data(
             headers=headers,
         )
         resp.raise_for_status()
-        tree_sha = resp.json()["tree"]["sha"]
+        commit_data = resp.json()
+        # GitHub API nests tree under top-level for git commits,
+        # but emulate nests it under "commit". Handle both.
+        if "tree" in commit_data and isinstance(commit_data["tree"], dict):
+            tree_sha = commit_data["tree"]["sha"]
+        else:
+            tree_sha = commit_data["commit"]["tree"]["sha"]
 
         # 3. Get full recursive tree.
         resp = await client.get(
