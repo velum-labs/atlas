@@ -242,7 +242,7 @@ jobs:
           else:
               raise SystemExit("emulate GitHub fixture did not start on port 4001")
           PY
-          uv run pytest packages/alma-atlas/tests/test_github_emulate.py -q --tb=short
+          uv run pytest packages/alma-atlas/tests/test_github_emulate.py packages/alma-connectors/tests/test_github_git_data_emulate.py -q --tb=short
 
   publish-dry-run:
     runs-on: ubuntu-latest

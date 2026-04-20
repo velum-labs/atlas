@@ -495,8 +495,8 @@ class GitHubAdapterConfig:
             raise ValueError("github adapters with app_id also require installation_id")
         if self.max_file_size_bytes < 1:
             raise ValueError("max_file_size_bytes must be >= 1")
-        if self.scan_mode not in ("clone", "archive"):
-            raise ValueError("scan_mode must be 'clone' or 'archive'")
+        if self.scan_mode not in ("clone", "archive", "git"):
+            raise ValueError("scan_mode must be 'clone', 'archive', or 'git'")
 
 
 type SourceAdapterConfig = (

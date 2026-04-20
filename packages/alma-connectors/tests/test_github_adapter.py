@@ -27,6 +27,7 @@ from alma_connectors.adapters.github import (
     _resolve_import_to_file,
     _scan_repo_dir,
     _scan_repo_lineage_edges,
+    _scan_repo_via_git_data,
     stitch_cross_system_edges,
 )
 from alma_connectors.source_adapter_v2 import LineageEdge, LineageEdgeKind
@@ -904,3 +905,210 @@ class TestArchiveScanMode:
         tables = results["org/repo"]
         table_names = set(tables.keys())
         assert "analytics.events" in table_names
+
+
+# ---------------------------------------------------------------------------
+# Git data scan mode (emulate-friendly, no clone / no tarball)
+# ---------------------------------------------------------------------------
+
+
+def _make_git_data_responses(
+    *,
+    branch: str = "main",
+    commit_sha: str = "abc123",
+    tree_sha: str = "tree456",
+    blob_sha: str = "blob789",
+    sql_content: str = "SELECT * FROM analytics.users;",
+) -> dict[str, MagicMock]:
+    """Build a dict of URL-suffix -> mock response for the Git Data API."""
+    import base64 as b64
+
+    encoded = b64.b64encode(sql_content.encode()).decode()
+
+    def _resp(json_body: dict | list, status: int = 200) -> MagicMock:
+        r = MagicMock()
+        r.status_code = status
+        r.json.return_value = json_body
+        r.raise_for_status = MagicMock()
+        return r
+
+    return {
+        f"/repos/org/repo/branches/{branch}": _resp({
+            "commit": {"sha": commit_sha},
+        }),
+        f"/repos/org/repo/git/commits/{commit_sha}": _resp({
+            "tree": {"sha": tree_sha},
+        }),
+        f"/repos/org/repo/git/trees/{tree_sha}": _resp({
+            "tree": [
+                {"path": "queries/test.sql", "type": "blob", "sha": blob_sha, "size": len(sql_content)},
+                {"path": "node_modules/junk.sql", "type": "blob", "sha": "skip", "size": 10},
+                {"path": "src", "type": "tree", "sha": "dir1", "size": 0},
+            ],
+        }),
+        f"/repos/org/repo/git/blobs/{blob_sha}": _resp({
+            "content": encoded,
+            "encoding": "base64",
+        }),
+    }
+
+
+class TestGitDataScanMode:
+    """Tests for scan_mode='git' using the Git Data REST API."""
+
+    def test_config_accepts_git_scan_mode(self) -> None:
+        cfg = GitHubAdapterConfig(
+            token_secret=MagicMock(),
+            repos=("org/repo",),
+            scan_mode="git",
+        )
+        assert cfg.scan_mode == "git"
+
+    def test_config_rejects_invalid_scan_mode(self) -> None:
+        with pytest.raises(ValueError, match="scan_mode"):
+            GitHubAdapterConfig(
+                token_secret=MagicMock(),
+                repos=("org/repo",),
+                scan_mode="invalid",
+            )
+
+    @pytest.mark.asyncio
+    async def test_scan_repo_via_git_data_finds_tables(self) -> None:
+        responses = _make_git_data_responses()
+
+        async def _mock_get(url: str, **kwargs: object) -> MagicMock:
+            for suffix, resp in responses.items():
+                if url.endswith(suffix):
+                    return resp
+            raise AssertionError(f"unexpected URL: {url}")
+
+        with patch("alma_connectors.adapters.github.httpx.AsyncClient") as mock_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(side_effect=_mock_get)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = mock_client
+
+            result = await _scan_repo_via_git_data(
+                "org/repo",
+                "tok",
+                "main",
+                base_url="http://localhost:4001",
+            )
+
+        assert "analytics.users" in result
+        assert "queries/test.sql" in result["analytics.users"]
+
+    @pytest.mark.asyncio
+    async def test_scan_repo_via_git_data_excludes_node_modules(self) -> None:
+        """Blobs inside excluded directories are not fetched."""
+        responses = _make_git_data_responses()
+
+        get_urls: list[str] = []
+
+        async def _mock_get(url: str, **kwargs: object) -> MagicMock:
+            get_urls.append(url)
+            for suffix, resp in responses.items():
+                if url.endswith(suffix):
+                    return resp
+            raise AssertionError(f"unexpected URL: {url}")
+
+        with patch("alma_connectors.adapters.github.httpx.AsyncClient") as mock_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(side_effect=_mock_get)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = mock_client
+
+            await _scan_repo_via_git_data(
+                "org/repo",
+                "tok",
+                "main",
+                base_url="http://localhost:4001",
+            )
+
+        # The blob for node_modules/junk.sql should never be fetched.
+        blob_urls = [u for u in get_urls if "/git/blobs/" in u]
+        assert len(blob_urls) == 1
+        assert blob_urls[0].endswith("/git/blobs/blob789")
+
+    @pytest.mark.asyncio
+    async def test_git_scan_mode_adapter_integration(self) -> None:
+        """GitHubAdapter with scan_mode='git' delegates to _scan_repo_via_git_data."""
+        responses = _make_git_data_responses()
+
+        async def _mock_get(url: str, **kwargs: object) -> MagicMock:
+            for suffix, resp in responses.items():
+                if url.endswith(suffix):
+                    return resp
+            raise AssertionError(f"unexpected URL: {url}")
+
+        adapter = GitHubAdapter(
+            token="fake-token",
+            repos=("org/repo",),
+            branch="main",
+            scan_mode="git",
+            base_url="http://localhost:4001",
+        )
+
+        with patch("alma_connectors.adapters.github.httpx.AsyncClient") as mock_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(side_effect=_mock_get)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = mock_client
+
+            results = await adapter._scan_all_repos()
+
+        assert "org/repo" in results
+        assert "analytics.users" in results["org/repo"]
+
+    @pytest.mark.asyncio
+    async def test_git_data_default_branch_resolution(self) -> None:
+        """When no branch is specified, resolve the default branch first."""
+        import base64 as b64
+
+        sql = "SELECT 1 FROM public.health;"
+        encoded = b64.b64encode(sql.encode()).decode()
+
+        def _resp(body: dict | list) -> MagicMock:
+            r = MagicMock()
+            r.status_code = 200
+            r.json.return_value = body
+            r.raise_for_status = MagicMock()
+            return r
+
+        url_map = {
+            "/repos/org/repo": _resp({"default_branch": "develop"}),
+            "/repos/org/repo/branches/develop": _resp({"commit": {"sha": "c1"}}),
+            "/repos/org/repo/git/commits/c1": _resp({"tree": {"sha": "t1"}}),
+            "/repos/org/repo/git/trees/t1": _resp({
+                "tree": [{"path": "q.sql", "type": "blob", "sha": "b1", "size": 30}],
+            }),
+            "/repos/org/repo/git/blobs/b1": _resp({
+                "content": encoded,
+                "encoding": "base64",
+            }),
+        }
+
+        async def _mock_get(url: str, **kwargs: object) -> MagicMock:
+            for suffix, resp in url_map.items():
+                if url.endswith(suffix):
+                    return resp
+            raise AssertionError(f"unexpected URL: {url}")
+
+        with patch("alma_connectors.adapters.github.httpx.AsyncClient") as mock_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(side_effect=_mock_get)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = mock_client
+
+            result = await _scan_repo_via_git_data(
+                "org/repo",
+                "tok",
+                "",
+                base_url="http://localhost:4001",
+            )
+
+        assert "public.health" in result

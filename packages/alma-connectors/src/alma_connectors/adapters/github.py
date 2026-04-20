@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import fnmatch
 import logging
 import os
@@ -193,6 +194,119 @@ async def _download_repo_archive(
             tf.extract(member, dest, filter="data")
 
     os.remove(tar_path)
+
+
+async def _scan_repo_via_git_data(
+    repo: str,
+    token: str,
+    branch: str,
+    *,
+    base_url: str = "https://api.github.com",
+    include_patterns: tuple[str, ...] = ("*.sql", "*.py"),
+    exclude_patterns: tuple[str, ...] = ("**/node_modules/**", "**/.git/**", "**/venv/**"),
+    max_file_size_bytes: int = 1_000_000,
+) -> dict[str, set[str]]:
+    """Scan a repo using the Git Data API (no clone or tarball).
+
+    Uses /git/trees, /git/blobs, and /git/commits endpoints which are
+    supported by emulate.dev GitHub fixtures.
+    """
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+    }
+    table_to_files: dict[str, set[str]] = {}
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        # 1. Resolve head commit SHA.
+        if branch:
+            resp = await client.get(
+                f"{base_url}/repos/{repo}/branches/{branch}",
+                headers=headers,
+            )
+        else:
+            # Get default branch first.
+            resp = await client.get(
+                f"{base_url}/repos/{repo}",
+                headers=headers,
+            )
+            resp.raise_for_status()
+            default_branch = resp.json()["default_branch"]
+            resp = await client.get(
+                f"{base_url}/repos/{repo}/branches/{default_branch}",
+                headers=headers,
+            )
+        resp.raise_for_status()
+        commit_sha = resp.json()["commit"]["sha"]
+
+        # 2. Get commit -> tree SHA.
+        resp = await client.get(
+            f"{base_url}/repos/{repo}/git/commits/{commit_sha}",
+            headers=headers,
+        )
+        resp.raise_for_status()
+        tree_sha = resp.json()["tree"]["sha"]
+
+        # 3. Get full recursive tree.
+        resp = await client.get(
+            f"{base_url}/repos/{repo}/git/trees/{tree_sha}",
+            headers=headers,
+            params={"recursive": "1"},
+        )
+        resp.raise_for_status()
+        tree_entries = resp.json().get("tree", [])
+
+        # 4. Filter and fetch blobs.
+        for entry in tree_entries:
+            if entry.get("type") != "blob":
+                continue
+            path = entry["path"]
+            if not _matches_patterns(path, include_patterns, exclude_patterns):
+                continue
+            size = entry.get("size", 0)
+            if size > max_file_size_bytes:
+                continue
+
+            blob_sha = entry["sha"]
+            resp = await client.get(
+                f"{base_url}/repos/{repo}/git/blobs/{blob_sha}",
+                headers=headers,
+            )
+            resp.raise_for_status()
+            blob_data = resp.json()
+
+            encoding = blob_data.get("encoding", "base64")
+            raw_content = blob_data.get("content", "")
+            if encoding == "base64":
+                try:
+                    content = base64.b64decode(raw_content).decode("utf-8", errors="replace")
+                except Exception:
+                    continue
+            elif encoding == "utf-8":
+                content = raw_content
+            else:
+                continue
+
+            table_names: list[str] = []
+            suffix = Path(path).suffix
+
+            if suffix == ".sql":
+                refs = _extract_tables_from_sql_file(content)
+                for ref in refs:
+                    table_names.append(ref.canonical_name)
+            elif suffix == ".py":
+                table_names = _extract_tables_from_python_file(content)
+            elif suffix in (".yml", ".yaml"):
+                # dbt ref/source extraction.
+                for model_name in _extract_dbt_refs(content):
+                    table_names.append(model_name)
+                for source_name, table_name in _extract_dbt_sources(content):
+                    table_names.append(f"{source_name}.{table_name}")
+
+            for name in table_names:
+                table_to_files.setdefault(name, set()).add(path)
+
+    return table_to_files
 
 
 def _path_parts_contain(rel_path: str, exclude_dirs: frozenset[str]) -> bool:
@@ -691,26 +805,39 @@ class GitHubAdapter(BaseAdapterV2):
         results: dict[str, dict[str, set[str]]] = {}
 
         for repo in self._repos:
-            tmp_dir = tempfile.mkdtemp(prefix="atlas-github-")
             try:
-                if self._scan_mode == "archive":
-                    await _download_repo_archive(
-                        repo, token, self._branch, tmp_dir, base_url=self._base_url,
+                if self._scan_mode == "git":
+                    tables = await _scan_repo_via_git_data(
+                        repo,
+                        token,
+                        self._branch,
+                        base_url=self._base_url,
+                        include_patterns=self._include_patterns,
+                        exclude_patterns=self._exclude_patterns,
+                        max_file_size_bytes=self._max_file_size_bytes,
                     )
+                    results[repo] = tables
                 else:
-                    await _clone_repo(repo, token, self._branch, tmp_dir, git_base=self._git_base)
-                tables = _scan_repo_dir(
-                    tmp_dir,
-                    self._include_patterns,
-                    self._exclude_patterns,
-                    self._max_file_size_bytes,
-                )
-                results[repo] = tables
+                    tmp_dir = tempfile.mkdtemp(prefix="atlas-github-")
+                    try:
+                        if self._scan_mode == "archive":
+                            await _download_repo_archive(
+                                repo, token, self._branch, tmp_dir, base_url=self._base_url,
+                            )
+                        else:
+                            await _clone_repo(repo, token, self._branch, tmp_dir, git_base=self._git_base)
+                        tables = _scan_repo_dir(
+                            tmp_dir,
+                            self._include_patterns,
+                            self._exclude_patterns,
+                            self._max_file_size_bytes,
+                        )
+                        results[repo] = tables
+                    finally:
+                        shutil.rmtree(tmp_dir, ignore_errors=True)
             except Exception:
                 logger.exception("Failed to scan repo %s", repo)
                 results[repo] = {}
-            finally:
-                shutil.rmtree(tmp_dir, ignore_errors=True)
 
         return results
 
