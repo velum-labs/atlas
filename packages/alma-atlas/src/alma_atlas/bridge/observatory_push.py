@@ -64,17 +64,20 @@ class ObservatoryBridge:
             raise ObservatoryRpcError(f"{method} response must be an object")
         return parsed
 
-    async def upsert_assets_from_db(self, db: Database, *, target_id: str) -> int:
-        """Upsert all Atlas assets into Observatory. Returns the count pushed."""
+    async def upsert_assets_from_db(
+        self, db: Database, *, target_id: str
+    ) -> dict[str, str]:
+        """Upsert all Atlas assets into Observatory.
+
+        Returns a mapping of atlas_asset_id -> observatory_uuid.
+        """
         assets = AssetRepository(db).list_all()
+        id_map: dict[str, str] = {}  # atlas id -> observatory uuid
         for asset in assets:
-            # Observatory enforces a strict layer enum ('raw', 'compatibility', 'curated', 'other').
-            # Atlas assets are generally best treated as raw ingested artifacts by default.
-            await self._call_rpc(
+            resp = await self._call_rpc(
                 "UpsertAsset",
                 {
                     "asset": {
-                        # Use fully-qualified Atlas asset id to avoid collisions.
                         "canonicalName": asset.id,
                         "layer": "raw",
                         "contractStatus": "unobserved",
@@ -91,8 +94,11 @@ class ObservatoryBridge:
                     }
                 },
             )
-        logger.info("Upserted %d asset(s) to Observatory", len(assets))
-        return len(assets)
+            obs_id = resp.get("id")
+            if obs_id:
+                id_map[asset.id] = obs_id
+        logger.info("Upserted %d asset(s) to Observatory", len(id_map))
+        return id_map
 
     async def ingest_queries_from_db(
         self,
