@@ -484,6 +484,7 @@ class GitHubAdapterConfig:
     exclude_patterns: tuple[str, ...] = ("**/node_modules/**", "**/.git/**", "**/venv/**")
     max_file_size_bytes: int = 1_000_000
     branch: str = ""
+    scan_mode: str = "clone"
 
     def __post_init__(self) -> None:
         normalized_base_url = _normalize_required_string(self.base_url, field_name="base_url").rstrip("/")
@@ -494,6 +495,8 @@ class GitHubAdapterConfig:
             raise ValueError("github adapters with app_id also require installation_id")
         if self.max_file_size_bytes < 1:
             raise ValueError("max_file_size_bytes must be >= 1")
+        if self.scan_mode not in ("clone", "archive"):
+            raise ValueError("scan_mode must be 'clone' or 'archive'")
 
 
 type SourceAdapterConfig = (

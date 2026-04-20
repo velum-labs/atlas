@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import shutil
+import tarfile
 import tempfile
 import time
 from datetime import UTC, datetime
@@ -149,6 +150,49 @@ async def _clone_repo(
         raise RuntimeError(
             f"git clone failed for {repo}: {stderr.decode(errors='replace').strip()}"
         )
+
+
+async def _download_repo_archive(
+    repo: str,
+    token: str,
+    branch: str,
+    dest: str,
+    *,
+    base_url: str = "https://api.github.com",
+) -> None:
+    """Download and extract a repo tarball via the GitHub REST API."""
+    ref = branch or "HEAD"
+    url = f"{base_url}/repos/{repo}/tarball/{ref}"
+    async with httpx.AsyncClient(follow_redirects=True, timeout=120) as client:
+        resp = await client.get(
+            url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+            },
+        )
+        resp.raise_for_status()
+
+    tar_path = os.path.join(dest, "_archive.tar.gz")
+    with open(tar_path, "wb") as fh:
+        fh.write(resp.content)
+
+    with tarfile.open(tar_path, "r:gz") as tf:
+        # GitHub tarballs have a single top-level directory; strip it.
+        members = tf.getmembers()
+        prefix = ""
+        if members:
+            prefix = members[0].name.split("/")[0] + "/"
+        for member in members:
+            if member.name == prefix.rstrip("/"):
+                continue
+            # Security: skip absolute paths and path traversal
+            if member.name.startswith("/") or ".." in member.name.split("/"):
+                continue
+            member.path = member.name[len(prefix):] if member.name.startswith(prefix) else member.name
+            tf.extract(member, dest, filter="data")
+
+    os.remove(tar_path)
 
 
 def _path_parts_contain(rel_path: str, exclude_dirs: frozenset[str]) -> bool:
@@ -610,6 +654,7 @@ class GitHubAdapter(BaseAdapterV2):
         exclude_patterns: tuple[str, ...] = ("**/node_modules/**", "**/.git/**", "**/venv/**"),
         max_file_size_bytes: int = 1_000_000,
         base_url: str = "https://api.github.com",
+        scan_mode: str = "clone",
     ) -> None:
         self._token = token
         self._app_id = app_id
@@ -622,6 +667,7 @@ class GitHubAdapter(BaseAdapterV2):
         self._max_file_size_bytes = max_file_size_bytes
         self._base_url = base_url
         self._git_base = _git_base_url(base_url)
+        self._scan_mode = scan_mode
 
     async def _resolve_token(self) -> str:
         """Return a usable access token (PAT or GitHub App installation token)."""
@@ -637,7 +683,7 @@ class GitHubAdapter(BaseAdapterV2):
         raise ValueError("GitHub adapter requires either a token or app_id + private_key + installation_id")
 
     async def _scan_all_repos(self) -> dict[str, dict[str, set[str]]]:
-        """Clone and scan all configured repos.
+        """Clone or download and scan all configured repos.
 
         Returns {repo: {table_fqn: {file_paths}}}.
         """
@@ -647,7 +693,12 @@ class GitHubAdapter(BaseAdapterV2):
         for repo in self._repos:
             tmp_dir = tempfile.mkdtemp(prefix="atlas-github-")
             try:
-                await _clone_repo(repo, token, self._branch, tmp_dir, git_base=self._git_base)
+                if self._scan_mode == "archive":
+                    await _download_repo_archive(
+                        repo, token, self._branch, tmp_dir, base_url=self._base_url,
+                    )
+                else:
+                    await _clone_repo(repo, token, self._branch, tmp_dir, git_base=self._git_base)
                 tables = _scan_repo_dir(
                     tmp_dir,
                     self._include_patterns,

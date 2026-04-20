@@ -14,6 +14,7 @@ import pytest
 from alma_connectors.adapters.github import (
     GitHubAdapter,
     _clone_repo,
+    _download_repo_archive,
     _extract_dbt_refs,
     _extract_dbt_sources,
     _extract_python_imports,
@@ -798,3 +799,108 @@ class TestCloneRepoGitBase:
             base_url="https://ghes.corp.com/api/v3",
         )
         assert adapter._git_base == "https://ghes.corp.com"
+
+
+# ------------------------------------------------------------------
+# Archive scan mode
+# ------------------------------------------------------------------
+
+
+def _make_test_tarball(tmp_path: Path) -> bytes:
+    """Build a small tar.gz with a top-level prefix dir (like GitHub)."""
+    import io
+    import tarfile as _tarfile
+
+    prefix = "org-repo-abc1234"
+    buf = io.BytesIO()
+    with _tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        # SQL file
+        sql = b"SELECT * FROM analytics.events;"
+        info = _tarfile.TarInfo(name=f"{prefix}/queries/load.sql")
+        info.size = len(sql)
+        tf.addfile(info, io.BytesIO(sql))
+        # Python file
+        py = b'df = pd.read_sql("SELECT 1 FROM metrics.daily", conn)'
+        info2 = _tarfile.TarInfo(name=f"{prefix}/etl/run.py")
+        info2.size = len(py)
+        tf.addfile(info2, io.BytesIO(py))
+    return buf.getvalue()
+
+
+class TestArchiveScanMode:
+    """Tests for scan_mode='archive'."""
+
+    def test_config_accepts_archive(self) -> None:
+        from alma_connectors.source_adapter import ExternalSecretRef, GitHubAdapterConfig
+
+        cfg = GitHubAdapterConfig(
+            token_secret=ExternalSecretRef(provider="env", reference="GH_TOKEN"),
+            repos=("org/repo",),
+            scan_mode="archive",
+        )
+        assert cfg.scan_mode == "archive"
+
+    def test_config_rejects_invalid_scan_mode(self) -> None:
+        from alma_connectors.source_adapter import ExternalSecretRef, GitHubAdapterConfig
+
+        with pytest.raises(ValueError, match="scan_mode"):
+            GitHubAdapterConfig(
+                token_secret=ExternalSecretRef(provider="env", reference="GH_TOKEN"),
+                repos=("org/repo",),
+                scan_mode="bad",
+            )
+
+    @pytest.mark.asyncio
+    async def test_download_repo_archive(self, tmp_path: Path) -> None:
+        """_download_repo_archive extracts tarball to dest with prefix stripped."""
+        tarball_bytes = _make_test_tarball(tmp_path)
+        dest = str(tmp_path / "extracted")
+        os.makedirs(dest)
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = tarball_bytes
+        mock_resp.raise_for_status = MagicMock()
+
+        with patch("alma_connectors.adapters.github.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mock_resp)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            await _download_repo_archive("org/repo", "tok123", "main", dest)
+
+        # Files should be extracted with prefix stripped
+        assert (Path(dest) / "queries" / "load.sql").exists()
+        assert (Path(dest) / "etl" / "run.py").exists()
+
+    @pytest.mark.asyncio
+    async def test_archive_scan_returns_table_refs(self, tmp_path: Path) -> None:
+        """Full integration: archive mode adapter finds table references."""
+        tarball_bytes = _make_test_tarball(tmp_path)
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = tarball_bytes
+        mock_resp.raise_for_status = MagicMock()
+
+        adapter = GitHubAdapter(
+            token="fake-token",
+            repos=("org/repo",),
+            scan_mode="archive",
+        )
+
+        with patch("alma_connectors.adapters.github.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mock_resp)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            results = await adapter._scan_all_repos()
+
+        assert "org/repo" in results
+        tables = results["org/repo"]
+        table_names = set(tables.keys())
+        assert "analytics.events" in table_names

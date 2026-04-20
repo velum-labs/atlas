@@ -351,6 +351,7 @@ def _build_github_config(params: dict[str, Any]) -> GitHubAdapterConfig:
         ),
         max_file_size_bytes=int(params.get("max_file_size_bytes", 1_000_000)),
         branch=params.get("branch", ""),
+        scan_mode=params.get("scan_mode", "clone"),
     )
 
 
@@ -446,6 +447,7 @@ def _build_github_runtime(config: SourceAdapterConfig, resolve_secret: SecretRes
         exclude_patterns=config.exclude_patterns,
         max_file_size_bytes=config.max_file_size_bytes,
         base_url=config.base_url,
+        scan_mode=config.scan_mode,
     )
 
 
@@ -634,6 +636,7 @@ def _encode_github_definition(
         "exclude_patterns": list(config.exclude_patterns),
         "max_file_size_bytes": config.max_file_size_bytes,
         "branch": config.branch,
+        "scan_mode": config.scan_mode,
     }
     secrets: dict[str, dict[str, Any]] = {}
     if config.token_secret is not None:
@@ -853,6 +856,7 @@ def _decode_github_config(
         ),
         max_file_size_bytes=int(config.get("max_file_size_bytes") or 1_000_000),
         branch=str(config.get("branch") or ""),
+        scan_mode=str(config.get("scan_mode") or "clone"),
     )
 
 
@@ -1104,6 +1108,7 @@ CONNECTOR_SPECS: dict[str, ConnectorSpec] = {
                 "private_key",
                 "private_key_env",
                 "repos",
+                "scan_mode",
                 "token",
                 "token_env",
             }
