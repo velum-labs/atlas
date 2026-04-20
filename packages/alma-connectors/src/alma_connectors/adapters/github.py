@@ -103,14 +103,38 @@ async def _get_installation_token(
         return resp.json()["token"]
 
 
+def _git_base_url(api_base_url: str) -> str:
+    """Derive the git clone base URL from the REST API base URL.
+
+    - https://api.github.com        -> https://github.com
+    - https://ghes.corp.com/api/v3  -> https://ghes.corp.com
+    - https://ghes.corp.com/api/v3/ -> https://ghes.corp.com
+    """
+    stripped = api_base_url.rstrip("/")
+    if stripped == "https://api.github.com":
+        return "https://github.com"
+    if stripped.endswith("/api/v3"):
+        return stripped[: -len("/api/v3")]
+    # Handle base URLs that contain /api/v3/ with a trailing path segment.
+    idx = stripped.find("/api/v3/")
+    if idx != -1:
+        return stripped[:idx]
+    return stripped
+
+
 async def _clone_repo(
     repo: str,
     token: str,
     branch: str,
     dest: str,
+    *,
+    git_base: str = "https://github.com",
 ) -> None:
     """Shallow clone a GitHub repo into dest."""
-    clone_url = f"https://x-access-token:{token}@github.com/{repo}.git"
+    from urllib.parse import urlparse
+
+    parsed = urlparse(git_base.rstrip("/"))
+    clone_url = f"{parsed.scheme}://x-access-token:{token}@{parsed.netloc}/{repo}.git"
     args = ["git", "clone", "--depth", "1"]
     if branch:
         args += ["--branch", branch]
@@ -597,6 +621,7 @@ class GitHubAdapter(BaseAdapterV2):
         self._exclude_patterns = exclude_patterns
         self._max_file_size_bytes = max_file_size_bytes
         self._base_url = base_url
+        self._git_base = _git_base_url(base_url)
 
     async def _resolve_token(self) -> str:
         """Return a usable access token (PAT or GitHub App installation token)."""
@@ -622,7 +647,7 @@ class GitHubAdapter(BaseAdapterV2):
         for repo in self._repos:
             tmp_dir = tempfile.mkdtemp(prefix="atlas-github-")
             try:
-                await _clone_repo(repo, token, self._branch, tmp_dir)
+                await _clone_repo(repo, token, self._branch, tmp_dir, git_base=self._git_base)
                 tables = _scan_repo_dir(
                     tmp_dir,
                     self._include_patterns,
@@ -825,7 +850,7 @@ class GitHubAdapter(BaseAdapterV2):
         for repo in self._repos:
             tmp_dir = tempfile.mkdtemp(prefix="atlas-github-def-")
             try:
-                await _clone_repo(repo, token, self._branch, tmp_dir)
+                await _clone_repo(repo, token, self._branch, tmp_dir, git_base=self._git_base)
                 root = Path(tmp_dir)
                 for path in root.rglob("*.sql"):
                     rel = str(path.relative_to(root))
@@ -866,7 +891,7 @@ class GitHubAdapter(BaseAdapterV2):
         for repo in self._repos:
             tmp_dir = tempfile.mkdtemp(prefix="atlas-github-lineage-")
             try:
-                await _clone_repo(repo, token, self._branch, tmp_dir)
+                await _clone_repo(repo, token, self._branch, tmp_dir, git_base=self._git_base)
                 edges = _scan_repo_lineage_edges(
                     tmp_dir,
                     repo,

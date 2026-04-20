@@ -13,11 +13,13 @@ import pytest
 
 from alma_connectors.adapters.github import (
     GitHubAdapter,
+    _clone_repo,
     _extract_dbt_refs,
     _extract_dbt_sources,
     _extract_python_imports,
     _extract_tables_from_python_file,
     _extract_tables_from_sql_file,
+    _git_base_url,
     _lineage_from_sql_file,
     _lineage_from_python_file,
     _matches_patterns,
@@ -721,3 +723,78 @@ class TestStitchCrossSystem:
         )
         stitched = stitch_cross_system_edges(github_edges, frozenset())
         assert len(stitched) == 0
+
+
+# ------------------------------------------------------------------
+# GHES support: _git_base_url derivation
+# ------------------------------------------------------------------
+
+
+class TestGitBaseUrl:
+    def test_github_dot_com(self) -> None:
+        assert _git_base_url("https://api.github.com") == "https://github.com"
+
+    def test_github_dot_com_trailing_slash(self) -> None:
+        assert _git_base_url("https://api.github.com/") == "https://github.com"
+
+    def test_ghes_api_v3(self) -> None:
+        assert _git_base_url("https://ghes.corp.com/api/v3") == "https://ghes.corp.com"
+
+    def test_ghes_api_v3_trailing_slash(self) -> None:
+        assert _git_base_url("https://ghes.corp.com/api/v3/") == "https://ghes.corp.com"
+
+    def test_ghes_api_v3_with_trailing_path(self) -> None:
+        assert _git_base_url("https://ghes.corp.com/api/v3/repos") == "https://ghes.corp.com"
+
+    def test_bare_host_passthrough(self) -> None:
+        assert _git_base_url("https://custom-git.example.com") == "https://custom-git.example.com"
+
+    def test_bare_host_trailing_slash(self) -> None:
+        assert _git_base_url("https://custom-git.example.com/") == "https://custom-git.example.com"
+
+
+# ------------------------------------------------------------------
+# GHES support: _clone_repo uses git_base
+# ------------------------------------------------------------------
+
+
+class TestCloneRepoGitBase:
+    @pytest.mark.asyncio
+    async def test_clone_uses_github_com_by_default(self) -> None:
+        with patch("alma_connectors.adapters.github.asyncio.create_subprocess_exec") as mock_exec:
+            mock_proc = AsyncMock()
+            mock_proc.returncode = 0
+            mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+            mock_exec.return_value = mock_proc
+
+            await _clone_repo("org/repo", "tok123", "", "/tmp/dest")
+
+            args = mock_exec.call_args[0]
+            clone_url = args[4]  # git clone --depth 1 <url> <dest>
+            assert clone_url == "https://x-access-token:tok123@github.com/org/repo.git"
+
+    @pytest.mark.asyncio
+    async def test_clone_uses_ghes_base(self) -> None:
+        with patch("alma_connectors.adapters.github.asyncio.create_subprocess_exec") as mock_exec:
+            mock_proc = AsyncMock()
+            mock_proc.returncode = 0
+            mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+            mock_exec.return_value = mock_proc
+
+            await _clone_repo(
+                "org/repo", "tok123", "main", "/tmp/dest",
+                git_base="https://ghes.corp.com",
+            )
+
+            args = mock_exec.call_args[0]
+            clone_url = args[6]  # git clone --depth 1 --branch main <url> <dest>
+            assert clone_url == "https://x-access-token:tok123@ghes.corp.com/org/repo.git"
+
+    @pytest.mark.asyncio
+    async def test_adapter_passes_derived_git_base(self) -> None:
+        adapter = GitHubAdapter(
+            token="fake-token",
+            repos=("org/repo1",),
+            base_url="https://ghes.corp.com/api/v3",
+        )
+        assert adapter._git_base == "https://ghes.corp.com"
