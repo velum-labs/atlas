@@ -29,6 +29,7 @@ Tool catalogue:
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import json
 from dataclasses import dataclass
@@ -372,10 +373,8 @@ def _handle_search(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextCont
         name_results = asset_repo.search(query)[:limit]
         name_map = {a.id: a for a in name_results}
 
-        try:
+        with contextlib.suppress(Exception):
             fts_results = annotation_repo.search_fts(query, limit=limit)
-        except Exception:
-            pass
 
         fts_only_ids = [aid for aid, _ in fts_results if aid not in name_map]
         for aid in fts_only_ids:
@@ -821,15 +820,11 @@ def _handle_find_term(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextC
         asset_repo = AssetRepository(db)
         term_repo = BusinessTermRepository(db)
 
-        try:
+        with contextlib.suppress(Exception):
             term_results = term_repo.search(term)[:limit]
-        except Exception:
-            pass
 
-        try:
+        with contextlib.suppress(Exception):
             fts_results = annotation_repo.search_fts(term, limit=limit)
-        except Exception:
-            pass
 
         asset_results = asset_repo.search(term)[:limit]
         name_map = {a.id: a for a in asset_results}
@@ -1019,10 +1014,8 @@ async def _handle_verify_deep(cfg: AtlasConfig, arguments: dict[str, Any]) -> li
     static_texts = _handle_verify(cfg, {k: v for k, v in arguments.items() if k != "deep"})
     static_result: dict[str, Any] | None = None
     if static_texts:
-        try:
+        with contextlib.suppress(Exception):
             static_result = json.loads(static_texts[0].text)
-        except Exception:
-            pass
 
     result = await run_verify_deep(cfg, sql, source_id=source_id, static_result=static_result)
     return [TextContent(type="text", text=result.model_dump_json(indent=2))]

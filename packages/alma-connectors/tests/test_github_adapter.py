@@ -21,8 +21,8 @@ from alma_connectors.adapters.github import (
     _extract_tables_from_python_file,
     _extract_tables_from_sql_file,
     _git_base_url,
-    _lineage_from_sql_file,
     _lineage_from_python_file,
+    _lineage_from_sql_file,
     _matches_patterns,
     _resolve_import_to_file,
     _scan_repo_dir,
@@ -30,7 +30,6 @@ from alma_connectors.adapters.github import (
     _scan_repo_via_git_data,
     stitch_cross_system_edges,
 )
-from alma_connectors.source_adapter_v2 import LineageEdge, LineageEdgeKind
 from alma_connectors.registry import (
     CONNECTOR_SPECS,
     build_persisted_adapter,
@@ -42,6 +41,7 @@ from alma_connectors.source_adapter import (
     SourceAdapterKind,
     SourceAdapterStatus,
 )
+from alma_connectors.source_adapter_v2 import LineageEdge, LineageEdgeKind
 
 
 def _make_adapter_record() -> PersistedSourceAdapter:

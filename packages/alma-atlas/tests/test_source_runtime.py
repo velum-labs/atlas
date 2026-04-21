@@ -16,6 +16,7 @@ from alma_atlas.source_specs import (
     DEFAULT_LOOKER_CLIENT_SECRET_ENV,
     DEFAULT_SNOWFLAKE_ACCOUNT_SECRET_ENV,
 )
+from alma_connectors.adapters.sqlite import SQLiteAdapter
 from alma_connectors.source_adapter import (
     AirflowAdapterConfig,
     BigQueryAdapterConfig,
@@ -24,10 +25,9 @@ from alma_connectors.source_adapter import (
     LookerAdapterConfig,
     MetabaseAdapterConfig,
     PostgresAdapterConfig,
-    SQLiteAdapterConfig,
     SnowflakeAdapterConfig,
+    SQLiteAdapterConfig,
 )
-from alma_connectors.adapters.sqlite import SQLiteAdapter
 
 
 def test_resolve_env_raises_for_missing_variable() -> None:

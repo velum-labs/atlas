@@ -19,9 +19,7 @@ from alma_atlas.agents.atlas_agent import (
 )
 from alma_atlas.agents.atlas_agent_schemas import (
     AskResult,
-    ColumnContext,
     ContextPackage,
-    JoinRecommendation,
     VerificationResult,
 )
 from alma_atlas.config import AgentConfig, AgentProcessConfig, AtlasConfig
@@ -31,7 +29,6 @@ from alma_atlas_store.db import Database
 from alma_atlas_store.edge_repository import Edge, EdgeRepository
 from alma_atlas_store.schema_repository import ColumnInfo, SchemaRepository, SchemaSnapshot
 from alma_ports.annotation import AnnotationRecord
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -556,8 +553,9 @@ class TestAtlasVerifyDeepHandler:
 
     def test_dispatch_verify_static_flag(self, tmp_path):
         """_dispatch_verify returns list[TextContent] when deep=False."""
-        from alma_atlas.mcp.tools import _dispatch_verify
         import inspect
+
+        from alma_atlas.mcp.tools import _dispatch_verify
 
         cfg = _make_cfg(tmp_path)
         _seed_assets(cfg.db_path)

@@ -21,6 +21,7 @@ from alma_atlas.agents.atlas_agent_schemas import (
     JoinRecommendation,
     VerificationResult,
 )
+
 # Imported at module level so unittest.mock.patch can target this module's namespace.
 from alma_atlas.application.learning.runtime import (
     effective_provider_name,
@@ -323,9 +324,8 @@ async def run_atlas_context(
     evidence: str | None = None,
 ) -> ContextPackage:
     """Gather a curated context package for *question*, using LLM if available."""
-    from alma_atlas_store.db import Database
-
     from alma_atlas.agents.agent_cache import AgentCache
+    from alma_atlas_store.db import Database
 
     db_path = _db_path_for_cfg(cfg)
     context_data = _gather_context(db_path, question, db_id)

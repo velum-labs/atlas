@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from alma_atlas.config import AtlasConfig
 from alma_atlas.mcp.tools import _handle_define_term, _handle_find_term, _handle_verify
 from alma_atlas_store.annotation_repository import AnnotationRepository
@@ -16,7 +14,6 @@ from alma_atlas_store.db import Database
 from alma_atlas_store.edge_repository import Edge, EdgeRepository
 from alma_ports.annotation import AnnotationRecord
 from alma_ports.business_term import BusinessTerm
-
 
 # ---------------------------------------------------------------------------
 # Helpers

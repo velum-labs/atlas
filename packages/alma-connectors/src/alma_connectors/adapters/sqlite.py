@@ -8,8 +8,6 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from alma_ports.profiling import ColumnProfile
-
 from alma_connectors.adapters._base import BaseAdapterV2
 from alma_connectors.source_adapter import (
     PersistedSourceAdapter,
@@ -24,14 +22,15 @@ from alma_connectors.source_adapter_v2 import (
     DiscoverySnapshot,
     ExtractionMeta,
     ExtractionScope,
+    SchemaObject,
+    SchemaSnapshotV2,
     ScopeContext,
     SourceAdapterKindV2,
 )
 from alma_connectors.source_adapter_v2 import ColumnSchema as ColumnSchemaV2
 from alma_connectors.source_adapter_v2 import ObjectDependency as ObjectDependencyV2
-from alma_connectors.source_adapter_v2 import SchemaObject
 from alma_connectors.source_adapter_v2 import SchemaObjectKind as SchemaObjectKindV2
-from alma_connectors.source_adapter_v2 import SchemaSnapshotV2
+from alma_ports.profiling import ColumnProfile
 
 _DEFAULT_QUERY_ROW_LIMIT = 100
 _SQLITE_SCHEMA_NAME = "_default"
@@ -55,7 +54,7 @@ def _quote_identifier(identifier: str) -> str:
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict[str, object]:
-    return {key: row[key] for key in row.keys()}
+    return {key: row[key] for key in row}
 
 
 class SQLiteAdapter(BaseAdapterV2):

@@ -4,7 +4,7 @@ import asyncio
 import sqlite3
 from pathlib import Path
 
-from alma_connectors import PersistedSourceAdapter, SQLiteAdapterConfig, SourceAdapterKind, SourceAdapterStatus
+from alma_connectors import PersistedSourceAdapter, SourceAdapterKind, SourceAdapterStatus, SQLiteAdapterConfig
 from alma_connectors.adapters.sqlite import SQLiteAdapter
 from alma_connectors.source_adapter_v2 import AdapterCapability, ExtractionScope
 from alma_connectors.source_adapter_v2 import SchemaObjectKind as V2Kind

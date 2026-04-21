@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from alma_connectors import PersistedSourceAdapter, SQLiteAdapterConfig, SourceAdapterKind, SourceAdapterStatus
+from alma_connectors import PersistedSourceAdapter, SourceAdapterKind, SourceAdapterStatus, SQLiteAdapterConfig
 from alma_connectors.adapters.sqlite import SQLiteAdapter
 from alma_ports.profiling import ColumnProfile
 

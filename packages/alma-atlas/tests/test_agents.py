@@ -793,7 +793,6 @@ def test_annotator_system_prompt_includes_column_notes_and_notes() -> None:
 
 def test_annotator_build_user_prompt_includes_profiling_data() -> None:
     from alma_atlas.agents.annotator import _build_user_prompt as _annotator_build_user_prompt
-    from alma_ports.profiling import ColumnProfile
 
     assets = [
         {

@@ -16,8 +16,8 @@ from alma_connectors.adapters.github import GitHubAdapter
 from alma_connectors.adapters.looker import LookerAdapter
 from alma_connectors.adapters.metabase import MetabaseAdapter
 from alma_connectors.adapters.postgres import PostgresAdapter
-from alma_connectors.adapters.sqlite import SQLiteAdapter
 from alma_connectors.adapters.snowflake import SnowflakeAdapter
+from alma_connectors.adapters.sqlite import SQLiteAdapter
 from alma_connectors.source_adapter import (
     AirflowAdapterConfig,
     BigQueryAdapterConfig,
@@ -32,13 +32,13 @@ from alma_connectors.source_adapter import (
     PostgresAdapterConfig,
     PostgresLogCaptureConfig,
     PostgresReadReplicaConfig,
-    SQLiteAdapterConfig,
     SetupInstructions,
     SnowflakeAdapterConfig,
     SourceAdapterConfig,
     SourceAdapterDefinition,
     SourceAdapterKind,
     SourceAdapterStatus,
+    SQLiteAdapterConfig,
 )
 
 DEFAULT_BIGQUERY_LOCATION = "us"

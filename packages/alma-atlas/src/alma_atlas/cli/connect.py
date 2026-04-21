@@ -27,7 +27,6 @@ from alma_atlas.source_specs import (
     DEFAULT_FIVETRAN_API_KEY_ENV,
     DEFAULT_FIVETRAN_API_SECRET_ENV,
     DEFAULT_GITHUB_PRIVATE_KEY_ENV,
-    DEFAULT_GITHUB_TOKEN_ENV,
     DEFAULT_LOOKER_CLIENT_ID_ENV,
     DEFAULT_LOOKER_CLIENT_SECRET_ENV,
     DEFAULT_LOOKER_PORT,
@@ -37,12 +36,12 @@ from alma_atlas.source_specs import (
     make_bigquery_source,
     make_dbt_source,
     make_fivetran_source,
+    make_github_source,
     make_looker_source,
     make_metabase_source,
-    make_github_source,
     make_postgres_source,
-    make_sqlite_source,
     make_snowflake_source,
+    make_sqlite_source,
     resolve_dbt_auxiliary_paths,
 )
 
@@ -414,7 +413,7 @@ def connect_github(
             "--repo",
             help="Repository full name (owner/name). Can be repeated.",
         ),
-    ] = [],
+    ] = None,
     include: Annotated[
         str | None,
         typer.Option(
@@ -438,6 +437,8 @@ def connect_github(
 ) -> None:
     """Register a GitHub source (GitHub App or token)."""
 
+    if repo is None:
+        repo = []
     def _split_patterns(raw: str | None) -> list[str] | None:
         if raw is None:
             return None

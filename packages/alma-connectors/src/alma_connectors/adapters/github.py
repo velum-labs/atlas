@@ -14,21 +14,18 @@ import tempfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 import httpx
 
 from alma_connectors.adapters._base import BaseAdapterV2
 from alma_connectors.source_adapter import (
     ConnectionTestResult,
-    GitHubAdapterConfig,
     PersistedSourceAdapter,
     SchemaObjectKind,
     SchemaSnapshot,
     SetupInstructions,
     SourceAdapterCapabilities,
     SourceAdapterKind,
-    SourceColumnSchema,
     SourceTableSchema,
     TrafficObservationResult,
 )
@@ -960,7 +957,7 @@ class GitHubAdapter(BaseAdapterV2):
         )
 
         try:
-            token = await self._resolve_token()
+            await self._resolve_token()
             available = True
             message = None
         except Exception as exc:
