@@ -19,6 +19,7 @@ from alma_atlas.cli import (
     install,
     learn,
     lineage,
+    sample,
     scan,
     search,
     serve,
@@ -48,6 +49,7 @@ app.add_typer(team.app, name="team")
 app.add_typer(hooks.app, name="hooks")
 app.add_typer(install.app, name="install")
 app.add_typer(uninstall.app, name="uninstall")
+app.add_typer(sample.app, name="sample")
 
 console = Console()
 
