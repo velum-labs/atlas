@@ -54,7 +54,8 @@ def _quote_identifier(identifier: str) -> str:
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict[str, object]:
-    return {key: row[key] for key in row}
+    # Iterating a sqlite3.Row yields its values; use .keys() for column names.
+    return {key: row[key] for key in row.keys()}  # noqa: SIM118
 
 
 class SQLiteAdapter(BaseAdapterV2):
