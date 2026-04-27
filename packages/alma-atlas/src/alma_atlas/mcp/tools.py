@@ -32,6 +32,7 @@ from __future__ import annotations
 import contextlib
 import inspect
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,8 @@ from mcp.server import Server
 from mcp.types import TextContent, Tool
 
 from alma_atlas.config import AtlasConfig
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -873,8 +876,16 @@ def _handle_find_term(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextC
 
 
 def _handle_verify(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextContent]:
+    """Return a structured verification result for the given SQL.
+
+    Result schema: {"valid": bool, "warnings": list[str], "suggestions": list[str]}
+
+    ``valid`` is False when any warning was raised, including internal failures
+    that prevent a check from running (e.g. sqlglot parse errors).
+    """
     import sqlglot
     from sqlglot import exp
+    from sqlglot.errors import SqlglotError
 
     from alma_atlas_store.annotation_repository import AnnotationRepository
     from alma_atlas_store.asset_repository import AssetRepository
@@ -899,11 +910,20 @@ def _handle_verify(cfg: AtlasConfig, arguments: dict[str, Any]) -> list[TextCont
     agg_columns: set[str] = set()
     try:
         parsed = sqlglot.parse_one(sql)
+    except SqlglotError as exc:
+        logger.warning("sqlglot aggregate parse failed: %s", exc)
+        warnings.append(
+            "aggregate-column detection failed (sqlglot parse error); "
+            "surrogate-key annotation checks did not run"
+        )
+    else:
+        # sqlglot>=25 raises SqlglotError instead of returning None, so
+        # parsed is always an exp.Expression subclass here.
+        # Only SUM/AVG are checked; MAX/MIN/COUNT are not.
         for agg in parsed.find_all(exp.Sum, exp.Avg):
             for col in agg.find_all(exp.Column):
-                agg_columns.add(col.name.lower())
-    except Exception:
-        pass
+                if col.name is not None:
+                    agg_columns.add(col.name.lower())
 
     with Database(_db_path(cfg)) as db:
         asset_repo = AssetRepository(db)
