@@ -13,6 +13,10 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "real_e2e: marks tests that hit real external services (Postgres + Anthropic API)",
     )
+    config.addinivalue_line(
+        "markers",
+        "connector_smoke: marks connector smoke tests that hit real Snowflake / dbt trial accounts",
+    )
 
 from alma_atlas.config import AtlasConfig, SourceConfig  # noqa: E402
 from alma_atlas_store.db import Database  # noqa: E402
