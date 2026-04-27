@@ -32,7 +32,7 @@ try:
 
     _POSTHOG_AVAILABLE = True
 except ImportError:  # pragma: no cover - defensive
-    _posthog = None
+    _posthog = None  # ty: ignore[invalid-assignment]
     _POSTHOG_AVAILABLE = False
 
 

@@ -47,7 +47,8 @@ def _claude_desktop_config_path() -> Path:
     if system == "Windows":
         appdata = Path(os.environ.get("APPDATA", str(home / "AppData" / "Roaming")))
         return appdata / "Claude" / "claude_desktop_config.json"
-    raise typer.Exit(f"Unsupported OS for Claude Desktop install: {system}")
+    rprint(f"[red]Unsupported OS for Claude Desktop install:[/red] {system}")
+    raise typer.Exit(1)
 
 
 def _cursor_appears_installed() -> bool:
