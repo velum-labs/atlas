@@ -19,7 +19,29 @@ AI coding assistants can read your repo, but they do not know:
 
 Atlas gives them that context through a local graph and MCP tools.
 
-## Quickstart
+## Try it in 60 seconds
+
+No warehouse credentials needed — Atlas ships a bundled sample data stack
+(mock Snowflake + dbt + Looker) so you can see what an agent does with cross-system
+context before connecting anything real.
+
+```bash
+uv add alma-atlas
+
+# Install bundled sample data into ~/.alma-atlas/atlas.db
+alma-atlas sample install
+
+# Register Atlas as an MCP server in your AI client
+alma-atlas install cursor          # or: alma-atlas install claude
+```
+
+Restart Cursor / Claude Desktop, then ask the agent something like
+*"what depends on `snowflake:demo::analytics.orders`?"* — Atlas walks the
+sample lineage chain across all three mock sources.
+
+`alma-atlas sample preview` lists what's in the bundled snapshot.
+
+## Quickstart (your own data)
 
 ```bash
 uv add alma-atlas
@@ -40,9 +62,12 @@ alma-atlas connect dbt --project-dir ./my-dbt-project
 # Scan all registered sources
 alma-atlas scan
 
-# Start the MCP server
-alma-atlas serve
+# Register Atlas as an MCP server in Cursor / Claude Desktop
+alma-atlas install cursor          # or: alma-atlas install claude
 ```
+
+Don't want Atlas anymore? `alma-atlas uninstall` removes the local data
+directory entirely (graph, encrypted credentials, telemetry id).
 
 
 ## Docker (optional)
@@ -110,20 +135,13 @@ flows.
 
 ## IDE Configuration
 
-### Claude Desktop
+The recommended path is `alma-atlas install cursor` (or `install claude`),
+which writes the MCP config and merges with any other MCP servers you
+already have registered. The CLI handles project-vs-global scope on Cursor
+(`--scope project|global`, default global) and resolves the right config
+path on Mac, Linux, and Windows.
 
-```json
-{
-  "mcpServers": {
-    "atlas": {
-      "command": "alma-atlas",
-      "args": ["serve"]
-    }
-  }
-}
-```
-
-### Cursor
+If you'd rather edit the JSON yourself, the entry looks like:
 
 ```json
 {
@@ -137,6 +155,59 @@ flows.
 ```
 
 Restart your IDE after saving.
+
+## Atlas Companion (concierge mode)
+
+Atlas Companion is a curated 3-tool MCP surface for technical leads at
+companies running [Alma](https://velum.com). Instead of the 20-tool atlas_*
+surface, an invite token gates access and exposes only:
+
+- `companion_search_assets`
+- `companion_get_schema_and_owner`
+- `companion_explain_lineage_and_contract`
+
+Each tool returns a curated `CompanionBundle` — short, prompt-ready context
+blocks instead of raw metadata dumps. Every MCP call validates the invite
+token against the Alma deployment endpoint (instant revocation, no caching).
+
+```bash
+# Install with an invite token (writes the config and the token together)
+alma-atlas install cursor --token <invite>
+
+# Or run Companion mode directly
+alma-atlas serve --alma-token <invite>
+ALMA_INVITE_TOKEN=<invite> alma-atlas serve
+
+# Override the Alma endpoint (defaults to https://app.alma.dev)
+alma-atlas serve --alma-token <invite> --alma-endpoint https://staging.alma.dev
+```
+
+Invite tokens are issued by Velum to named users. If you don't have one,
+the default `alma-atlas serve` (full 20-tool surface) is what you want.
+
+## Telemetry
+
+Atlas emits anonymous behavioral telemetry to PostHog Cloud so we can
+understand which tools get used and where installs come from. Two buckets:
+
+- **Mandatory (always on, anonymous)** — counts of tool calls, install
+  events, and source kinds (`tool_name`, `mcp_session_duration_seconds`,
+  `connector_kind`, `install_source`, `atlas_version`, `platform`,
+  `python_version`). No file paths, no user identifiers, no warehouse
+  data.
+
+- **Opt-in (account-correlated)** — only enabled in Atlas Companion mode,
+  where the invite token implies consent. Sends a SHA-256 truncation of
+  the token as a stable correlator (the raw token never reaches PostHog)
+  so Velum can attribute installs to specific accounts in funnel analysis.
+
+To disable telemetry entirely:
+
+```bash
+ATLAS_TELEMETRY_OFF=1 alma-atlas serve
+```
+
+PostHog API errors are silent — telemetry never crashes the host process.
 
 ## Architecture
 
