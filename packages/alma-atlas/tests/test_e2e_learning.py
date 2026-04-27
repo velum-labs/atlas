@@ -411,7 +411,9 @@ class TestE2ELearningPipeline:
             assert txn_ann.sensitivity == "financial"
             assert txn_ann.granularity == "one row per transaction"
 
-            from alma_atlas.mcp.tools import _handle_get_asset, _handle_lineage, _handle_status
+            from alma_atlas.mcp.tools_lineage import _handle_lineage
+            from alma_atlas.mcp.tools_meta import _handle_status
+            from alma_atlas.mcp.tools_schema import _handle_get_asset
 
             status = _handle_status(self.config)
             assert len(status) == 1

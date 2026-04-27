@@ -6,7 +6,8 @@ import json
 from pathlib import Path
 
 from alma_atlas.config import AtlasConfig
-from alma_atlas.mcp.tools import _handle_define_term, _handle_find_term, _handle_verify
+from alma_atlas.mcp.tools_contracts import _handle_define_term, _handle_verify
+from alma_atlas.mcp.tools_search import _handle_find_term
 from alma_atlas_store.annotation_repository import AnnotationRepository
 from alma_atlas_store.asset_repository import Asset, AssetRepository
 from alma_atlas_store.business_term_repository import BusinessTermRepository

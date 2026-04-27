@@ -160,7 +160,7 @@ def test_run_scan_dbt_lineage_edges(dbt_source: SourceConfig, scan_cfg: AtlasCon
 def test_mcp_atlas_status(dbt_source: SourceConfig, scan_cfg: AtlasConfig) -> None:
     run_scan(dbt_source, scan_cfg)
 
-    from alma_atlas.mcp.tools import _handle_status
+    from alma_atlas.mcp.tools_meta import _handle_status
 
     result = _handle_status(scan_cfg)
     assert len(result) == 1
@@ -172,7 +172,7 @@ def test_mcp_atlas_status(dbt_source: SourceConfig, scan_cfg: AtlasConfig) -> No
 def test_mcp_atlas_search_finds_orders(dbt_source: SourceConfig, scan_cfg: AtlasConfig) -> None:
     run_scan(dbt_source, scan_cfg)
 
-    from alma_atlas.mcp.tools import _handle_search
+    from alma_atlas.mcp.tools_search import _handle_search
 
     result = _handle_search(scan_cfg, {"query": "orders"})
     assert len(result) == 1
@@ -183,7 +183,7 @@ def test_mcp_atlas_search_finds_orders(dbt_source: SourceConfig, scan_cfg: Atlas
 def test_mcp_atlas_get_asset(dbt_source: SourceConfig, scan_cfg: AtlasConfig) -> None:
     run_scan(dbt_source, scan_cfg)
 
-    from alma_atlas.mcp.tools import _handle_get_asset
+    from alma_atlas.mcp.tools_schema import _handle_get_asset
 
     asset_id = "dbt:project::analytics.stg_orders"
     result = _handle_get_asset(scan_cfg, {"asset_id": asset_id})
@@ -197,7 +197,7 @@ def test_mcp_atlas_get_asset(dbt_source: SourceConfig, scan_cfg: AtlasConfig) ->
 def test_mcp_atlas_lineage_upstream(dbt_source: SourceConfig, scan_cfg: AtlasConfig) -> None:
     run_scan(dbt_source, scan_cfg)
 
-    from alma_atlas.mcp.tools import _handle_lineage
+    from alma_atlas.mcp.tools_lineage import _handle_lineage
 
     result = _handle_lineage(
         scan_cfg,
@@ -211,7 +211,7 @@ def test_mcp_atlas_lineage_upstream(dbt_source: SourceConfig, scan_cfg: AtlasCon
 def test_mcp_atlas_lineage_downstream(dbt_source: SourceConfig, scan_cfg: AtlasConfig) -> None:
     run_scan(dbt_source, scan_cfg)
 
-    from alma_atlas.mcp.tools import _handle_lineage
+    from alma_atlas.mcp.tools_lineage import _handle_lineage
 
     result = _handle_lineage(
         scan_cfg,
