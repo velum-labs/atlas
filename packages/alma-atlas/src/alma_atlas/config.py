@@ -72,7 +72,7 @@ def _parse_positive_int(
     if value is None and allow_none:
         return None
     try:
-        parsed = int(value)  # type: ignore[arg-type]
+        parsed = int(value)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{context}: expected a positive integer, got {value!r}") from exc
     if parsed < 1:
@@ -677,13 +677,13 @@ def load_atlas_yml(path: Path | str) -> AtlasConfig:
                 model=sub.get("model", DEFAULT_AGENT_MODEL),
                 api_key_env=sub.get("api_key_env", DEFAULT_AGENT_API_KEY_ENV),
                 timeout=int(
-                    _parse_positive_int(
+                    _parse_positive_int(  # ty: ignore[invalid-argument-type]
                         sub.get("timeout", DEFAULT_AGENT_TIMEOUT),
                         context=f"atlas.yml:{context}.timeout",
                     )
                 ),
                 max_tokens=int(
-                    _parse_positive_int(
+                    _parse_positive_int(  # ty: ignore[invalid-argument-type]
                         sub.get("max_tokens", DEFAULT_AGENT_MAX_TOKENS),
                         context=f"atlas.yml:{context}.max_tokens",
                     )

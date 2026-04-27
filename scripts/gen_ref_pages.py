@@ -5,7 +5,7 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
-import mkdocs_gen_files
+import mkdocs_gen_files  # ty: ignore[unresolved-import]
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKSPACE_PYPROJECT = ROOT / "pyproject.toml"

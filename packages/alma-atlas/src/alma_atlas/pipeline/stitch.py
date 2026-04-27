@@ -53,7 +53,7 @@ def _stored_sql_text(sql: str, *, mode: str, dialect: object) -> str:
     if mode == "redacted_sql":
         from alma_sqlkit.normalize import normalize_sql
 
-        return normalize_sql(sql, dialect=dialect)
+        return normalize_sql(sql, dialect=dialect)  # ty: ignore[invalid-argument-type]
     return sql
 
 

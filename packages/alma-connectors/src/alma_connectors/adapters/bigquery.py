@@ -164,7 +164,7 @@ def _int_or_none(value: object) -> int | None:
     if value is None:
         return None
     with contextlib.suppress(TypeError, ValueError):
-        return int(value)
+        return int(value)  # ty: ignore[invalid-argument-type]
     return None
 
 
