@@ -98,6 +98,7 @@ def install_cursor(
         server_name="atlas",
         server_entry=server_entry,
     )
+    _emit_install_event(client="cursor", token=token, scope=scope)
     rprint(f"[green]Atlas registered with Cursor:[/green] {target}")
 
 
@@ -125,7 +126,43 @@ def install_claude(
         server_name="atlas",
         server_entry=server_entry,
     )
+    _emit_install_event(client="claude", token=token, scope="global")
     rprint(f"[green]Atlas registered with Claude Desktop:[/green] {target}")
+
+
+def _emit_install_event(*, client: str, token: str | None, scope: str) -> None:
+    """Fire telemetry events for an install action.
+
+    Always fires a mandatory anonymous event with the install_source. If a
+    token was supplied (concierge install), also fires an opt-in event with
+    a hashed account correlator so the install can be attributed downstream
+    in Velum's funnel analysis. Both event paths swallow any PostHog error.
+    """
+    from alma_atlas.telemetry import (
+        mandatory_event,
+        opt_in_event,
+        telemetry_config_from_env,
+    )
+
+    cfg = telemetry_config_from_env()
+    install_source = "concierge_invite" if token is not None else "direct_pip"
+
+    mandatory_event(
+        cfg,
+        f"install_{client}",
+        {"install_source": install_source},
+    )
+
+    if token is not None:
+        import hashlib
+
+        cfg.opt_in = True
+        cfg.alma_account_token = hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+        opt_in_event(
+            cfg,
+            f"install_{client}",
+            {"client": client, "scope": scope, "install_source": install_source},
+        )
 
 
 def _validate_token_format(token: str | None) -> None:

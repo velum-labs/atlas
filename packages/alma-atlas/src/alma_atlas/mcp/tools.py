@@ -32,6 +32,7 @@ Handler implementations live in category modules. Import them from there:
 from __future__ import annotations
 
 import inspect
+import time
 from collections.abc import Callable, Iterable
 from typing import Any
 
@@ -49,6 +50,7 @@ from alma_atlas.mcp import (
     tools_search,
 )
 from alma_atlas.mcp._common import AtlasToolSpec
+from alma_atlas.telemetry import TelemetryConfig, mandatory_event
 
 __all__ = [
     "ATLAS_CATEGORY_MODULES",
@@ -110,6 +112,8 @@ def register(
     *,
     modules: Iterable | None = None,
     token_validator: TokenValidator | None = None,
+    telemetry_cfg: TelemetryConfig | None = None,
+    install_source: str | None = None,
 ) -> None:
     """Register Atlas tools on an MCP server.
 
@@ -124,8 +128,19 @@ def register(
             validator first; on `validation.valid is False`, the validator's
             `display_message` is returned to the agent and the handler is NOT
             invoked. Per eng review Issue 3A (no caching).
+        telemetry_cfg: Optional TelemetryConfig. When provided, every
+            `call_tool` invocation fires a mandatory `tool_call` event after
+            the handler completes (whitelisted props only, never PII). PostHog
+            errors are silent — telemetry never crashes the host. Required for
+            the Premise 5 success metric ("instrumented installs we can
+            correlate to Alma-pilot conversations").
+        install_source: Optional install-source tag attached to telemetry
+            events. Examples: "concierge_invite", "direct_pip", "sample_data",
+            "cursor_marketplace". Allows downstream funnel analysis to slice
+            by acquisition channel.
     """
     selected_modules = ATLAS_CATEGORY_MODULES if modules is None else tuple(modules)
+    server_started_at = time.monotonic()
 
     @server.list_tools()
     async def list_tools() -> list[Tool]:
@@ -136,6 +151,9 @@ def register(
         if token_validator is not None:
             validation = token_validator()
             if not validation.valid:
+                _emit_tool_call_event(
+                    telemetry_cfg, name, server_started_at, install_source, outcome="auth_rejected"
+                )
                 return [TextContent(type="text", text=validation.display_message)]
 
         from alma_atlas.application.query.service import require_db_path
@@ -143,12 +161,45 @@ def register(
         try:
             require_db_path(cfg)
         except ValueError as exc:
+            _emit_tool_call_event(
+                telemetry_cfg, name, server_started_at, install_source, outcome="db_unavailable"
+            )
             return [TextContent(type="text", text=str(exc))]
 
         handler = _tool_handlers(selected_modules).get(name)
         if handler is None:
+            _emit_tool_call_event(
+                telemetry_cfg, name, server_started_at, install_source, outcome="unknown_tool"
+            )
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
         result = handler(cfg, arguments)
         if inspect.isawaitable(result):
-            return await result
+            result = await result
+        _emit_tool_call_event(
+            telemetry_cfg, name, server_started_at, install_source, outcome="ok"
+        )
         return result
+
+
+def _emit_tool_call_event(
+    telemetry_cfg: TelemetryConfig | None,
+    tool_name: str,
+    server_started_at: float,
+    install_source: str | None,
+    *,
+    outcome: str,
+) -> None:
+    """Fire one mandatory `tool_call` event. Silent on any error."""
+    if telemetry_cfg is None:
+        return
+    props: dict[str, Any] = {
+        "tool_name": tool_name,
+        "mcp_session_duration_seconds": int(time.monotonic() - server_started_at),
+    }
+    if install_source:
+        props["install_source"] = install_source
+    # `outcome` is not in the mandatory allowlist; sanitization will drop it.
+    # Keep it in the call so a future allowlist expansion picks it up
+    # automatically without a code change here.
+    props["outcome"] = outcome
+    mandatory_event(telemetry_cfg, "tool_call", props)

@@ -19,6 +19,7 @@ from mcp.server import Server
 
 from alma_atlas.config import AtlasConfig
 from alma_atlas.mcp import tools
+from alma_atlas.telemetry import TelemetryConfig
 
 
 def create_server(
@@ -26,6 +27,8 @@ def create_server(
     *,
     modules: Iterable | None = None,
     token_validator: tools.TokenValidator | None = None,
+    telemetry_cfg: TelemetryConfig | None = None,
+    install_source: str | None = None,
 ) -> Server:
     """Create and configure the Alma Atlas MCP server.
 
@@ -39,12 +42,24 @@ def create_server(
             validation. Required when `modules == tools.COMPANION_CATEGORY_MODULES`
             (Companion mode is gated by token); ignored if no validator is
             configured.
+        telemetry_cfg: Optional TelemetryConfig. When provided, the dispatcher
+            fires a `tool_call` mandatory event after each handler completes.
+            Required for Premise 5 success metric measurement.
+        install_source: Optional acquisition-channel tag attached to telemetry
+            events ("concierge_invite", "direct_pip", ...).
 
     Returns:
         Configured MCP Server instance ready to be wired to a transport.
     """
     server = Server("alma-atlas")
 
-    tools.register(server, cfg, modules=modules, token_validator=token_validator)
+    tools.register(
+        server,
+        cfg,
+        modules=modules,
+        token_validator=token_validator,
+        telemetry_cfg=telemetry_cfg,
+        install_source=install_source,
+    )
 
     return server

@@ -59,12 +59,20 @@ def serve(
     from alma_atlas.bootstrap import load_config as get_config
     from alma_atlas.mcp import tools
     from alma_atlas.mcp.server import create_server
+    from alma_atlas.telemetry import telemetry_config_from_env
 
     cfg = get_config()
+    telemetry_cfg = telemetry_config_from_env()
 
     if alma_token is not None:
         token_validator = _build_token_validator(alma_token, alma_endpoint)
         modules = tools.COMPANION_CATEGORY_MODULES
+        install_source = "concierge_invite"
+        # Companion mode is account-correlated: the invite token implies consent
+        # for the opt-in telemetry bucket. Hash the token before sending so the
+        # raw secret never reaches PostHog.
+        telemetry_cfg.opt_in = True
+        telemetry_cfg.alma_account_token = _hash_token(alma_token)
         rprint(
             f"[bold]Atlas Companion[/bold] — transport: [cyan]{transport}[/cyan], "
             f"alma: [cyan]{alma_endpoint}[/cyan]"
@@ -72,9 +80,16 @@ def serve(
     else:
         token_validator = None
         modules = None
+        install_source = "direct_pip"
         rprint(f"[bold]Alma Atlas MCP Server[/bold] — transport: [cyan]{transport}[/cyan]")
 
-    server = create_server(cfg, modules=modules, token_validator=token_validator)
+    server = create_server(
+        cfg,
+        modules=modules,
+        token_validator=token_validator,
+        telemetry_cfg=telemetry_cfg,
+        install_source=install_source,
+    )
 
     if transport == "stdio":
         import asyncio
@@ -121,3 +136,14 @@ def _build_token_validator(token: str, endpoint: str):
         return validate_token(token, endpoint)
 
     return _validate
+
+
+def _hash_token(token: str) -> str:
+    """Stable per-token correlator for telemetry (never sends raw token).
+
+    Uses SHA-256 truncated to 16 hex chars. Same token always produces the
+    same identifier; raw token cannot be recovered from the hash.
+    """
+    import hashlib
+
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
