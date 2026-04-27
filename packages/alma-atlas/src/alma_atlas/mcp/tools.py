@@ -34,6 +34,7 @@ from mcp.types import TextContent, Tool
 from alma_atlas.config import AtlasConfig
 from alma_atlas.mcp import (
     tools_agent,
+    tools_companion,
     tools_contracts,
     tools_lineage,
     tools_meta,
@@ -52,6 +53,7 @@ _CATEGORY_MODULES = (
     tools_contracts,
     tools_meta,
     tools_agent,
+    tools_companion,
 )
 
 

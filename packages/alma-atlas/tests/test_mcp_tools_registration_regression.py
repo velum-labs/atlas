@@ -17,6 +17,7 @@ from alma_atlas.mcp.tools import _tool_handlers, _tool_specs
 # Canonical list of tool names that must be registered. This is the contract
 # external clients (Cursor, Claude Desktop, MCP-curious devs) depend on.
 EXPECTED_TOOL_NAMES = frozenset({
+    # Full Atlas surface (atlas_* prefix)
     "atlas_search",
     "atlas_get_asset",
     "atlas_get_annotations",
@@ -37,6 +38,10 @@ EXPECTED_TOOL_NAMES = frozenset({
     "atlas_define_term",
     "atlas_context",
     "atlas_ask",
+    # Atlas Companion concierge surface (companion_* prefix)
+    "companion_search_assets",
+    "companion_get_schema_and_owner",
+    "companion_explain_lineage_and_contract",
 })
 
 
@@ -79,6 +84,7 @@ def test_no_duplicate_tool_names_across_categories():
     """No two category modules may register the same tool name (would be a silent override)."""
     from alma_atlas.mcp import (
         tools_agent,
+        tools_companion,
         tools_contracts,
         tools_lineage,
         tools_meta,
@@ -87,7 +93,15 @@ def test_no_duplicate_tool_names_across_categories():
     )
 
     seen: dict[str, str] = {}
-    for module in (tools_search, tools_schema, tools_lineage, tools_contracts, tools_meta, tools_agent):
+    for module in (
+        tools_search,
+        tools_schema,
+        tools_lineage,
+        tools_contracts,
+        tools_meta,
+        tools_agent,
+        tools_companion,
+    ):
         for spec in module.specs():
             assert spec.name not in seen, (
                 f"Tool {spec.name!r} registered in both {seen[spec.name]} and {module.__name__}"
