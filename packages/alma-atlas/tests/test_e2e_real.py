@@ -37,7 +37,9 @@ from pathlib import Path
 import pytest
 
 from alma_atlas.config import AgentConfig, AgentProcessConfig, AtlasConfig, LearningConfig, SourceConfig
-from alma_atlas.mcp.tools import _handle_get_annotations, _handle_lineage, _handle_status
+from alma_atlas.mcp.tools_lineage import _handle_lineage
+from alma_atlas.mcp.tools_meta import _handle_status
+from alma_atlas.mcp.tools_schema import _handle_get_annotations
 from alma_atlas.pipeline.learn import (
     get_unannotated_assets,
     get_unlearned_edges,

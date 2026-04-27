@@ -1,9 +1,17 @@
 """CLI command for starting the Alma Atlas MCP server.
 
-Usage:
-    alma-atlas serve                        # Start MCP server on stdio
-    alma-atlas serve --transport sse        # Start MCP server with SSE transport
-    alma-atlas serve --port 8080            # SSE server on a specific port
+Two modes:
+
+    alma-atlas serve                                 # Default: 20 atlas_* tools
+    alma-atlas serve --alma-token <invite>           # Companion: 3 companion_* tools
+
+Companion mode validates the invite token against the Alma deployment
+endpoint on every MCP tool call (per eng review Issue 3A — no caching,
+instant revocation). The token can be passed via `--alma-token` or via the
+`ALMA_INVITE_TOKEN` env var; the endpoint defaults to `https://app.alma.dev`
+and can be overridden via `--alma-endpoint` or `ALMA_ENDPOINT`.
+
+Transport flags (`--transport`, `--port`, `--host`) apply to both modes.
 """
 
 from __future__ import annotations
@@ -15,26 +23,73 @@ from rich import print as rprint
 
 app = typer.Typer(help="Start the Alma Atlas MCP server.")
 
+DEFAULT_ALMA_ENDPOINT = "https://app.alma.dev"
+
 
 @app.callback(invoke_without_command=True)
 def serve(
     ctx: typer.Context,
-    transport: Annotated[str, typer.Option("--transport", "-t", help="MCP transport: stdio or sse.")] = "stdio",
+    transport: Annotated[
+        str, typer.Option("--transport", "-t", help="MCP transport: stdio or sse.")
+    ] = "stdio",
     port: Annotated[int, typer.Option("--port", "-p", help="Port for SSE transport.")] = 8080,
     host: Annotated[str, typer.Option("--host", help="Host for SSE transport.")] = "127.0.0.1",
+    alma_token: Annotated[
+        str | None,
+        typer.Option(
+            "--alma-token",
+            envvar="ALMA_INVITE_TOKEN",
+            help="Run in Atlas Companion mode with the given invite token. "
+            "Validates the token on every MCP tool call.",
+        ),
+    ] = None,
+    alma_endpoint: Annotated[
+        str,
+        typer.Option(
+            "--alma-endpoint",
+            envvar="ALMA_ENDPOINT",
+            help="Alma deployment endpoint to validate invite tokens against.",
+        ),
+    ] = DEFAULT_ALMA_ENDPOINT,
 ) -> None:
     """Start the Alma Atlas MCP server for AI agent integration."""
     if ctx.invoked_subcommand is not None:
         return
 
     from alma_atlas.bootstrap import load_config as get_config
+    from alma_atlas.mcp import tools
     from alma_atlas.mcp.server import create_server
+    from alma_atlas.telemetry import telemetry_config_from_env
 
     cfg = get_config()
+    telemetry_cfg = telemetry_config_from_env()
 
-    rprint(f"[bold]Alma Atlas MCP Server[/bold] — transport: [cyan]{transport}[/cyan]")
+    if alma_token is not None:
+        token_validator = _build_token_validator(alma_token, alma_endpoint)
+        modules = tools.COMPANION_CATEGORY_MODULES
+        install_source = "concierge_invite"
+        # Companion mode is account-correlated: the invite token implies consent
+        # for the opt-in telemetry bucket. Hash the token before sending so the
+        # raw secret never reaches PostHog.
+        telemetry_cfg.opt_in = True
+        telemetry_cfg.alma_account_token = _hash_token(alma_token)
+        rprint(
+            f"[bold]Atlas Companion[/bold] — transport: [cyan]{transport}[/cyan], "
+            f"alma: [cyan]{alma_endpoint}[/cyan]"
+        )
+    else:
+        token_validator = None
+        modules = None
+        install_source = "direct_pip"
+        rprint(f"[bold]Alma Atlas MCP Server[/bold] — transport: [cyan]{transport}[/cyan]")
 
-    server = create_server(cfg)
+    server = create_server(
+        cfg,
+        modules=modules,
+        token_validator=token_validator,
+        telemetry_cfg=telemetry_cfg,
+        install_source=install_source,
+    )
 
     if transport == "stdio":
         import asyncio
@@ -66,3 +121,29 @@ def serve(
     else:
         rprint(f"[red]Unknown transport:[/red] {transport}. Use 'stdio' or 'sse'.")
         raise typer.Exit(1)
+
+
+def _build_token_validator(token: str, endpoint: str):
+    """Build the per-call token validator closure for Companion mode.
+
+    The validator captures `token` and `endpoint` so the dispatcher can call
+    it with no arguments. Imported lazily so non-Companion serve sessions
+    don't pay the import cost.
+    """
+    from alma_atlas.auth.invite_token import validate_token
+
+    def _validate():
+        return validate_token(token, endpoint)
+
+    return _validate
+
+
+def _hash_token(token: str) -> str:
+    """Stable per-token correlator for telemetry (never sends raw token).
+
+    Uses SHA-256 truncated to 16 hex chars. Same token always produces the
+    same identifier; raw token cannot be recovered from the hash.
+    """
+    import hashlib
+
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]

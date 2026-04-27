@@ -494,7 +494,7 @@ class TestRunVerifyDeep:
 class TestAtlasContextHandler:
     @pytest.mark.asyncio
     async def test_handler_returns_json(self, tmp_path):
-        from alma_atlas.mcp.tools import _handle_context
+        from alma_atlas.mcp.tools_agent import _handle_context
 
         cfg = _make_cfg(tmp_path)
         _seed_assets(cfg.db_path)
@@ -505,7 +505,7 @@ class TestAtlasContextHandler:
 
     @pytest.mark.asyncio
     async def test_handler_with_mock_llm(self, tmp_path):
-        from alma_atlas.mcp.tools import _handle_context
+        from alma_atlas.mcp.tools_agent import _handle_context
 
         cfg = _make_cfg(tmp_path, with_agent=True)
         _seed_assets(cfg.db_path)
@@ -528,7 +528,7 @@ class TestAtlasContextHandler:
 class TestAtlasAskHandler:
     @pytest.mark.asyncio
     async def test_handler_returns_json(self, tmp_path):
-        from alma_atlas.mcp.tools import _handle_ask
+        from alma_atlas.mcp.tools_agent import _handle_ask
 
         cfg = _make_cfg(tmp_path)
         _seed_assets(cfg.db_path)
@@ -542,7 +542,7 @@ class TestAtlasVerifyDeepHandler:
     @pytest.mark.asyncio
     async def test_dispatch_verify_deep_flag(self, tmp_path):
         """_dispatch_verify returns a coroutine when deep=True."""
-        from alma_atlas.mcp.tools import _dispatch_verify
+        from alma_atlas.mcp.tools_contracts import _dispatch_verify
 
         cfg = _make_cfg(tmp_path)
         _seed_assets(cfg.db_path)
@@ -555,7 +555,7 @@ class TestAtlasVerifyDeepHandler:
         """_dispatch_verify returns list[TextContent] when deep=False."""
         import inspect
 
-        from alma_atlas.mcp.tools import _dispatch_verify
+        from alma_atlas.mcp.tools_contracts import _dispatch_verify
 
         cfg = _make_cfg(tmp_path)
         _seed_assets(cfg.db_path)
@@ -565,7 +565,7 @@ class TestAtlasVerifyDeepHandler:
 
     @pytest.mark.asyncio
     async def test_deep_verify_calls_agent(self, tmp_path):
-        from alma_atlas.mcp.tools import _handle_verify_deep
+        from alma_atlas.mcp.tools_contracts import _handle_verify_deep
 
         cfg = _make_cfg(tmp_path, with_agent=True)
         _seed_assets(cfg.db_path)

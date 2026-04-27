@@ -6,19 +6,11 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from alma_atlas.config import AtlasConfig
-from alma_atlas.mcp.tools import (
-    _handle_check_contract,
-    _handle_get_asset,
-    _handle_get_query_patterns,
-    _handle_get_schema,
-    _handle_impact,
-    _handle_lineage,
-    _handle_list_violations,
-    _handle_search,
-    _handle_status,
-    _handle_suggest_tables,
-    _handle_team_sync,
-)
+from alma_atlas.mcp.tools_contracts import _handle_check_contract, _handle_list_violations
+from alma_atlas.mcp.tools_lineage import _handle_impact, _handle_lineage
+from alma_atlas.mcp.tools_meta import _handle_get_query_patterns, _handle_status, _handle_team_sync
+from alma_atlas.mcp.tools_schema import _handle_get_asset, _handle_get_schema
+from alma_atlas.mcp.tools_search import _handle_search, _handle_suggest_tables
 from alma_atlas_store.asset_repository import Asset, AssetRepository
 from alma_atlas_store.contract_repository import Contract, ContractRepository
 from alma_atlas_store.db import Database

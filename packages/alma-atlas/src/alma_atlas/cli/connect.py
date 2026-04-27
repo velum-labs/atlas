@@ -408,7 +408,7 @@ def connect_github(
         typer.Option("--base-url", help="GitHub API base URL."),
     ] = "https://api.github.com",
     repo: Annotated[
-        list[str],
+        list[str] | None,
         typer.Option(
             "--repo",
             help="Repository full name (owner/name). Can be repeated.",

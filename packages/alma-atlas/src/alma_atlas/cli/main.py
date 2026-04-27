@@ -11,7 +11,22 @@ from rich import print as rprint
 from rich.console import Console
 
 import alma_atlas
-from alma_atlas.cli import connect, enforce, export, hooks, learn, lineage, scan, search, serve, status, team
+from alma_atlas.cli import (
+    connect,
+    enforce,
+    export,
+    hooks,
+    install,
+    learn,
+    lineage,
+    sample,
+    scan,
+    search,
+    serve,
+    status,
+    team,
+    uninstall,
+)
 
 app = typer.Typer(
     name="alma-atlas",
@@ -32,6 +47,9 @@ app.add_typer(enforce.app, name="enforce")
 app.add_typer(learn.app, name="learn")
 app.add_typer(team.app, name="team")
 app.add_typer(hooks.app, name="hooks")
+app.add_typer(install.app, name="install")
+app.add_typer(uninstall.app, name="uninstall")
+app.add_typer(sample.app, name="sample")
 
 console = Console()
 

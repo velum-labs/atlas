@@ -92,10 +92,13 @@ class TestUpsertAssets:
             MockRepo.return_value.list_all.return_value = assets
 
             async with ObservatoryBridge("http://obs:8000") as bridge:
-                bridge._call_rpc = AsyncMock(return_value={})
-                count = await bridge.upsert_assets_from_db(db, target_id="t1")
+                # upsert_assets_from_db now returns dict[atlas_id -> obs_uuid]
+                # (commit 061bfb3); the mocked RPC must return an "id" so the
+                # id_map gets populated.
+                bridge._call_rpc = AsyncMock(side_effect=lambda _name, payload: {"id": f"obs-{payload['asset']['canonicalName']}"})
+                id_map = await bridge.upsert_assets_from_db(db, target_id="t1")
 
-        assert count == 3
+        assert len(id_map) == 3
         assert bridge._call_rpc.call_count == 3
         for i, call in enumerate(bridge._call_rpc.call_args_list):
             assert call[0][0] == "UpsertAsset"
@@ -116,9 +119,9 @@ class TestUpsertAssets:
 
             async with ObservatoryBridge("http://obs:8000") as bridge:
                 bridge._call_rpc = AsyncMock(return_value={})
-                count = await bridge.upsert_assets_from_db(db, target_id="t1")
+                id_map = await bridge.upsert_assets_from_db(db, target_id="t1")
 
-        assert count == 0
+        assert id_map == {}
         bridge._call_rpc.assert_not_called()
 
 
